@@ -1,0 +1,15 @@
+{
+  "name": "syncnote-monorepo",
+  "version": "1.0.0",
+  "description": "SyncNote: An Offline-First Intelligent Knowledge Management Platform with AI-Assisted Semantic Synchronization",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n \"SERVER,CLIENT\" -c \"cyan,magenta\" \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "install:all": "npm install && npm install --prefix server && npm install --prefix client",
+    "server": "npm run dev --prefix server",
+    "client": "npm run dev --prefix client"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
