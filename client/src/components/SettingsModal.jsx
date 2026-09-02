@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Settings, X, Command, Database, Moon, Sun, Monitor, Type, HardDrive, Copy, Check, Palette } from 'lucide-react';
+import { apiClient } from '../api/apiClient';
 
 export default function SettingsModal({ 
   isOpen, 
@@ -19,8 +20,7 @@ export default function SettingsModal({
   // Fetch dynamic storage location from backend API
   useEffect(() => {
     if (isOpen) {
-      fetch('/api/health')
-        .then((res) => (res.ok ? res.json() : null))
+      apiClient.get('/api/health')
         .then((data) => {
           if (data && data.notes_dir) {
             setStoragePath(data.notes_dir);

@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import GraphControls from './GraphControls';
 import { parseKnowledgeGraph } from '../utils/graphParser';
 import { Share2, Plus, Sparkles } from 'lucide-react';
@@ -18,6 +18,17 @@ export default function KnowledgeGraph({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [searchQuery, setSearchQuery] = useState('');
 
+  // Synchronized Refs to avoid recreating animation frames / re-renders
+  const zoomRef = useRef(zoom);
+  const panRef = useRef(pan);
+  const searchQueryRef = useRef(searchQuery);
+  const selectedNoteIdRef = useRef(selectedNoteId);
+
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  useEffect(() => { panRef.current = pan; }, [pan]);
+  useEffect(() => { searchQueryRef.current = searchQuery; }, [searchQuery]);
+  useEffect(() => { selectedNoteIdRef.current = selectedNoteId; }, [selectedNoteId]);
+
   // Interactive Graph Data State
   const nodesRef = useRef([]);
   const edgesRef = useRef([]);
@@ -29,48 +40,69 @@ export default function KnowledgeGraph({
   const isDraggingCanvasRef = useRef(false);
   const lastMousePosRef = useRef({ x: 0, y: 0 });
 
-  // Filter out temporary draft notes
-  const persistentNotes = notes.filter((n) => n.id !== 'draft');
+  // Memoize persistent notes to maintain stable reference across renders
+  const persistentNotes = useMemo(() => notes.filter((n) => n.id !== 'draft'), [notes]);
 
-  // 1. Initialize & Update Graph Physics Data
-  const initGraph = useCallback(() => {
-    const { nodes, edges, adjacencyMap } = parseKnowledgeGraph(persistentNotes);
+  // Base graph parsing (single source of truth)
+  const baseGraphData = useMemo(() => {
+    return parseKnowledgeGraph(persistentNotes);
+  }, [persistentNotes]);
 
+  // Filtered visible nodes & edges (search/filtering)
+  const { visibleNodes, visibleEdges } = useMemo(() => {
+    const { nodes, edges } = baseGraphData;
+    if (!searchQuery.trim()) {
+      return { visibleNodes: nodes, visibleEdges: edges };
+    }
+    const q = searchQuery.trim().toLowerCase();
+    const matchedNodes = nodes.filter((n) => n.title.toLowerCase().includes(q));
+    const matchedNodeIds = new Set(matchedNodes.map((n) => n.id));
+    const matchedEdges = edges.filter(
+      (e) => matchedNodeIds.has(e.source) && matchedNodeIds.has(e.target)
+    );
+    return { visibleNodes: matchedNodes, visibleEdges: matchedEdges };
+  }, [baseGraphData, searchQuery]);
+
+  // Synchronize canvas animation physics data with derived visible graph
+  useEffect(() => {
     const prevPosMap = new Map();
-    nodesRef.current.forEach((n) => prevPosMap.set(n.id, { x: n.x, y: n.y }));
+    (nodesRef.current || []).forEach((n) => prevPosMap.set(n.id, { x: n.x, y: n.y }));
 
     const canvas = canvasRef.current;
     const width = canvas ? canvas.clientWidth : 800;
     const height = canvas ? canvas.clientHeight : 600;
 
-    nodes.forEach((node, index) => {
+    const populatedNodes = visibleNodes.map((node, index) => {
       const prev = prevPosMap.get(node.id);
       if (prev) {
-        node.x = prev.x;
-        node.y = prev.y;
+        return { ...node, x: prev.x, y: prev.y };
       } else {
-        const angle = (index / Math.max(nodes.length, 1)) * Math.PI * 2;
+        const angle = (index / Math.max(visibleNodes.length, 1)) * Math.PI * 2;
         const radius = Math.min(width, height) * 0.22;
-        node.x = Math.cos(angle) * radius + (Math.random() - 0.5) * 30;
-        node.y = Math.sin(angle) * radius + (Math.random() - 0.5) * 30;
+        return {
+          ...node,
+          x: Math.cos(angle) * radius + (Math.random() - 0.5) * 30,
+          y: Math.sin(angle) * radius + (Math.random() - 0.5) * 30
+        };
       }
     });
 
-    nodesRef.current = nodes;
-    edgesRef.current = edges;
-    adjacencyRef.current = adjacencyMap;
+    nodesRef.current = populatedNodes;
+    edgesRef.current = visibleEdges;
+    adjacencyRef.current = baseGraphData.adjacencyMap;
+  }, [visibleNodes, visibleEdges, baseGraphData.adjacencyMap]);
 
-    if (focusNoteId) {
-      const focusNode = nodes.find((n) => n.id === focusNoteId);
-      if (focusNode) {
-        setPan({ x: -focusNode.x * zoom, y: -focusNode.y * zoom });
-      }
-    }
-  }, [persistentNotes, focusNoteId, zoom]);
-
+  // Separate effect to focus camera on specific note without triggering render loop
+  const focusedNoteRef = useRef(null);
   useEffect(() => {
-    initGraph();
-  }, [notes, initGraph]);
+    if (!focusNoteId || focusedNoteRef.current === focusNoteId) return;
+    focusedNoteRef.current = focusNoteId;
+    const focusNode = nodesRef.current.find((n) => n.id === focusNoteId);
+    if (focusNode) {
+      const curZoom = zoomRef.current;
+      setPan({ x: -focusNode.x * curZoom, y: -focusNode.y * curZoom });
+    }
+  }, [focusNoteId]);
 
   // 2. Physics Simulation Tick (Stable Damping)
   const stepPhysics = () => {
@@ -143,118 +175,125 @@ export default function KnowledgeGraph({
     });
   };
 
-  // 3. Canvas Render Loop with Dynamic CSS Design Tokens
-  const renderCanvas = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-
-    // Read Dynamic Theme CSS Tokens
-    const computedStyle = getComputedStyle(document.documentElement);
-    const bgColor = computedStyle.getPropertyValue('--bg-app').trim() || '#09090b';
-    const edgeColor = computedStyle.getPropertyValue('--border-subtle').trim() || '#27272a';
-    const accentPrimary = computedStyle.getPropertyValue('--accent-primary').trim() || '#6366f1';
-    const textPrimary = computedStyle.getPropertyValue('--text-primary').trim() || '#fafafa';
-    const textSecondary = computedStyle.getPropertyValue('--text-secondary').trim() || '#a1a1aa';
-    const textMuted = computedStyle.getPropertyValue('--text-muted').trim() || '#71717a';
-
-    ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, width, height);
-
-    ctx.save();
-    ctx.translate(width / 2 + pan.x, height / 2 + pan.y);
-    ctx.scale(zoom, zoom);
-
-    stepPhysics();
-
-    const nodes = nodesRef.current;
-    const edges = edgesRef.current;
-    const hoveredNode = hoveredNodeRef.current;
-    const adjacencies = hoveredNode ? (adjacencyRef.current[hoveredNode.id] || new Set()) : new Set();
-
-    const searchMatchSet = new Set();
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      nodes.forEach((n) => {
-        if (n.title.toLowerCase().includes(q)) searchMatchSet.add(n.id);
-      });
-    }
-
-    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-
-    // Render Edges
-    edges.forEach((edge) => {
-      const n1 = nodeMap.get(edge.source);
-      const n2 = nodeMap.get(edge.target);
-      if (!n1 || !n2) return;
-
-      const isHighlighted =
-        hoveredNode && (edge.source === hoveredNode.id || edge.target === hoveredNode.id);
-
-      ctx.beginPath();
-      ctx.moveTo(n1.x, n1.y);
-      ctx.lineTo(n2.x, n2.y);
-      ctx.strokeStyle = isHighlighted ? accentPrimary : edgeColor;
-      ctx.lineWidth = isHighlighted ? 2.5 / zoom : 1 / zoom;
-      ctx.stroke();
-    });
-
-    // Render Nodes (Isolated or Linked)
-    nodes.forEach((n) => {
-      const isHovered = hoveredNode?.id === n.id;
-      const isSelected = selectedNoteId === n.id;
-      const isNeighbor = hoveredNode && adjacencies.has(n.id);
-      const isSearchMatch = searchMatchSet.has(n.id);
-
-      const radius = Math.min(7 + n.degree * 1.5, 15);
-
-      ctx.beginPath();
-      ctx.arc(n.x, n.y, radius, 0, Math.PI * 2);
-
-      if (isHovered || isSelected || isSearchMatch) {
-        ctx.fillStyle = accentPrimary;
-      } else if (isNeighbor) {
-        ctx.fillStyle = textPrimary;
-      } else {
-        ctx.fillStyle = textMuted;
-      }
-
-      ctx.fill();
-
-      if (isSelected || isSearchMatch) {
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, radius + 4, 0, Math.PI * 2);
-        ctx.strokeStyle = accentPrimary;
-        ctx.lineWidth = 1.5 / zoom;
-        ctx.stroke();
-      }
-
-      ctx.font = `${isHovered || isSelected ? '600' : '500'} ${12 / Math.max(zoom, 0.8)}px Inter, sans-serif`;
-      ctx.fillStyle = isHovered || isSelected || isNeighbor || isSearchMatch ? textPrimary : textSecondary;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillText(n.title, n.x, n.y + radius + 5);
-    });
-
-    ctx.restore();
-
-    animRef.current = requestAnimationFrame(renderCanvas);
-  }, [pan, zoom, selectedNoteId, searchQuery]);
-
+  // 3. Stable Animation Frame Loop Reading from Refs
   useEffect(() => {
-    animRef.current = requestAnimationFrame(renderCanvas);
-    return () => {
-      if (animRef.current) cancelAnimationFrame(animRef.current);
+    let animationFrameId;
+
+    const renderLoop = () => {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+
+        const curZoom = zoomRef.current;
+        const curPan = panRef.current;
+        const curQuery = searchQueryRef.current;
+        const curSelectedId = selectedNoteIdRef.current;
+
+        // Read Dynamic Theme CSS Tokens
+        const computedStyle = getComputedStyle(document.documentElement);
+        const bgColor = computedStyle.getPropertyValue('--bg-app').trim() || '#09090b';
+        const edgeColor = computedStyle.getPropertyValue('--border-subtle').trim() || '#27272a';
+        const accentPrimary = computedStyle.getPropertyValue('--accent-primary').trim() || '#6366f1';
+        const textPrimary = computedStyle.getPropertyValue('--text-primary').trim() || '#fafafa';
+        const textSecondary = computedStyle.getPropertyValue('--text-secondary').trim() || '#a1a1aa';
+        const textMuted = computedStyle.getPropertyValue('--text-muted').trim() || '#71717a';
+
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.save();
+        ctx.translate(width / 2 + curPan.x, height / 2 + curPan.y);
+        ctx.scale(curZoom, curZoom);
+
+        stepPhysics();
+
+        const nodes = nodesRef.current;
+        const edges = edgesRef.current;
+        const hoveredNode = hoveredNodeRef.current;
+        const adjacencies = hoveredNode ? (adjacencyRef.current[hoveredNode.id] || new Set()) : new Set();
+
+        const searchMatchSet = new Set();
+        if (curQuery.trim()) {
+          const q = curQuery.toLowerCase();
+          nodes.forEach((n) => {
+            if (n.title.toLowerCase().includes(q)) searchMatchSet.add(n.id);
+          });
+        }
+
+        const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+        // Render Edges
+        edges.forEach((edge) => {
+          const n1 = nodeMap.get(edge.source);
+          const n2 = nodeMap.get(edge.target);
+          if (!n1 || !n2) return;
+
+          const isHighlighted =
+            hoveredNode && (edge.source === hoveredNode.id || edge.target === hoveredNode.id);
+
+          ctx.beginPath();
+          ctx.moveTo(n1.x, n1.y);
+          ctx.lineTo(n2.x, n2.y);
+          ctx.strokeStyle = isHighlighted ? accentPrimary : edgeColor;
+          ctx.lineWidth = isHighlighted ? 2.5 / curZoom : 1 / curZoom;
+          ctx.stroke();
+        });
+
+        // Render Nodes
+        nodes.forEach((n) => {
+          const isHovered = hoveredNode?.id === n.id;
+          const isSelected = curSelectedId === n.id;
+          const isNeighbor = hoveredNode && adjacencies.has(n.id);
+          const isSearchMatch = searchMatchSet.has(n.id);
+
+          const radius = Math.min(7 + n.degree * 1.5, 15);
+
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, radius, 0, Math.PI * 2);
+
+          if (isHovered || isSelected || isSearchMatch) {
+            ctx.fillStyle = accentPrimary;
+          } else if (isNeighbor) {
+            ctx.fillStyle = textPrimary;
+          } else {
+            ctx.fillStyle = textMuted;
+          }
+
+          ctx.fill();
+
+          if (isSelected || isSearchMatch) {
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, radius + 4, 0, Math.PI * 2);
+            ctx.strokeStyle = accentPrimary;
+            ctx.lineWidth = 1.5 / curZoom;
+            ctx.stroke();
+          }
+
+          ctx.font = `${isHovered || isSelected ? '600' : '500'} ${12 / Math.max(curZoom, 0.8)}px Inter, sans-serif`;
+          ctx.fillStyle = isHovered || isSelected || isNeighbor || isSearchMatch ? textPrimary : textSecondary;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(n.title, n.x, n.y + radius + 5);
+        });
+
+        ctx.restore();
+      }
+
+      animationFrameId = requestAnimationFrame(renderLoop);
     };
-  }, [renderCanvas]);
+
+    animationFrameId = requestAnimationFrame(renderLoop);
+    return () => {
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    };
+  }, []);
 
   const getCanvasMousePos = (e) => {
     const canvas = canvasRef.current;
@@ -263,8 +302,11 @@ export default function KnowledgeGraph({
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
 
-    const worldX = (mouseX - canvas.clientWidth / 2 - pan.x) / zoom;
-    const worldY = (mouseY - canvas.clientHeight / 2 - pan.y) / zoom;
+    const curZoom = zoomRef.current;
+    const curPan = panRef.current;
+
+    const worldX = (mouseX - canvas.clientWidth / 2 - curPan.x) / curZoom;
+    const worldY = (mouseY - canvas.clientHeight / 2 - curPan.y) / curZoom;
 
     return { worldX, worldY, screenX: e.clientX, screenY: e.clientY, mouseX, mouseY, width: canvas.clientWidth, height: canvas.clientHeight };
   };
@@ -326,7 +368,7 @@ export default function KnowledgeGraph({
       const dx = draggedNodeRef.current.x - worldX;
       const dy = draggedNodeRef.current.y - worldY;
       if (Math.sqrt(dx * dx + dy * dy) <= radius + 4) {
-        onSelectNote(draggedNodeRef.current.id);
+        if (onSelectNote) onSelectNote(draggedNodeRef.current.id);
       }
     }
 
@@ -334,20 +376,21 @@ export default function KnowledgeGraph({
     isDraggingCanvasRef.current = false;
   };
 
-  // Smooth Cursor-Centered Mouse Wheel & Pinch Zoom
   const handleWheel = (e) => {
     e.preventDefault();
     const { mouseX, mouseY, width, height } = getCanvasMousePos(e);
 
     const delta = -e.deltaY;
     let factor = delta > 0 ? 1.08 : 0.92;
-    if (e.ctrlKey) factor = delta > 0 ? 1.04 : 0.96; // Trackpad pinch
+    if (e.ctrlKey) factor = delta > 0 ? 1.04 : 0.96;
 
-    const newZoom = Math.min(Math.max(zoom * factor, 0.25), 4.0);
+    const curZoom = zoomRef.current;
+    const curPan = panRef.current;
 
-    // Pivot world point under mouse position
-    const worldX = (mouseX - width / 2 - pan.x) / zoom;
-    const worldY = (mouseY - height / 2 - pan.y) / zoom;
+    const newZoom = Math.min(Math.max(curZoom * factor, 0.25), 4.0);
+
+    const worldX = (mouseX - width / 2 - curPan.x) / curZoom;
+    const worldY = (mouseY - height / 2 - curPan.y) / curZoom;
 
     const newPanX = mouseX - width / 2 - worldX * newZoom;
     const newPanY = mouseY - height / 2 - worldY * newZoom;
@@ -370,7 +413,6 @@ export default function KnowledgeGraph({
     setSearchQuery('');
   };
 
-  // Fit View: Calculates Bounding Box of all nodes and centers/scales view
   const handleFitGraph = () => {
     const nodes = nodesRef.current;
     if (nodes.length === 0) {
@@ -405,8 +447,8 @@ export default function KnowledgeGraph({
     setPan({ x: -centerX * fitZoom, y: -centerY * fitZoom });
   };
 
-  const totalNodes = nodesRef.current.length;
-  const totalEdges = edgesRef.current.length;
+  const totalNodes = visibleNodes.length;
+  const totalEdges = visibleEdges.length;
   const hasZeroNotes = persistentNotes.length === 0;
 
   return (
@@ -429,7 +471,6 @@ export default function KnowledgeGraph({
         onFitGraph={handleFitGraph}
       />
 
-      {/* Info Badge (Bottom Left) */}
       <div className="graph-info-badge">
         <Share2 size={12} />
         <span>{totalNodes} Notes</span>
@@ -437,7 +478,6 @@ export default function KnowledgeGraph({
         <span>{totalEdges} Connections</span>
       </div>
 
-      {/* Subtle Hint Bar: Shown ONLY when notes exist but have no links yet */}
       {!hasZeroNotes && totalEdges === 0 && (
         <div className="graph-subtle-hint">
           <Sparkles size={12} style={{ color: 'var(--accent-primary)' }} />
@@ -445,7 +485,6 @@ export default function KnowledgeGraph({
         </div>
       )}
 
-      {/* Empty State: Only when zero notes exist in workspace */}
       {hasZeroNotes && (
         <div className="empty-graph-overlay">
           <div style={{ maxWidth: '320px', textAlign: 'center', background: 'var(--bg-sidebar)', border: '1px solid var(--border-medium)', padding: '20px', borderRadius: 'var(--radius-md)' }}>

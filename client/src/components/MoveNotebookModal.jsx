@@ -1,83 +1,85 @@
 import React, { useState, useEffect } from 'react';
-import { Folder, X } from 'lucide-react';
+import { Folder, X, BookOpen } from 'lucide-react';
+import CustomSelect from './CustomSelect';
 
 export default function MoveNotebookModal({ isOpen, note, notebooks = [], onMove, onCancel }) {
-  const [selectedNotebookId, setSelectedNotebookId] = useState('');
+  const [selectedNotebookId, setSelectedNotebookId] = useState('none');
 
   useEffect(() => {
-    if (note) {
-      setSelectedNotebookId(note.notebook_id || '');
+    if (isOpen) {
+      if (note) {
+        setSelectedNotebookId(note.notebook_id || 'none');
+      }
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
     }
-  }, [note, isOpen]);
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        onCancel();
+      }
+    };
+
+    if (isOpen) {
+      window.addEventListener('keydown', handleKeyDown);
+    }
+
+    return () => {
+      document.body.style.overflow = '';
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [note, isOpen, onCancel]);
 
   if (!isOpen || !note) return null;
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    onMove(note.id, selectedNotebookId || null);
+    const finalNotebookId = selectedNotebookId === 'none' ? null : selectedNotebookId;
+    onMove(note.id, finalNotebookId);
   };
 
+  const notebookOptions = [
+    { value: 'none', label: 'Unassigned', icon: <BookOpen size={13} /> },
+    ...notebooks.map((nb) => ({
+      value: nb.id,
+      label: nb.name,
+      icon: <Folder size={13} style={{ color: 'var(--accent-primary)' }} />
+    }))
+  ];
+
   return (
-    <div className="modal-overlay">
-      <div className="modal-container">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)', fontSize: '0.9rem', fontWeight: 600 }}>
-            <Folder size={16} />
-            <span>Move Note to Notebook</span>
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Folder size={16} style={{ color: 'var(--accent-primary)' }} />
+            <h3 className="modal-title">Move Note to Notebook</h3>
           </div>
-          <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }} onClick={onCancel}>
-            <X size={14} />
+          <button className="icon-btn-ghost" onClick={onCancel} title="Close (Esc)" type="button">
+            <X size={15} />
           </button>
         </div>
 
-        <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-          Moving <strong style={{ color: 'var(--text-primary)' }}>"{note.title || 'Untitled Note'}"</strong> will relocate its physical <code className="md-inline-code">.md</code> file on disk.
-        </p>
+        <form onSubmit={handleSubmit} className="modal-body">
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
+            Moving <strong style={{ color: 'var(--text-primary)' }}>"{note.title || 'Untitled Note'}"</strong> will relocate its physical <code className="md-inline-code">.md</code> file on disk.
+          </p>
 
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <select
-            className="search-input"
-            style={{ padding: '8px 12px', borderRadius: 'var(--radius-sm)', outline: 'none' }}
-            value={selectedNotebookId}
-            onChange={(e) => setSelectedNotebookId(e.target.value)}
-          >
-            <option value="">Unassigned (General Notes)</option>
-            {notebooks.map((nb) => (
-              <option key={nb.id} value={nb.id}>
-                {nb.name} ({nb.note_count || 0} notes)
-              </option>
-            ))}
-          </select>
+          <div className="form-group">
+            <label className="form-label">Notebook / Folder</label>
+            <CustomSelect
+              value={selectedNotebookId}
+              options={notebookOptions}
+              onChange={setSelectedNotebookId}
+            />
+          </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px' }}>
-            <button 
-              type="button" 
-              onClick={onCancel}
-              style={{
-                background: 'transparent',
-                border: '1px solid var(--border-subtle)',
-                color: 'var(--text-primary)',
-                padding: '5px 12px',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: '0.78rem',
-                cursor: 'pointer'
-              }}
-            >
+          <div className="modal-footer">
+            <button type="button" className="secondary-action-btn" onClick={onCancel}>
               Cancel
             </button>
-            <button 
-              type="submit" 
-              style={{
-                background: 'var(--text-primary)',
-                border: 'none',
-                color: 'var(--bg-app)',
-                padding: '5px 12px',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: '0.78rem',
-                fontWeight: 600,
-                cursor: 'pointer'
-              }}
-            >
+            <button type="submit" className="primary-action-btn">
               Move File
             </button>
           </div>

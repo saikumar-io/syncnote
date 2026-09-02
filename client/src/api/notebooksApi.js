@@ -1,43 +1,24 @@
-// Frontend API helper for SyncNote Notebooks API
+import { apiClient } from './apiClient';
 
 const API_BASE = '/api/notebooks';
 
 export const notebooksApi = {
   async getAll() {
-    const res = await fetch(API_BASE);
-    if (!res.ok) throw new Error(`Error ${res.status}: Failed to fetch notebooks`);
-    const data = await res.json();
-    return data.data || [];
+    const data = await apiClient.get(API_BASE);
+    return data?.data || [];
   },
 
   async create(name) {
-    const res = await fetch(API_BASE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) throw new Error(`Error ${res.status}: Failed to create notebook`);
-    const data = await res.json();
-    return data.data;
+    const data = await apiClient.post(API_BASE, { name });
+    return data?.data;
   },
 
   async rename(id, name) {
-    const res = await fetch(`${API_BASE}/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) throw new Error(`Error ${res.status}: Failed to rename notebook`);
-    const data = await res.json();
-    return data.data;
+    const data = await apiClient.put(`${API_BASE}/${id}`, { name });
+    return data?.data;
   },
 
   async delete(id) {
-    const res = await fetch(`${API_BASE}/${id}`, {
-      method: 'DELETE',
-    });
-    if (!res.ok) throw new Error(`Error ${res.status}: Failed to delete notebook`);
-    const data = await res.json();
-    return data;
+    return apiClient.delete(`${API_BASE}/${id}`);
   }
 };

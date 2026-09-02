@@ -1,22 +1,48 @@
+# Dependencies
 node_modules/
+**/node_modules/
+
+# Environment Files & Secrets
 .env
 .env.*
 !.env.example
+!.env.secrets.example
+server/.env
+server/.env.*
+!server/.env.example
+!server/.env.secrets.example
+client_secret_*.json
+*.json.secret
+*.pem
+*.key
 
+# Build outputs
 dist/
 build/
 .next/
 .vite/
 
+# Local Database & Data Storage
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
+data/
+**/data/
+notes/
+**/notes/
 
+# Cache & Logs
 .cache/
 coverage/
+logs/
+*.log
 
+# OS & Editor temporary files
 .DS_Store
 Thumbs.db
-
-data/
-notes/
+.idea/
+.vscode/
+*.suo
+*.user

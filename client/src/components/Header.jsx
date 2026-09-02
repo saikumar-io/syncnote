@@ -29,22 +29,27 @@ export default function Header({
         <kbd className="kbd-badge">Ctrl K</kbd>
       </div>
 
-      {/* Sync Status Badge */}
+      {/* Dual Sync Architecture Badges */}
       <div className="header-actions">
-        <div className="sync-status-badge">
-          <div className="sync-dot" />
-          <span>Saved locally</span>
+        <div 
+          className="sync-status-badge" 
+          title="Google Drive Cloud Sync"
+          style={{ background: 'rgba(59, 130, 246, 0.08)', borderColor: 'rgba(59, 130, 246, 0.25)', color: 'var(--accent-primary)' }}
+        >
+          <span>☁ Google Sync</span>
         </div>
 
         <div 
           className="sync-status-badge" 
-          style={{ 
-            borderColor: apiConnected ? 'var(--border-subtle)' : 'var(--accent-danger)', 
-            color: apiConnected ? 'var(--text-secondary)' : 'var(--accent-danger)',
-            background: 'transparent'
-          }}
+          title="Encrypted P2P LAN Sync"
+          style={{ background: 'rgba(16, 185, 129, 0.08)', borderColor: 'rgba(16, 185, 129, 0.25)', color: 'var(--accent-emerald)' }}
         >
-          <span>{apiConnected ? 'SQLite' : 'Offline'}</span>
+          <span>↔ LAN Sync</span>
+        </div>
+
+        <div className="sync-status-badge">
+          <div className="sync-dot" />
+          <span>Local SQLite</span>
         </div>
       </div>
     </header>

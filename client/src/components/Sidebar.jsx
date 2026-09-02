@@ -48,7 +48,7 @@ export default function Sidebar({
         {/* Action: New Note Button */}
         <button className="new-note-btn" onClick={onCreateNote} style={{ marginBottom: '8px' }}>
           <Plus size={13} />
-          <span>+ New Note</span>
+          <span>New Note</span>
         </button>
 
         <div className="nav-group">

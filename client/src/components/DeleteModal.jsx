@@ -1,56 +1,63 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 
-export default function DeleteModal({ isOpen, title, itemType, onConfirm, onCancel }) {
+export default function DeleteModal({ isOpen, title, itemType = 'Note', onConfirm, onCancel }) {
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        onCancel();
+      }
+    };
+
+    if (isOpen) {
+      window.addEventListener('keydown', handleKeyDown);
+    }
+
+    return () => {
+      document.body.style.overflow = '';
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen, onCancel]);
+
   if (!isOpen) return null;
 
   return (
-    <div className="modal-overlay">
-      <div className="modal-container">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--accent-danger)', fontSize: '0.9rem', fontWeight: 600 }}>
-            <AlertTriangle size={16} />
-            <span>Delete {itemType}</span>
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <AlertTriangle size={16} style={{ color: 'var(--accent-danger)' }} />
+            <h3 className="modal-title" style={{ color: 'var(--accent-danger)' }}>Delete {itemType}</h3>
           </div>
-          <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }} onClick={onCancel}>
-            <X size={14} />
+          <button className="icon-btn-ghost" onClick={onCancel} title="Close (Esc)" type="button">
+            <X size={15} />
           </button>
         </div>
-        
-        <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-          Are you sure you want to delete <strong style={{ color: 'var(--text-primary)' }}>"{title}"</strong>? This will permanently remove the Markdown file.
-        </p>
 
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' }}>
-          <button 
-            onClick={onCancel}
-            style={{
-              background: 'transparent',
-              border: '1px solid var(--border-subtle)',
-              color: 'var(--text-primary)',
-              padding: '5px 12px',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: '0.78rem',
-              cursor: 'pointer'
-            }}
-          >
-            Cancel
-          </button>
-          <button 
-            onClick={onConfirm}
-            style={{
-              background: 'var(--accent-danger)',
-              border: 'none',
-              color: '#ffffff',
-              padding: '5px 12px',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: '0.78rem',
-              fontWeight: 600,
-              cursor: 'pointer'
-            }}
-          >
-            Delete
-          </button>
+        <div className="modal-body">
+          <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>
+            Are you sure you want to delete <strong style={{ color: 'var(--text-primary)' }}>"{title}"</strong>? This will permanently remove the Markdown file from disk and SQLite history.
+          </p>
+
+          <div className="modal-footer">
+            <button type="button" className="secondary-action-btn" onClick={onCancel}>
+              Cancel
+            </button>
+            <button 
+              type="button" 
+              className="primary-action-btn" 
+              onClick={onConfirm}
+              style={{ background: 'var(--accent-danger)', borderColor: 'var(--accent-danger)', color: '#ffffff' }}
+            >
+              Delete
+            </button>
+          </div>
         </div>
       </div>
     </div>

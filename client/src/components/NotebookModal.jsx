@@ -5,8 +5,28 @@ export default function NotebookModal({ isOpen, initialName = '', isEditing = fa
   const [name, setName] = useState('');
 
   useEffect(() => {
-    setName(initialName);
-  }, [initialName, isOpen]);
+    if (isOpen) {
+      setName(initialName);
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        onCancel();
+      }
+    };
+
+    if (isOpen) {
+      window.addEventListener('keydown', handleKeyDown);
+    }
+
+    return () => {
+      document.body.style.overflow = '';
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen, initialName, onCancel]);
 
   if (!isOpen) return null;
 
@@ -19,59 +39,37 @@ export default function NotebookModal({ isOpen, initialName = '', isEditing = fa
   };
 
   return (
-    <div className="modal-overlay">
-      <div className="modal-container">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)', fontSize: '0.9rem', fontWeight: 600 }}>
-            <BookOpen size={16} />
-            <span>{isEditing ? 'Rename Notebook' : 'Create Notebook'}</span>
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <BookOpen size={16} style={{ color: 'var(--accent-primary)' }} />
+            <h3 className="modal-title">{isEditing ? 'Rename Notebook' : 'Create Notebook'}</h3>
           </div>
-          <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }} onClick={onCancel}>
-            <X size={14} />
+          <button className="icon-btn-ghost" onClick={onCancel} title="Close (Esc)" type="button">
+            <X size={15} />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <input
-            type="text"
-            className="search-input"
-            style={{ borderRadius: 'var(--radius-sm)', padding: '8px 12px' }}
-            placeholder="Notebook Name (e.g. Research, Project, Ideas)..."
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            autoFocus
-          />
+        <form onSubmit={handleSubmit} className="modal-body">
+          <div className="form-group">
+            <label className="form-label">Notebook Name</label>
+            <input
+              type="text"
+              className="modal-input"
+              placeholder="e.g. Research, Projects, BTech Proj..."
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoFocus
+            />
+          </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px' }}>
-            <button 
-              type="button" 
-              onClick={onCancel}
-              style={{
-                background: 'transparent',
-                border: '1px solid var(--border-subtle)',
-                color: 'var(--text-primary)',
-                padding: '5px 12px',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: '0.78rem',
-                cursor: 'pointer'
-              }}
-            >
+          <div className="modal-footer">
+            <button type="button" className="secondary-action-btn" onClick={onCancel}>
               Cancel
             </button>
-            <button 
-              type="submit" 
-              style={{
-                background: 'var(--text-primary)',
-                border: 'none',
-                color: 'var(--bg-app)',
-                padding: '5px 12px',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: '0.78rem',
-                fontWeight: 600,
-                cursor: 'pointer'
-              }}
-            >
-              {isEditing ? 'Save' : 'Create'}
+            <button type="submit" className="primary-action-btn">
+              {isEditing ? 'Save Changes' : 'Create Notebook'}
             </button>
           </div>
         </form>

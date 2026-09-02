@@ -1,55 +1,72 @@
-// Frontend API helper functions for SyncNote SQLite REST API
+import { apiClient } from './apiClient';
 
 const API_BASE = '/api/notes';
 
 export const notesApi = {
-  // Fetch all notes from SQLite backend
   async getAll() {
-    const res = await fetch(API_BASE);
-    if (!res.ok) throw new Error(`Error ${res.status}: Failed to fetch notes`);
-    const data = await res.json();
-    return data.data || [];
+    const data = await apiClient.get(API_BASE);
+    return data?.data || [];
   },
 
-  // Fetch single note by ID
   async getById(id) {
-    const res = await fetch(`${API_BASE}/${id}`);
-    if (!res.ok) throw new Error(`Error ${res.status}: Failed to fetch note`);
-    const data = await res.json();
-    return data.data;
+    const data = await apiClient.get(`${API_BASE}/${id}`);
+    return data?.data;
   },
 
-  // Create new note
   async create(notePayload = { title: 'Untitled Note', content: '' }) {
-    const res = await fetch(API_BASE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(notePayload),
-    });
-    if (!res.ok) throw new Error(`Error ${res.status}: Failed to create note`);
-    const data = await res.json();
-    return data.data;
+    const data = await apiClient.post(API_BASE, notePayload);
+    return data?.data;
   },
 
-  // Update existing note
   async update(id, notePayload) {
-    const res = await fetch(`${API_BASE}/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(notePayload),
-    });
-    if (!res.ok) throw new Error(`Error ${res.status}: Failed to update note`);
-    const data = await res.json();
-    return data.data;
+    const data = await apiClient.put(`${API_BASE}/${id}`, notePayload);
+    return data?.data;
   },
 
-  // Delete note by ID
   async delete(id) {
-    const res = await fetch(`${API_BASE}/${id}`, {
-      method: 'DELETE',
-    });
-    if (!res.ok) throw new Error(`Error ${res.status}: Failed to delete note`);
-    const data = await res.json();
-    return data;
+    return apiClient.delete(`${API_BASE}/${id}`);
+  },
+
+  async keepRecovery(id) {
+    return apiClient.post(`${API_BASE}/${id}/keep-recovery`, {});
+  },
+
+  async discardRecovery(id) {
+    const data = await apiClient.post(`${API_BASE}/${id}/discard-recovery`, {});
+    return data?.data;
+  },
+
+  async getHistory(id) {
+    const data = await apiClient.get(`${API_BASE}/${id}/history`);
+    return data?.data || [];
+  },
+
+  async getVersionContent(id, versionId) {
+    const data = await apiClient.get(`${API_BASE}/${id}/versions/${versionId}`);
+    return data?.data;
+  },
+
+  async getVersionDiff(id, versionId) {
+    const data = await apiClient.get(`${API_BASE}/${id}/versions/${versionId}/diff`);
+    return data?.data;
+  },
+
+  async createCheckpoint(id, message, content) {
+    return apiClient.post(`${API_BASE}/${id}/checkpoints`, { message, content });
+  },
+
+  async restoreVersion(id, versionId) {
+    const data = await apiClient.post(`${API_BASE}/${id}/restore`, { version_id: versionId });
+    return data?.data;
+  },
+
+  async getGlobalActivity() {
+    const data = await apiClient.get(`${API_BASE}/activity`);
+    return data?.data || [];
+  },
+
+  async getGlobalHistory() {
+    const data = await apiClient.get(`${API_BASE}/global-history`);
+    return data?.data || [];
   }
 };

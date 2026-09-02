@@ -1,48 +1,54 @@
-import React, { useState, useEffect, useRef } from 'react';
-import Header from './components/Header';
-import Sidebar from './components/Sidebar';
-import NoteListColumn from './components/NoteListColumn';
-import MainContent from './components/MainContent';
-import KnowledgeGraph from './components/KnowledgeGraph';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Router, Routes, Route, useLocation } from './utils/router';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { SyncProvider } from './context/SyncContext';
+import AppLayout from './layouts/AppLayout';
+import NotesPage from './pages/NotesPage';
+import NoteEditorPage from './pages/NoteEditorPage';
+import SingleNoteHistoryPage from './pages/SingleNoteHistoryPage';
+import KnowledgeGraphPage from './pages/KnowledgeGraphPage';
+import SettingsPage from './pages/SettingsPage';
+import LanSyncPage from './pages/LanSyncPage';
+import PairedDevicesPage from './pages/PairedDevicesPage';
+import AboutPage from './pages/AboutPage';
+import LoginPage from './pages/LoginPage';
+import RegisterPage from './pages/RegisterPage';
+
+import CheckpointModal from './components/CheckpointModal';
+import DiffViewerModal from './components/DiffViewerModal';
+import VersionPreviewModal from './components/VersionPreviewModal';
 import DeleteModal from './components/DeleteModal';
-import NotebookModal from './components/NotebookModal';
-import MoveNotebookModal from './components/MoveNotebookModal';
-import SettingsModal from './components/SettingsModal';
-import AboutModal from './components/AboutModal';
+import UsernameOnboardingModal from './components/UsernameOnboardingModal';
+
 import { notesApi } from './api/notesApi';
 import { notebooksApi } from './api/notebooksApi';
+import { Loader2 } from 'lucide-react';
 
-export default function App() {
-  const [activeNav, setActiveNav] = useState('all'); // 'all' | 'favorites' | 'recent' | 'graph'
-  const [searchQuery, setSearchQuery] = useState('');
+export function AppContent() {
+  const location = useLocation();
+  const { isAuthenticated, isLoading, user } = useAuth();
+
+  // Primary State
+  const [notes, setNotes] = useState([]);
+  const [notebooks, setNotebooks] = useState([]);
+  const [activeNoteId, setActiveNoteId] = useState(null);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('');
   const [apiConnected, setApiConnected] = useState(true);
-  const [graphFocusNoteId, setGraphFocusNoteId] = useState(null);
-  const [showBacklinks, setShowBacklinks] = useState(false);
 
   // Preference States with LocalStorage Persistence
   const [theme, setTheme] = useState(() => localStorage.getItem('syncnote_theme') || 'dark');
-  const [accentColor, setAccentColor] = useState(() => localStorage.getItem('syncnote_accent') || '#6366f1');
-  const [fontSize, setFontSize] = useState('medium');
-  const [lineNumbers, setLineNumbers] = useState(false);
-  const [isFilesCollapsed, setIsFilesCollapsed] = useState(() => localStorage.getItem('syncnote_files_collapsed') === 'true');
 
-  // Notes and Notebooks State
-  const [notes, setNotes] = useState([]);
-  const [notebooks, setNotebooks] = useState([]);
-  const [selectedNoteId, setSelectedNoteId] = useState(null);
-  const [selectedNotebookId, setSelectedNotebookId] = useState(null);
-  const [draftNote, setDraftNote] = useState(null); // In-memory unsaved draft
+  // Interactive Modal States
+  const [checkpointModalOpen, setCheckpointModalOpen] = useState(false);
+  const [checkpointStatusMsg, setCheckpointStatusMsg] = useState('');
+  const [isSubmittingCheckpoint, setIsSubmittingCheckpoint] = useState(false);
 
-  // Modal Dialog States
+  const [diffModal, setDiffModal] = useState({ isOpen: false, data: null });
+  const [previewModal, setPreviewModal] = useState({ isOpen: false, data: null });
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, item: null, type: 'note' });
-  const [notebookModal, setNotebookModal] = useState({ isOpen: false, notebook: null });
-  const [moveModal, setMoveModal] = useState({ isOpen: false, note: null });
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [aboutOpen, setAboutOpen] = useState(false);
+  const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState(false);
 
-  const searchInputRef = useRef(null);
-
-  // Effect: Handle Theme Attribute & LocalStorage
+  // Theme Sync
   useEffect(() => {
     let activeTheme = theme;
     if (theme === 'system') {
@@ -53,421 +59,417 @@ export default function App() {
     localStorage.setItem('syncnote_theme', theme);
   }, [theme]);
 
-  // Effect: Handle Accent Color & LocalStorage
+  // First-time Google login username onboarding check
   useEffect(() => {
-    document.documentElement.style.setProperty('--accent-primary', accentColor);
-    localStorage.setItem('syncnote_accent', accentColor);
-  }, [accentColor]);
+    if (user && (user.needs_username || (user.username && user.username.startsWith('user_')))) {
+      setIsOnboardingModalOpen(true);
+    } else {
+      setIsOnboardingModalOpen(false);
+    }
+  }, [user]);
 
-  // Effect: Handle Collapsed Files LocalStorage
-  useEffect(() => {
-    localStorage.setItem('syncnote_files_collapsed', isFilesCollapsed ? 'true' : 'false');
-  }, [isFilesCollapsed]);
-
-  // Effect: Handle Editor Font Size
-  useEffect(() => {
-    document.body.setAttribute('data-font-size', fontSize);
-  }, [fontSize]);
-
-  // Load notes from API
-  const loadNotes = async () => {
+  // Load Notes
+  const loadNotes = useCallback(async () => {
+    if (!isAuthenticated) return;
     try {
-      const fetchedNotes = await notesApi.getAll();
-      setNotes(fetchedNotes);
-      if (fetchedNotes.length > 0 && !selectedNoteId) {
-        setSelectedNoteId(fetchedNotes[0].id);
-      }
+      const fetched = await notesApi.getAll();
+      setNotes(fetched || []);
     } catch (err) {
       console.error('Failed to fetch notes:', err);
       setApiConnected(false);
     }
-  };
+  }, [isAuthenticated]);
 
-  // Load notebooks from API
-  const loadNotebooks = async () => {
+  // Load Notebooks
+  const loadNotebooks = useCallback(async () => {
+    if (!isAuthenticated) return;
     try {
-      const fetchedNotebooks = await notebooksApi.getAll();
-      setNotebooks(fetchedNotebooks);
+      const fetched = await notebooksApi.getAll();
+      setNotebooks(fetched || []);
     } catch (err) {
       console.error('Failed to fetch notebooks:', err);
-      setApiConnected(false);
     }
-  };
+  }, [isAuthenticated]);
 
-  // Check backend health status
-  const checkHealth = async () => {
+  // Health Check
+  const checkHealth = useCallback(async () => {
     try {
       const res = await fetch('/api/health');
-      setApiConnected(res.ok);
-    } catch {
+      const data = await res.json();
+      if (data && data.status === 'ok') {
+        setApiConnected(true);
+      } else {
+        setApiConnected(false);
+      }
+    } catch (err) {
       setApiConnected(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     checkHealth();
-    loadNotes();
-    loadNotebooks();
-  }, []);
-
-  // Global Keyboard Shortcuts (Ctrl+K for search, Ctrl+N for new note)
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        if (searchInputRef.current) {
-          searchInputRef.current.focus();
-        }
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
-        e.preventDefault();
-        handleCreateNote();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [notes, draftNote, selectedNotebookId]);
-
-  // Draft Cleanup Helper: Discards draft if empty
-  const cleanupEmptyDraft = () => {
-    if (draftNote) {
-      const titleEmpty = !draftNote.title || draftNote.title.trim() === '' || draftNote.title.trim().toLowerCase() === 'untitled';
-      const contentEmpty = !draftNote.content || draftNote.content.trim() === '';
-      if (titleEmpty && contentEmpty) {
-        setDraftNote(null);
-      }
-    }
-  };
-
-  // Note Selection Handler
-  const handleSelectNote = (id) => {
-    if (id !== 'draft') {
-      cleanupEmptyDraft();
-    }
-    setSelectedNoteId(id);
-  };
-
-  // Create In-Memory Temporary Draft
-  const handleCreateNote = () => {
-    if (draftNote) {
-      setSelectedNoteId('draft');
-      if (activeNav === 'graph') setActiveNav('all');
-      return;
-    }
-
-    const newDraft = {
-      id: 'draft',
-      title: '',
-      content: '',
-      notebook_id: selectedNotebookId,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      is_favorite: false
-    };
-
-    setDraftNote(newDraft);
-    setSelectedNoteId('draft');
-    if (activeNav === 'graph') setActiveNav('all');
-  };
-
-  // Create & Persist Note with specific title (e.g. from [[Wiki-Link]] click)
-  const handleCreateNoteWithTitle = async (title) => {
-    cleanupEmptyDraft();
-    try {
-      const createdNote = await notesApi.create({
-        title,
-        content: `# ${title}\n\n`,
-        notebook_id: selectedNotebookId
-      });
-      setNotes((prev) => [createdNote, ...prev]);
-      setSelectedNoteId(createdNote.id);
+    if (isAuthenticated) {
+      loadNotes();
       loadNotebooks();
-    } catch (err) {
-      console.error('Error creating note with title:', err);
     }
-  };
+  }, [isAuthenticated, loadNotes, loadNotebooks, checkHealth]);
 
-  // Note Update & Auto-Save Persistence
-  const handleUpdateNote = async (id, updatedFields) => {
-    if (id === 'draft') {
-      const newTitle = updatedFields.title !== undefined ? updatedFields.title : draftNote.title;
-      const newContent = updatedFields.content !== undefined ? updatedFields.content : draftNote.content;
-      const updatedDraft = { ...draftNote, ...updatedFields };
-      setDraftNote(updatedDraft);
+  // Active Note Computation
+  const activeNote = notes.find((n) => n.id === activeNoteId) || notes[0] || null;
 
-      const hasMeaningfulTitle = newTitle && newTitle.trim() !== '' && newTitle.trim().toLowerCase() !== 'untitled';
-      const hasMeaningfulContent = newContent && newContent.trim() !== '';
-
-      if (hasMeaningfulTitle || hasMeaningfulContent) {
-        try {
-          const finalTitle = newTitle.trim() || 'Untitled Note';
-          const createdNote = await notesApi.create({
-            title: finalTitle,
-            content: newContent,
-            notebook_id: updatedDraft.notebook_id
-          });
-
-          setNotes((prev) => [createdNote, ...prev]);
-          setDraftNote(null);
-          setSelectedNoteId(createdNote.id);
-          loadNotebooks();
-        } catch (err) {
-          console.error('Failed to convert draft to persistent note:', err);
-        }
-      }
-      return;
-    }
-
-    setNotes((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, ...updatedFields, updated_at: new Date().toISOString() } : n))
-    );
-
+  // Actions
+  const handleCreateNote = async (titleOrPayload = 'Untitled Note', notebookId = null) => {
     try {
-      await notesApi.update(id, updatedFields);
-      loadNotebooks();
+      let title = 'Untitled Note';
+      let content = '';
+      let nbId = notebookId;
+
+      if (typeof titleOrPayload === 'object' && titleOrPayload !== null) {
+        title = titleOrPayload.title !== undefined ? titleOrPayload.title : 'Untitled Note';
+        content = titleOrPayload.content !== undefined ? titleOrPayload.content : '';
+        nbId = titleOrPayload.notebook_id !== undefined ? titleOrPayload.notebook_id : notebookId;
+      } else if (typeof titleOrPayload === 'string') {
+        title = titleOrPayload.trim() || 'Untitled Note';
+      }
+
+      const created = await notesApi.create({ title, content, notebook_id: nbId });
+      if (created) {
+        setNotes((prevNotes) => [created, ...prevNotes.filter((n) => n.id !== created.id)]);
+        setActiveNoteId(created.id);
+        window.history.pushState(null, '', `/notes/${created.id}`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      }
+      return created;
     } catch (err) {
-      console.error(`Error updating note ${id}:`, err);
+      console.error('Error creating note:', err);
     }
   };
 
-  const handleToggleFavorite = async (note) => {
-    if (note.id === 'draft') return;
-    const isFav = !note.is_favorite;
-    handleUpdateNote(note.id, { ...note, is_favorite: isFav });
-  };
+  const handleUpdateNote = async (id, titleOrFields, content, notebook_id) => {
+    try {
+      let fields = {};
+      if (typeof titleOrFields === 'object' && titleOrFields !== null) {
+        fields = titleOrFields;
+      } else {
+        fields = { title: titleOrFields, content, notebook_id };
+      }
 
-  const handleMoveNoteToNotebook = async (noteId, targetNotebookId) => {
-    if (noteId === 'draft') {
-      setDraftNote((prev) => (prev ? { ...prev, notebook_id: targetNotebookId } : prev));
-      setMoveModal({ isOpen: false, note: null });
-      return;
-    }
-    const targetNote = notes.find((n) => n.id === noteId);
-    if (!targetNote) return;
-
-    handleUpdateNote(noteId, { ...targetNote, notebook_id: targetNotebookId });
-    setMoveModal({ isOpen: false, note: null });
-  };
-
-  const handleWikiLinkClick = (targetTitle) => {
-    const norm = targetTitle.trim().toLowerCase();
-    const existing = notes.find((n) => n.title && n.title.trim().toLowerCase() === norm);
-    if (existing) {
-      handleSelectNote(existing.id);
-    } else {
-      handleCreateNoteWithTitle(targetTitle);
+      const updated = await notesApi.update(id, fields);
+      if (updated) {
+        setNotes((prevNotes) =>
+          prevNotes.map((n) => (n.id === id ? { ...n, ...updated } : n))
+        );
+      }
+      return updated;
+    } catch (err) {
+      console.error('Error updating note:', err);
     }
   };
 
-  const handleSelectNoteFromGraph = (noteId) => {
-    handleSelectNote(noteId);
-    setActiveNav('all');
+  const handleKeepRecovery = async (id) => {
+    try {
+      await notesApi.keepRecovery(id);
+      await loadNotes();
+    } catch (err) {
+      console.error('Error keeping recovery:', err);
+    }
   };
 
-  const handleOpenGraphView = (noteId = null) => {
-    cleanupEmptyDraft();
-    setGraphFocusNoteId(noteId);
-    setActiveNav('graph');
+  const handleDiscardRecovery = async (id) => {
+    try {
+      const restored = await notesApi.discardRecovery(id);
+      setNotes((prevNotes) =>
+        prevNotes.map((n) => (n.id === id ? { ...n, ...restored } : n))
+      );
+    } catch (err) {
+      console.error('Error discarding recovery:', err);
+    }
+  };
+
+  const handleToggleFavorite = async (id) => {
+    // Local preference toggle
+  };
+
+  const handleConfirmCheckpoint = async (msg) => {
+    if (!activeNote) return;
+    setIsSubmittingCheckpoint(true);
+    setCheckpointStatusMsg('');
+    try {
+      const res = await notesApi.createCheckpoint(activeNote.id, msg, activeNote.content);
+      if (res.status === 'no_change') {
+        setCheckpointStatusMsg('No changes detected since last checkpoint.');
+        return;
+      }
+      await loadNotes();
+      setCheckpointModalOpen(false);
+    } catch (err) {
+      console.error('Error creating checkpoint:', err);
+      setCheckpointStatusMsg(err.message || 'Failed to create checkpoint');
+    } finally {
+      setIsSubmittingCheckpoint(false);
+    }
+  };
+
+  const handleViewChanges = async (ver) => {
+    try {
+      const diffData = await notesApi.getVersionDiff(ver.note_id, ver.id);
+      setDiffModal({ isOpen: true, data: { ...diffData, version: ver } });
+    } catch (err) {
+      console.error('Error fetching version diff:', err);
+    }
+  };
+
+  const handleViewVersion = async (ver) => {
+    try {
+      const verData = await notesApi.getVersionContent(ver.note_id, ver.id);
+      setPreviewModal({ isOpen: true, data: verData });
+    } catch (err) {
+      console.error('Error fetching version content:', err);
+    }
+  };
+
+  const handleRestoreVersion = async (ver) => {
+    try {
+      await notesApi.restoreVersion(ver.note_id, ver.id);
+      await loadNotes();
+      window.history.pushState(null, '', `/notes/${ver.note_id}`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } catch (err) {
+      console.error('Error restoring version:', err);
+    }
   };
 
   const requestDeleteNote = (note) => {
     setDeleteModal({ isOpen: true, item: note, type: 'note' });
   };
 
-  const requestDeleteNotebook = (notebook) => {
-    setDeleteModal({ isOpen: true, item: notebook, type: 'notebook' });
-  };
-
   const confirmDelete = async () => {
-    const { item, type } = deleteModal;
-    if (!item) return;
-
+    if (!deleteModal.item) return;
     try {
-      if (type === 'note') {
-        if (item.id === 'draft') {
-          setDraftNote(null);
-          setSelectedNoteId(notes.length > 0 ? notes[0].id : null);
-        } else {
-          await notesApi.delete(item.id);
-          const updated = notes.filter((n) => n.id !== item.id);
-          setNotes(updated);
-          if (selectedNoteId === item.id) {
-            setSelectedNoteId(updated.length > 0 ? updated[0].id : null);
-          }
-        }
-      } else if (type === 'notebook') {
-        await notebooksApi.delete(item.id);
-        setNotebooks((prev) => prev.filter((nb) => nb.id !== item.id));
-        if (selectedNotebookId === item.id) setSelectedNotebookId(null);
-        loadNotes();
-      }
+      await notesApi.delete(deleteModal.item.id);
+      await loadNotes();
+      window.history.pushState(null, '', '/notes');
+      window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {
-      console.error(`Error deleting ${type}:`, err);
+      console.error('Error deleting note:', err);
     } finally {
       setDeleteModal({ isOpen: false, item: null, type: 'note' });
-      loadNotebooks();
     }
   };
 
-  const handleOpenCreateNotebook = () => {
-    setNotebookModal({ isOpen: true, notebook: null });
-  };
-
-  const handleOpenRenameNotebook = (notebook) => {
-    setNotebookModal({ isOpen: true, notebook });
-  };
-
-  const handleSaveNotebook = async (name) => {
+  const handleCreateNotebook = async (name) => {
     try {
-      if (notebookModal.notebook) {
-        const updated = await notebooksApi.rename(notebookModal.notebook.id, name);
-        setNotebooks((prev) => prev.map((nb) => (nb.id === updated.id ? updated : nb)));
-      } else {
-        const created = await notebooksApi.create(name);
-        setNotebooks((prev) => [...prev, created]);
-        setSelectedNotebookId(created.id);
-      }
+      await notebooksApi.create(name);
+      await loadNotebooks();
     } catch (err) {
-      console.error('Error saving notebook:', err);
-    } finally {
-      setNotebookModal({ isOpen: false, notebook: null });
+      console.error('Error creating notebook:', err);
     }
   };
 
-  const displayNotes = draftNote ? [draftNote, ...notes] : notes;
-  const selectedNote = displayNotes.find((n) => n.id === selectedNoteId) || null;
+  const handleDeleteNotebook = async (id) => {
+    try {
+      await notebooksApi.delete(id);
+      await loadNotebooks();
+      await loadNotes();
+    } catch (err) {
+      console.error('Error deleting notebook:', err);
+    }
+  };
+
+  const getPageTitle = () => {
+    const p = location.pathname;
+    if (p === '/notes') return 'Notes Explorer';
+    if (p.startsWith('/notes/') && p.endsWith('/history')) {
+      return activeNote ? `${activeNote.title} · History` : 'Note History';
+    }
+    if (p.startsWith('/notes/')) {
+      return activeNote ? activeNote.title : 'Note Editor';
+    }
+    if (p === '/graph') return 'Knowledge Graph';
+    if (p === '/settings') return 'Settings';
+    if (p === '/settings/sync/lan') return 'LAN Sync';
+    if (p === '/settings/sync/paired-devices') return 'Paired Devices';
+    if (p === '/about') return 'About SyncNote';
+    return '';
+  };
+
+  // Loading State Screen
+  if (isLoading) {
+    return (
+      <div className="auth-loading-screen">
+        <Loader2 size={24} className="spin-icon text-muted" />
+      </div>
+    );
+  }
+
+  // Auth Protection Guards
+  const publicPaths = ['/login', '/register'];
+  const isPublicPath = publicPaths.includes(location.pathname);
+
+  if (!isAuthenticated) {
+    if (location.pathname === '/register') {
+      return <RegisterPage />;
+    }
+    return <LoginPage />;
+  }
+
+  if (isAuthenticated && isPublicPath) {
+    window.history.pushState(null, '', '/notes');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }
 
   return (
-    <div className="app-container">
-      {/* Top Header Bar */}
-      <Header 
-        searchQuery={searchQuery}
-        setSearchQuery={setSearchQuery}
-        searchInputRef={searchInputRef}
-        apiConnected={apiConnected}
-      />
-
-      {/* Main Layout Area */}
-      <div className="main-layout">
-        {/* Column 1: Sidebar */}
-        <Sidebar 
-          activeNav={activeNav} 
-          setActiveNav={(nav) => {
-            cleanupEmptyDraft();
-            setActiveNav(nav);
-          }} 
-          notes={displayNotes}
-          notebooks={notebooks}
-          selectedNotebookId={selectedNotebookId}
-          onSelectNotebook={(nbId) => {
-            cleanupEmptyDraft();
-            setSelectedNotebookId(nbId);
-          }}
-          onCreateNote={handleCreateNote}
-          onCreateNotebook={handleOpenCreateNotebook}
-          onRenameNotebook={handleOpenRenameNotebook}
-          onDeleteNotebook={requestDeleteNotebook}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onOpenAbout={() => setAboutOpen(true)}
-          theme={theme}
-          setTheme={setTheme}
-          showBacklinks={showBacklinks}
-          setShowBacklinks={setShowBacklinks}
+    <AppLayout
+      theme={theme}
+      setTheme={setTheme}
+      apiConnected={apiConnected}
+      globalSearchQuery={globalSearchQuery}
+      setGlobalSearchQuery={setGlobalSearchQuery}
+      pageTitle={getPageTitle()}
+      notes={notes}
+      onCreateNote={handleCreateNote}
+    >
+      <Routes>
+        <Route 
+          path="/" 
+          redirect="/notes" 
         />
-
-        {/* View Switcher: Graph View vs 2-Column Note Editor View */}
-        {activeNav === 'graph' ? (
-          <div style={{ flex: 1, height: '100%', position: 'relative' }}>
-            <KnowledgeGraph 
+        <Route 
+          path="/notes" 
+          element={
+            <NotesPage 
               notes={notes}
-              selectedNoteId={selectedNoteId}
-              onSelectNote={handleSelectNoteFromGraph}
-              onCreateNote={handleCreateNote}
-              focusNoteId={graphFocusNoteId}
-            />
-          </div>
-        ) : (
-          <>
-            {/* Column 2: Note List Pane (Collapsible) */}
-            <NoteListColumn 
-              notes={displayNotes}
               notebooks={notebooks}
-              selectedNoteId={selectedNoteId}
-              selectedNotebookId={selectedNotebookId}
-              activeNav={activeNav}
-              searchQuery={searchQuery}
-              onSelectNote={handleSelectNote}
               onCreateNote={handleCreateNote}
-              onRenameNote={(note) => handleSelectNote(note.id)}
-              onFavoriteNote={handleToggleFavorite}
-              onMoveToNotebook={(note) => setMoveModal({ isOpen: true, note })}
-              onDeleteNote={requestDeleteNote}
-              isCollapsed={isFilesCollapsed}
-              onToggleCollapse={() => setIsFilesCollapsed((prev) => !prev)}
-            />
-
-            {/* Column 3: Main Editor Pane */}
-            <MainContent 
-              selectedNote={selectedNote}
-              allNotes={notes}
-              notebooks={notebooks}
               onUpdateNote={handleUpdateNote}
               onToggleFavorite={handleToggleFavorite}
-              onRequestMoveNotebook={(note) => setMoveModal({ isOpen: true, note })}
               onRequestDeleteNote={requestDeleteNote}
-              onCreateNote={handleCreateNote}
-              onOpenGraphView={handleOpenGraphView}
-              onNavigateToNote={handleSelectNote}
-              onWikiLinkClick={handleWikiLinkClick}
-              showBacklinks={showBacklinks}
-              setShowBacklinks={setShowBacklinks}
+              searchQuery={globalSearchQuery}
+              onCreateNotebook={handleCreateNotebook}
+              onDeleteNotebook={handleDeleteNotebook}
             />
-          </>
-        )}
-      </div>
+          } 
+        />
+        <Route 
+          path="/notes/:noteId" 
+          element={
+            <NoteEditorPage 
+              notes={notes}
+              notebooks={notebooks}
+              activeNote={activeNote}
+              setActiveNoteId={setActiveNoteId}
+              onUpdateNote={handleUpdateNote}
+              onOpenCheckpointModal={() => {
+                setCheckpointStatusMsg('');
+                setCheckpointModalOpen(true);
+              }}
+              onKeepRecovery={handleKeepRecovery}
+              onDiscardRecovery={handleDiscardRecovery}
+              onToggleFavorite={handleToggleFavorite}
+              onRequestDeleteNote={requestDeleteNote}
+            />
+          } 
+        />
+        <Route 
+          path="/notes/:noteId/history" 
+          element={
+            <SingleNoteHistoryPage 
+              noteId={location.pathname.split('/')[2]}
+              notes={notes}
+              notebooks={notebooks}
+              onViewChanges={handleViewChanges}
+              onRestoreVersion={handleRestoreVersion}
+            />
+          } 
+        />
+        <Route 
+          path="/graph" 
+          element={
+            <KnowledgeGraphPage 
+              notes={notes}
+              onCreateNote={handleCreateNote}
+            />
+          } 
+        />
+        <Route 
+          path="/settings" 
+          element={
+            <SettingsPage 
+              theme={theme} 
+              setTheme={setTheme} 
+            />
+          } 
+        />
+        <Route 
+          path="/settings/sync/lan" 
+          element={
+            <LanSyncPage 
+              notes={notes}
+              notebooks={notebooks}
+            />
+          } 
+        />
+        <Route 
+          path="/settings/sync/paired-devices" 
+          element={<PairedDevicesPage />} 
+        />
+        <Route 
+          path="/about" 
+          element={<AboutPage />} 
+        />
+      </Routes>
 
-      {/* Modals & Dialogs */}
+      {/* Shared Interactive Modals */}
+      <CheckpointModal 
+        isOpen={checkpointModalOpen}
+        onConfirm={handleConfirmCheckpoint}
+        onCancel={() => setCheckpointModalOpen(false)}
+        statusMessage={checkpointStatusMsg}
+        isSubmitting={isSubmittingCheckpoint}
+      />
+
+      <DiffViewerModal 
+        isOpen={diffModal.isOpen}
+        onClose={() => setDiffModal({ isOpen: false, data: null })}
+        diffData={diffModal.data}
+      />
+
+      <VersionPreviewModal 
+        isOpen={previewModal.isOpen}
+        onClose={() => setPreviewModal({ isOpen: false, data: null })}
+        versionData={previewModal.data}
+        onRestore={() => {
+          if (previewModal.data?.version) {
+            handleRestoreVersion(previewModal.data.version);
+            setPreviewModal({ isOpen: false, data: null });
+          }
+        }}
+      />
+
       <DeleteModal 
         isOpen={deleteModal.isOpen}
-        title={deleteModal.item ? (deleteModal.item.title || deleteModal.item.name) : ''}
-        itemType={deleteModal.type === 'note' ? 'Note' : 'Notebook'}
+        title={deleteModal.item ? deleteModal.item.title : ''}
+        itemType="Note"
         onConfirm={confirmDelete}
         onCancel={() => setDeleteModal({ isOpen: false, item: null, type: 'note' })}
       />
 
-      <NotebookModal 
-        isOpen={notebookModal.isOpen}
-        initialName={notebookModal.notebook ? notebookModal.notebook.name : ''}
-        isEditing={!!notebookModal.notebook}
-        onSave={handleSaveNotebook}
-        onCancel={() => setNotebookModal({ isOpen: false, notebook: null })}
+      <UsernameOnboardingModal
+        isOpen={isOnboardingModalOpen}
+        onClose={() => setIsOnboardingModalOpen(false)}
       />
+    </AppLayout>
+  );
+}
 
-      <MoveNotebookModal
-        isOpen={moveModal.isOpen}
-        note={moveModal.note}
-        notebooks={notebooks}
-        onMove={handleMoveNoteToNotebook}
-        onCancel={() => setMoveModal({ isOpen: false, note: null })}
-      />
-
-      <SettingsModal 
-        isOpen={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        theme={theme}
-        setTheme={setTheme}
-        accentColor={accentColor}
-        setAccentColor={setAccentColor}
-        fontSize={fontSize}
-        setFontSize={setFontSize}
-        lineNumbers={lineNumbers}
-        setLineNumbers={setLineNumbers}
-      />
-
-      <AboutModal 
-        isOpen={aboutOpen}
-        onClose={() => setAboutOpen(false)}
-      />
-    </div>
+export default function App() {
+  return (
+    <Router>
+      <AuthProvider>
+        <SyncProvider>
+          <AppContent />
+        </SyncProvider>
+      </AuthProvider>
+    </Router>
   );
 }

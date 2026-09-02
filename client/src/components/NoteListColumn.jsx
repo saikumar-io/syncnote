@@ -10,8 +10,99 @@ import {
   Star,
   BookOpen,
   MoreVertical,
-  MoreHorizontal
+  MoreHorizontal,
+  CheckCircle2,
+  RefreshCw,
+  Zap,
+  AlertTriangle,
+  Cloud,
+  Lock,
+  XCircle
 } from 'lucide-react';
+
+export function NoteSyncBadge({ note, onClick }) {
+  if (!note) return null;
+  const mode = (note.sync_mode === 'google' || note.sync_mode === 'cloud') ? 'cloud' : (note.sync_mode || 'local');
+  const isSynced = note.sync_state === 'SYNCED' && Boolean(note.gdrive_file_id);
+  const state = isSynced ? 'SYNCED' : (note.sync_state || 'NOT_SYNCED');
+
+  if (mode === 'local') {
+    return (
+      <span 
+        className="sync-badge local" 
+        onClick={onClick}
+        title="Sync Mode: LOCAL (Private to this device)" 
+        style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '0.66rem', padding: '1px 5px', borderRadius: '3px', background: 'rgba(156, 163, 175, 0.12)', color: 'var(--text-muted)', cursor: onClick ? 'pointer' : 'default' }}
+      >
+        <Lock size={9} />
+        [ LOCAL ]
+      </span>
+    );
+  }
+
+  if (mode === 'lan') {
+    return (
+      <span 
+        className="sync-badge lan" 
+        onClick={onClick}
+        title="Sync Mode: LAN (Peer-to-peer encrypted sync)" 
+        style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '0.66rem', padding: '1px 5px', borderRadius: '3px', background: 'rgba(16, 185, 129, 0.12)', color: 'var(--accent-emerald)', cursor: onClick ? 'pointer' : 'default' }}
+      >
+        [ LAN ]
+      </span>
+    );
+  }
+
+  // Cloud mode
+  let statusText = 'Not synced';
+  let color = '#2684fc';
+  let bg = 'rgba(38, 132, 252, 0.12)';
+  let Icon = Cloud;
+
+  if (state === 'SYNCED') {
+    statusText = '✓ Synced';
+    color = '#10b981';
+    bg = 'rgba(16, 185, 129, 0.12)';
+    Icon = CheckCircle2;
+  } else if (state === 'SYNCING') {
+    statusText = '↻ Syncing...';
+    color = '#3b82f6';
+    bg = 'rgba(59, 130, 246, 0.12)';
+    Icon = RefreshCw;
+  } else if (state === 'MODIFIED_OFFLINE') {
+    statusText = '↻ Modified offline';
+    color = '#f59e0b';
+    bg = 'rgba(245, 158, 11, 0.12)';
+    Icon = Zap;
+  } else if (state === 'CONFLICT') {
+    statusText = '⚠ Conflict';
+    color = '#ef4444';
+    bg = 'rgba(239, 68, 68, 0.12)';
+    Icon = AlertTriangle;
+  } else if (state === 'SYNC_FAILED') {
+    statusText = '! Sync failed';
+    color = '#ef4444';
+    bg = 'rgba(239, 68, 68, 0.12)';
+    Icon = XCircle;
+  } else if (state === 'NOT_SYNCED') {
+    statusText = 'Not synced';
+    color = '#2684fc';
+    bg = 'rgba(38, 132, 252, 0.12)';
+    Icon = Cloud;
+  }
+
+  return (
+    <span 
+      className="sync-badge cloud" 
+      onClick={onClick}
+      title={`Google Drive Sync: ${state}`} 
+      style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.66rem', fontWeight: 600, padding: '1px 5px', borderRadius: '3px', background: bg, color, cursor: onClick ? 'pointer' : 'default' }}
+    >
+      <Icon size={10} className={state === 'SYNCING' ? 'spin' : ''} />
+      [ CLOUD ] {statusText}
+    </span>
+  );
+}
 
 export default function NoteListColumn({ 
   notes = [],
@@ -26,6 +117,7 @@ export default function NoteListColumn({
   onFavoriteNote,
   onMoveToNotebook,
   onDeleteNote,
+  onUpdateNote,
   isCollapsed = false,
   onToggleCollapse
 }) {
@@ -209,14 +301,17 @@ export default function NoteListColumn({
                   {note.content ? note.content.substring(0, 80) : 'Empty note'}
                 </div>
 
-                <div className="note-item-meta">
+                <div className="note-item-meta" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span>{formatRelativeTime(note.updated_at)}</span>
-                  {notebookName && (
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
-                      <BookOpen size={10} />
-                      {notebookName}
-                    </span>
-                  )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    {notebookName && (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
+                        <BookOpen size={10} />
+                        {notebookName}
+                      </span>
+                    )}
+                    <NoteSyncBadge note={note} />
+                  </div>
                 </div>
               </div>
             );
@@ -234,6 +329,7 @@ export default function NoteListColumn({
         onFavorite={() => onFavoriteNote(contextMenu.note)}
         onMoveToNotebook={() => onMoveToNotebook(contextMenu.note)}
         onDelete={() => onDeleteNote(contextMenu.note)}
+        onUpdateSyncMode={(noteId, mode) => onUpdateNote && onUpdateNote(noteId, { sync_mode: mode })}
       />
     </aside>
   );
