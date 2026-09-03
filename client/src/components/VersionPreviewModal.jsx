@@ -60,7 +60,7 @@ export default function VersionPreviewModal({
             <Eye size={18} style={{ color: 'var(--accent-primary)' }} />
             <div>
               <h3 className="modal-title">
-                Historical Version {versionNumber !== '' ? `V${versionNumber}` : ''}
+                Historical Version {versionNumber !== '' ? `V${versionNumber}` : ''} (Read-Only)
               </h3>
               <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
                 {message} • {formattedTime}{fullDate ? ` (${fullDate})` : ''}
@@ -138,11 +138,12 @@ export default function VersionPreviewModal({
                   if (onRestore) onRestore(versionObj);
                 }}
                 disabled={isLoading || !!error}
+                title="Restore this historical version as a new checkpoint"
                 style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
                 type="button"
               >
                 <RotateCcw size={13} />
-                <span>Restore Version</span>
+                <span>Restore as Current</span>
               </button>
             </div>
           </div>

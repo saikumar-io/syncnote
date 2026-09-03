@@ -166,18 +166,34 @@ export default function MainContent({
       clearTimeout(debounceTimerRef.current);
       debounceTimerRef.current = null;
     }
-    pendingSaveRef.current = false;
+    
+    // Capture snapshot of what we are saving right now
+    const savingTitle = titleRef.current;
+    const savingContent = contentRef.current;
+    const savingNotebookId = notebookIdRef.current;
     const currentReqId = ++latestRequestIdRef.current;
+
+    console.log(`[NoteAutosave] noteId: ${targetNoteId}, contentLength: ${savingContent ? savingContent.length : 0}, contentPreview: ${savingContent ? savingContent.substring(0, 30) : ''}, requestSequence: ${currentReqId}`);
     
     try {
       setSavingStatus('Saving...');
       const updated = await onUpdateNote(targetNoteId, {
-        title: titleRef.current,
-        content: contentRef.current,
-        notebook_id: notebookIdRef.current
+        title: savingTitle,
+        content: savingContent,
+        notebook_id: savingNotebookId
       });
+      
       if (currentReqId === latestRequestIdRef.current) {
-        setSavingStatus('Saved locally');
+        // If contentRef has not changed while save was in flight, mark save complete
+        if (contentRef.current === savingContent && titleRef.current === savingTitle && notebookIdRef.current === savingNotebookId) {
+          pendingSaveRef.current = false;
+          setSavingStatus('Saved locally');
+        } else {
+          // User typed additional characters while save was in flight!
+          pendingSaveRef.current = true;
+          setSavingStatus('Saving...');
+          scheduleAutosave(targetNoteId);
+        }
       }
       return updated;
     } catch (err) {
@@ -188,7 +204,7 @@ export default function MainContent({
     }
   }, [onUpdateNote]);
 
-  // Schedule debounced save function
+  // Schedule debounced save function (750ms delay)
   const scheduleAutosave = useCallback((targetNoteId) => {
     if (!targetNoteId || targetNoteId === 'draft') return;
     pendingSaveRef.current = true;
@@ -198,40 +214,54 @@ export default function MainContent({
     }
     debounceTimerRef.current = setTimeout(() => {
       flushSave(targetNoteId);
-    }, 400);
+    }, 750);
   }, [flushSave]);
 
-  // Handle note switching: flush pending changes of previous note when selectedNote.id changes
+  // Handle note switching & unmounting: flush pending changes of previous note
   useEffect(() => {
     const prevNoteId = noteIdRef.current;
-    if (prevNoteId && prevNoteId !== selectedNote?.id && pendingSaveRef.current) {
+    const isDifferentNote = selectedNote?.id && selectedNote.id !== prevNoteId;
+
+    if (prevNoteId && isDifferentNote && pendingSaveRef.current) {
       flushSave(prevNoteId);
     }
     noteIdRef.current = selectedNote?.id;
 
     if (selectedNote) {
-      setEditorTitle(selectedNote.title || '');
-      setEditorContent(selectedNote.content || '');
-      setEditorNotebookId(selectedNote.notebook_id || '');
-      titleRef.current = selectedNote.title || '';
-      contentRef.current = selectedNote.content || '';
-      notebookIdRef.current = selectedNote.notebook_id || '';
-      pendingSaveRef.current = false;
-      setSavingStatus(selectedNote.id === 'draft' ? 'Unsaved draft' : 'Saved locally');
-      setDismissedRecoveryNoteId(null);
-      if (selectedNote.id !== 'draft') {
-        loadHistory(selectedNote.id);
-      } else {
-        setHistoryList([]);
+      const isInitialMount = prevNoteId === undefined;
+      const isNoteContentUpdated = !pendingSaveRef.current && selectedNote.content !== undefined && selectedNote.content !== contentRef.current;
+
+      if (isDifferentNote || isInitialMount || isNoteContentUpdated) {
+        setEditorTitle(selectedNote.title || '');
+        setEditorContent(selectedNote.content || '');
+        setEditorNotebookId(selectedNote.notebook_id || '');
+        titleRef.current = selectedNote.title || '';
+        contentRef.current = selectedNote.content || '';
+        notebookIdRef.current = selectedNote.notebook_id || '';
+        if (isDifferentNote || isInitialMount) {
+          pendingSaveRef.current = false;
+          setSavingStatus(selectedNote.id === 'draft' ? 'Unsaved draft' : 'Saved locally');
+          setDismissedRecoveryNoteId(null);
+          if (selectedNote.id !== 'draft') {
+            loadHistory(selectedNote.id);
+          } else {
+            setHistoryList([]);
+          }
+        }
       }
     }
 
     return () => {
+      const currentNoteId = noteIdRef.current;
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      if (currentNoteId && currentNoteId !== 'draft' && pendingSaveRef.current) {
+        flushSave(currentNoteId);
       }
     };
-  }, [selectedNote?.id, flushSave]);
+  }, [selectedNote?.id, selectedNote?.content]);
 
   const getRecoveryKey = (note) => {
     if (!note || !note.id) return null;
@@ -428,7 +458,11 @@ export default function MainContent({
     setCheckpointStatusMsg('');
 
     try {
-      const res = await notesApi.createCheckpoint(selectedNote.id, message, { content: editorContent });
+      if (pendingSaveRef.current) {
+        await flushSave(selectedNote.id);
+      }
+      const currentContent = contentRef.current;
+      const res = await notesApi.createCheckpoint(selectedNote.id, message, currentContent);
       if (res.status === 'no_change') {
         setCheckpointStatusMsg('No changes since the last checkpoint.');
       } else {
@@ -474,22 +508,48 @@ export default function MainContent({
   };
 
   const handleRestoreVersion = async (version) => {
+    if (!selectedNote || !version?.id) return;
     try {
+      const currentReqId = ++latestRequestIdRef.current;
+      console.log(`[RestoreStart] requestedVersionId: ${version.id}, versionNumber: V${version.version_number}`);
+      
       const res = await notesApi.restoreVersion(selectedNote.id, version.id);
-      const restoredContent = res.data.content;
-      const newVersion = res.data.version;
+      const payload = res?.data || res;
+      const restoredContent = payload?.content;
+      const newVersion = payload?.version;
+
+      if (!newVersion || !newVersion.id || restoredContent === undefined) {
+        throw new Error('Invalid version payload returned from restore API');
+      }
+
+      if (currentReqId !== latestRequestIdRef.current) {
+        console.warn(`[Restore] Stale restore response dropped for ${version.id}`);
+        return;
+      }
+
+      console.log(`[RestoreFinish] requested V${version.version_number} (${version.id}) -> new restored V${newVersion.version_number} (${newVersion.id}) set as CURRENT`);
 
       setEditorContent(restoredContent);
+      contentRef.current = restoredContent;
+      pendingSaveRef.current = false;
+      setSavingStatus('Saved locally');
+
       onUpdateNote(selectedNote.id, { 
         content: restoredContent, 
         current_version_id: newVersion.id, 
         content_hash: newVersion.content_hash 
       });
 
+      setHistoryList((prev) => {
+        const filtered = (prev || []).filter((v) => v.id !== newVersion.id);
+        return [...filtered, newVersion].sort((a, b) => a.version_number - b.version_number);
+      });
+
       await loadHistory(selectedNote.id);
       showToast(`Restored V${version.version_number} as V${newVersion.version_number}`);
     } catch (err) {
       console.error('Failed to restore version:', err);
+      showToast('Failed to restore version');
     }
   };
 

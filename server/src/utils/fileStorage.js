@@ -38,7 +38,17 @@ const sanitizeFolderName = (notebookName) => {
  * Calculate SHA-256 content hash
  */
 const calculateHash = (content = '') => {
-  return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+  let strContent = content;
+  if (typeof strContent !== 'string') {
+    if (strContent && typeof strContent === 'object' && strContent.content !== undefined) {
+      strContent = String(strContent.content);
+    } else if (strContent && typeof strContent === 'object' && strContent.text !== undefined) {
+      strContent = String(strContent.text);
+    } else {
+      strContent = String(strContent || '');
+    }
+  }
+  return crypto.createHash('sha256').update(strContent, 'utf8').digest('hex');
 };
 
 /**
@@ -66,11 +76,21 @@ const getNoteFilePath = (title, notebookName = 'Unassigned') => {
  * Write Markdown content to disk
  */
 const writeNoteFile = (filePath, content = '') => {
+  let strContent = content;
+  if (typeof strContent !== 'string') {
+    if (strContent && typeof strContent === 'object' && strContent.content !== undefined) {
+      strContent = String(strContent.content);
+    } else if (strContent && typeof strContent === 'object' && strContent.text !== undefined) {
+      strContent = String(strContent.text);
+    } else {
+      strContent = String(strContent || '');
+    }
+  }
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(filePath, content, 'utf8');
+  fs.writeFileSync(filePath, strContent, 'utf8');
 };
 
 /**

@@ -139,9 +139,11 @@ function applyLineDiffHunks(oldText = '', hunks = []) {
 function reconstructVersionContent(targetVersionId, VersionModel, userId = 'usr_local_default') {
   if (!targetVersionId) return '';
 
+  const cacheKey = `${userId}:${targetVersionId}`;
+
   // 1. Check cache first
-  const cached = versionCache.get(targetVersionId);
-  if (cached !== null) {
+  const cached = versionCache.get(cacheKey);
+  if (cached !== null && cached !== undefined) {
     return cached;
   }
 
@@ -163,9 +165,10 @@ function reconstructVersionContent(targetVersionId, VersionModel, userId = 'usr_
   // 3. Reconstruct sequentially starting from base ""
   let currentContent = '';
   for (const ver of versionChain) {
+    const ancestorCacheKey = `${userId}:${ver.id}`;
     // Check if intermediate version is already cached
-    const ancestorCached = versionCache.get(ver.id);
-    if (ancestorCached !== null) {
+    const ancestorCached = versionCache.get(ancestorCacheKey);
+    if (ancestorCached !== null && ancestorCached !== undefined) {
       currentContent = ancestorCached;
       continue;
     }
@@ -175,7 +178,7 @@ function reconstructVersionContent(targetVersionId, VersionModel, userId = 'usr_
     currentContent = applyLineDiffHunks(currentContent, hunks);
 
     // Cache intermediate reconstructed state
-    versionCache.set(ver.id, currentContent);
+    versionCache.set(ancestorCacheKey, currentContent);
   }
 
   return currentContent;

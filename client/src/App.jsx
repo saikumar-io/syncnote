@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Router, Routes, Route, useLocation } from './utils/router';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { SyncProvider } from './context/SyncContext';
+import { SyncProvider, useSync } from './context/SyncContext';
 import AppLayout from './layouts/AppLayout';
 import NotesPage from './pages/NotesPage';
 import NoteEditorPage from './pages/NoteEditorPage';
@@ -27,6 +27,7 @@ import { Loader2 } from 'lucide-react';
 export function AppContent() {
   const location = useLocation();
   const { isAuthenticated, isLoading, user } = useAuth();
+  const sync = useSync();
 
   // Primary State
   const [notes, setNotes] = useState([]);
@@ -136,6 +137,9 @@ export function AppContent() {
       if (created) {
         setNotes((prevNotes) => [created, ...prevNotes.filter((n) => n.id !== created.id)]);
         setActiveNoteId(created.id);
+        if (sync && sync.refreshSyncStatus) {
+          sync.refreshSyncStatus();
+        }
         window.history.pushState(null, '', `/notes/${created.id}`);
         window.dispatchEvent(new PopStateEvent('popstate'));
       }
@@ -145,7 +149,7 @@ export function AppContent() {
     }
   };
 
-  const handleUpdateNote = async (id, titleOrFields, content, notebook_id) => {
+  const handleUpdateNote = useCallback(async (id, titleOrFields, content, notebook_id) => {
     try {
       let fields = {};
       if (typeof titleOrFields === 'object' && titleOrFields !== null) {
@@ -159,12 +163,15 @@ export function AppContent() {
         setNotes((prevNotes) =>
           prevNotes.map((n) => (n.id === id ? { ...n, ...updated } : n))
         );
+        if (sync && sync.refreshSyncStatus) {
+          sync.refreshSyncStatus();
+        }
       }
       return updated;
     } catch (err) {
       console.error('Error updating note:', err);
     }
-  };
+  }, [sync]);
 
   const handleKeepRecovery = async (id) => {
     try {
@@ -201,6 +208,9 @@ export function AppContent() {
         return;
       }
       await loadNotes();
+      if (sync && sync.refreshSyncStatus) {
+        sync.refreshSyncStatus();
+      }
       setCheckpointModalOpen(false);
     } catch (err) {
       console.error('Error creating checkpoint:', err);
@@ -230,8 +240,25 @@ export function AppContent() {
 
   const handleRestoreVersion = async (ver) => {
     try {
-      await notesApi.restoreVersion(ver.note_id, ver.id);
+      const res = await notesApi.restoreVersion(ver.note_id, ver.id);
+      const payload = res?.data || res;
+      const newVersion = payload?.version;
+      const restoredContent = payload?.content;
+
+      if (newVersion && restoredContent !== undefined) {
+        setNotes((prevNotes) =>
+          prevNotes.map((n) =>
+            n.id === ver.note_id
+              ? { ...n, content: restoredContent, current_version_id: newVersion.id, content_hash: newVersion.content_hash }
+              : n
+          )
+        );
+      }
+
       await loadNotes();
+      if (sync && sync.refreshSyncStatus) {
+        sync.refreshSyncStatus();
+      }
       window.history.pushState(null, '', `/notes/${ver.note_id}`);
       window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {
@@ -248,6 +275,9 @@ export function AppContent() {
     try {
       await notesApi.delete(deleteModal.item.id);
       await loadNotes();
+      if (sync && sync.refreshSyncStatus) {
+        sync.refreshSyncStatus();
+      }
       window.history.pushState(null, '', '/notes');
       window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {

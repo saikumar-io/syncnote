@@ -118,6 +118,7 @@ router.get('/:id', (req, res) => {
 
     const content = readNoteFile(meta.file_path);
     const sessionInfo = getNoteSessionInfo(meta, content, req.user.id);
+    console.log(`[NoteLoad] noteId: ${req.params.id}, databaseContentHashLength: ${meta.content_hash ? meta.content_hash.length : 0}, responseContentLength: ${content ? content.length : 0}`);
     res.json({ status: 'success', data: { ...meta, content, session_info: sessionInfo } });
   } catch (error) {
     console.error('Error fetching note by ID:', error);
@@ -192,12 +193,13 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    let { title, content, notebook_id, sync_mode } = req.body || {};
+    let { title, content, notebook_id, sync_mode, current_version_id } = req.body || {};
 
     if (typeof title === 'object' && title !== null) {
       notebook_id = title.notebook_id !== undefined ? title.notebook_id : notebook_id;
       content = title.content !== undefined ? title.content : content;
       sync_mode = title.sync_mode !== undefined ? title.sync_mode : sync_mode;
+      current_version_id = title.current_version_id !== undefined ? title.current_version_id : current_version_id;
       title = title.title;
     }
 
@@ -210,6 +212,13 @@ router.put('/:id', async (req, res) => {
     const finalContent = (typeof content === 'string') ? content : readNoteFile(existing.file_path);
     const finalNotebookId = notebook_id !== undefined ? notebook_id : existing.notebook_id;
     const finalSyncMode = sync_mode !== undefined ? (['local', 'google', 'cloud', 'lan'].includes(sync_mode) ? (sync_mode === 'google' ? 'cloud' : sync_mode) : existing.sync_mode) : existing.sync_mode;
+
+    const latestVersion = VersionModel.getLatestForNote(id, req.user.id);
+    const finalVersion = current_version_id !== undefined
+      ? current_version_id
+      : (latestVersion ? latestVersion.id : existing.current_version_id);
+
+    console.log(`[NoteSave] noteId: ${id}, receivedContentLength: ${typeof content === 'string' ? content.length : 'not-provided'}, savedContentLength: ${finalContent ? finalContent.length : 0}, currentVersionId: ${finalVersion}`);
 
     const nbName = getNotebookName(finalNotebookId, req.user.id);
     let targetFilePath = existing.file_path;
@@ -224,11 +233,10 @@ router.put('/:id', async (req, res) => {
 
     const newHash = calculateHash(finalContent);
 
-    const updatedMeta = NoteModel.update(id, finalTitle, targetFilePath, finalNotebookId, newHash, existing.current_version_id, req.user.id, finalSyncMode);
+    const updatedMeta = NoteModel.update(id, finalTitle, targetFilePath, finalNotebookId, newHash, finalVersion, req.user.id, finalSyncMode);
 
-    const latestVersion = VersionModel.getLatestForNote(id, req.user.id);
     const isClean = latestVersion ? (newHash === latestVersion.content_hash) : (finalContent.trim().length === 0);
-    SessionModel.upsert(id, latestVersion ? latestVersion.id : null, newHash, 'clean', req.user.id);
+    SessionModel.upsert(id, finalVersion, newHash, 'clean', req.user.id);
     const sessionInfo = getNoteSessionInfo(updatedMeta, finalContent, req.user.id);
 
     // If note is or became cloud mode, sync upload to Google Drive
@@ -239,6 +247,8 @@ router.put('/:id', async (req, res) => {
         console.warn(`[Note PUT] Google Drive sync note notice: ${gErr.message}`);
       }
     }
+
+    const freshNoteMeta = NoteModel.getById(id, req.user.id) || updatedMeta;
 
     // Enqueue for Sync Engine (Coalesced update operation)
     SyncQueueModel.enqueue({
@@ -251,7 +261,7 @@ router.put('/:id', async (req, res) => {
     res.json({ 
       status: 'success', 
       message: 'Note updated successfully', 
-      data: { ...updatedMeta, content: finalContent, session_info: sessionInfo } 
+      data: { ...freshNoteMeta, content: finalContent, session_info: sessionInfo } 
     });
   } catch (error) {
     console.error('Error updating note:', error);
@@ -397,7 +407,7 @@ router.get('/:id/versions/:versionId', (req, res) => {
     }
 
     const diffRecord = VersionModel.getDiffByVersionId(versionId, req.user.id);
-    console.log(`[VersionPreview] versionNumber: ${version.version_number}, diff found: ${!!diffRecord}`);
+    console.log(`[VersionPreview] requested versionId: ${versionId}, resolved versionId: ${version.id}, versionNumber: ${version.version_number}, diff found: ${!!diffRecord}`);
 
     const content = reconstructVersionContent(versionId, VersionModel, req.user.id);
     console.log(`[VersionPreview] reconstructed content length: ${content ? content.length : 0}`);
@@ -451,9 +461,18 @@ router.post('/:id/checkpoints', (req, res) => {
     }
 
     let currentContent = content;
-    if (currentContent === undefined) {
+    if (currentContent === undefined || currentContent === null) {
       currentContent = readNoteFile(note.file_path);
     } else {
+      if (typeof currentContent !== 'string') {
+        if (typeof currentContent === 'object' && currentContent.content !== undefined) {
+          currentContent = String(currentContent.content);
+        } else if (typeof currentContent === 'object' && currentContent.text !== undefined) {
+          currentContent = String(currentContent.text);
+        } else {
+          currentContent = String(currentContent || '');
+        }
+      }
       writeNoteFile(note.file_path, currentContent);
     }
 
@@ -469,7 +488,8 @@ router.post('/:id/checkpoints', (req, res) => {
 
     let previousContent = '';
     if (latestVersion) {
-      previousContent = reconstructVersionContent(latestVersion.id, VersionModel);
+      console.log(`[Checkpoint] noteId: ${id}, latestVersionId: ${latestVersion.id}, versionNumber: ${latestVersion.version_number}`);
+      previousContent = reconstructVersionContent(latestVersion.id, VersionModel, req.user.id);
     }
 
     const diffHunks = computeLineDiffHunks(previousContent, currentContent);
@@ -478,6 +498,8 @@ router.post('/:id/checkpoints', (req, res) => {
     const parentVersionId = latestVersion ? latestVersion.id : null;
     const versionId = `v${nextVersionNum}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const checkpointMsg = message && message.trim() ? message.trim() : `Checkpoint V${nextVersionNum}`;
+
+    console.log(`[Checkpoint] creating new version V${nextVersionNum} (${versionId}) with parent: ${parentVersionId}`);
 
     const versionData = {
       id: versionId,
@@ -494,6 +516,8 @@ router.post('/:id/checkpoints', (req, res) => {
 
     const createdVersion = VersionModel.createCheckpointTransaction(versionData, diffHunks, id, req.user.id);
     SessionModel.upsert(id, createdVersion.id, currentHash, 'clean', req.user.id);
+
+    console.log(`[Checkpoint] created version V${createdVersion.version_number} (${createdVersion.id}) successfully`);
 
     res.status(201).json({
       status: 'success',
@@ -514,6 +538,8 @@ router.post('/:id/restore', (req, res) => {
     const { id } = req.params;
     const { version_id } = req.body;
 
+    console.log(`[Restore] requested versionId: ${version_id}, noteId: ${id}, user: ${req.user.id}`);
+
     const note = NoteModel.getById(id, req.user.id);
     if (!note) {
       return res.status(404).json({ status: 'error', message: 'Note not found or access denied' });
@@ -524,7 +550,11 @@ router.post('/:id/restore', (req, res) => {
       return res.status(404).json({ status: 'error', message: 'Target version not found or access denied' });
     }
 
-    const restoredContent = reconstructVersionContent(version_id, VersionModel);
+    console.log(`[Restore] requested versionNumber: ${targetVersion.version_number}, parentVersionId: ${targetVersion.parent_version_id}`);
+
+    const restoredContent = reconstructVersionContent(version_id, VersionModel, req.user.id);
+    console.log(`[Restore] reconstructed content length: ${restoredContent ? restoredContent.length : 0}`);
+
     const restoredHash = calculateHash(restoredContent);
 
     writeNoteFile(note.file_path, restoredContent);
@@ -533,7 +563,7 @@ router.post('/:id/restore', (req, res) => {
 
     let currentContentBeforeRestore = '';
     if (latestVersion) {
-      currentContentBeforeRestore = reconstructVersionContent(latestVersion.id, VersionModel);
+      currentContentBeforeRestore = reconstructVersionContent(latestVersion.id, VersionModel, req.user.id);
     }
 
     const diffHunks = computeLineDiffHunks(currentContentBeforeRestore, restoredContent);
@@ -542,6 +572,8 @@ router.post('/:id/restore', (req, res) => {
     const parentVersionId = latestVersion ? latestVersion.id : null;
     const newVersionId = `v${nextVersionNum}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const restoreMsg = `Restored from V${targetVersion.version_number}`;
+
+    console.log(`[Restore] creating new restored version: V${nextVersionNum} (${newVersionId}) with parent: ${parentVersionId}`);
 
     const versionData = {
       id: newVersionId,
@@ -556,6 +588,9 @@ router.post('/:id/restore', (req, res) => {
     };
 
     const newVersion = VersionModel.createCheckpointTransaction(versionData, diffHunks, id, req.user.id);
+    SessionModel.upsert(id, newVersion.id, restoredHash, 'clean', req.user.id);
+
+    console.log(`[Restore] successfully restored V${targetVersion.version_number} as V${newVersion.version_number}`);
 
     res.json({
       status: 'success',
@@ -566,8 +601,8 @@ router.post('/:id/restore', (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error restoring version:', error);
-    res.status(500).json({ status: 'error', message: 'Failed to restore version' });
+    console.error('[Restore Error]:', error);
+    res.status(500).json({ status: 'error', message: error.message || 'Failed to restore version' });
   }
 });
 

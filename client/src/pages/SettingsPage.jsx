@@ -525,16 +525,14 @@ export default function SettingsPage({ theme, setTheme }) {
                     </div>
                   </div>
 
-                  {googleDriveStatus.connected && (
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid var(--border-subtle)', paddingTop: '8px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                      <div>
-                        Pending Google Sync: <strong style={{ color: 'var(--text-primary)' }}>{sync?.pendingGoogleCount || 0}</strong> notes
-                      </div>
-                      <div>
-                        Last Sync: <strong style={{ color: 'var(--text-primary)' }}>{sync?.lastSyncedAt ? formatRelativeTime(sync.lastSyncedAt) : 'Never'}</strong>
-                      </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid var(--border-subtle)', paddingTop: '8px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                    <div>
+                      Pending Google Sync: <strong style={{ color: (sync?.pendingGoogleCount || 0) > 0 ? 'var(--accent-warning)' : 'var(--text-primary)' }}>{sync?.pendingGoogleCount || 0}</strong> note{(sync?.pendingGoogleCount || 0) === 1 ? '' : 's'}
                     </div>
-                  )}
+                    <div>
+                      Last Sync: <strong style={{ color: 'var(--text-primary)' }}>{sync?.lastSyncedAt ? formatRelativeTime(sync.lastSyncedAt) : 'Never'}</strong>
+                    </div>
+                  </div>
                 </div>
               </div>
 

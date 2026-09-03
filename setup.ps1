@@ -181,30 +181,16 @@ if (-not $pgReady) {
 Write-Success "PostgreSQL is accepting connections on localhost:5432."
 
 # ------------------------------------------------------------------------------
-# 5. Four-File Environment Configuration (.env & .env.secrets)
+# 5. Environment Configuration System (server\.env & server\.env.secrets)
 # ------------------------------------------------------------------------------
 Write-Info "Configuring environment files..."
-
-$rootEnv = Join-Path $PSScriptRoot ".env"
-$rootEnvEx = Join-Path $PSScriptRoot ".env.example"
-$rootSecrets = Join-Path $PSScriptRoot ".env.secrets"
-$rootSecretsEx = Join-Path $PSScriptRoot ".env.secrets.example"
 
 $serverEnv = Join-Path $PSScriptRoot "server\.env"
 $serverEnvEx = Join-Path $PSScriptRoot "server\.env.example"
 $serverSecrets = Join-Path $PSScriptRoot "server\.env.secrets"
 $serverSecretsEx = Join-Path $PSScriptRoot "server\.env.secrets.example"
 
-# 1. Non-sensitive .env files
-if (-not (Test-Path $rootEnv)) {
-    if (Test-Path $rootEnvEx) {
-        Copy-Item -Path $rootEnvEx -Destination $rootEnv
-        Write-Success "Created root .env from .env.example."
-    }
-} else {
-    Write-Info "Existing root .env found. Keeping existing configuration."
-}
-
+# 1. Non-sensitive server\.env file
 if (-not (Test-Path $serverEnv)) {
     if (Test-Path $serverEnvEx) {
         Copy-Item -Path $serverEnvEx -Destination $serverEnv
@@ -214,16 +200,7 @@ if (-not (Test-Path $serverEnv)) {
     Write-Info "Existing server\.env found. Keeping existing configuration."
 }
 
-# 2. Sensitive .env.secrets files
-if (-not (Test-Path $rootSecrets)) {
-    if (Test-Path $rootSecretsEx) {
-        Copy-Item -Path $rootSecretsEx -Destination $rootSecrets
-        Write-Warn "Created .env.secrets from .env.secrets.example template. Real secret values must be provided."
-    }
-} else {
-    Write-Info "Existing root .env.secrets found. Keeping existing secret configuration."
-}
-
+# 2. Sensitive server\.env.secrets file
 if (-not (Test-Path $serverSecrets)) {
     if (Test-Path $serverSecretsEx) {
         Copy-Item -Path $serverSecretsEx -Destination $serverSecrets
@@ -308,8 +285,6 @@ Write-Host ""
 
 # Read env content safely without exposing actual secret values
 $combinedEnv = ""
-if (Test-Path $rootEnv) { $combinedEnv += Get-Content $rootEnv -Raw }
-if (Test-Path $rootSecrets) { $combinedEnv += Get-Content $rootSecrets -Raw }
 if (Test-Path $serverEnv) { $combinedEnv += Get-Content $serverEnv -Raw }
 if (Test-Path $serverSecrets) { $combinedEnv += Get-Content $serverSecrets -Raw }
 

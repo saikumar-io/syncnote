@@ -1,13 +1,11 @@
 const path = require('path');
 const dotenv = require('dotenv');
 
-// 1. Load non-sensitive .env configuration
+// 1. Load non-sensitive .env configuration from server/.env
 dotenv.config({ path: path.join(__dirname, '../.env') });
-dotenv.config({ path: path.join(__dirname, '../../.env') });
 
-// 2. Load sensitive credentials from .env.secrets (overrides placeholders)
+// 2. Load sensitive credentials from server/.env.secrets (overrides placeholders)
 dotenv.config({ path: path.join(__dirname, '../.env.secrets'), override: true });
-dotenv.config({ path: path.join(__dirname, '../../.env.secrets'), override: true });
 
 const express = require('express');
 const cors = require('cors');

@@ -28,34 +28,34 @@ function Write-Status {
 Write-Banner
 
 # ------------------------------------------------------------------------------
-# 1. Environment Files Check (.env & .env.secrets)
+# 1. Environment Files Check (server\.env & server\.env.secrets)
 # ------------------------------------------------------------------------------
-$rootEnv = Join-Path $PSScriptRoot ".env"
-$rootEnvEx = Join-Path $PSScriptRoot ".env.example"
-$rootSecrets = Join-Path $PSScriptRoot ".env.secrets"
-$rootSecretsEx = Join-Path $PSScriptRoot ".env.secrets.example"
+$serverEnv = Join-Path $PSScriptRoot "server\.env"
+$serverEnvEx = Join-Path $PSScriptRoot "server\.env.example"
+$serverSecrets = Join-Path $PSScriptRoot "server\.env.secrets"
+$serverSecretsEx = Join-Path $PSScriptRoot "server\.env.secrets.example"
 
-if (-not (Test-Path $rootEnv)) {
-    if (Test-Path $rootEnvEx) {
-        Copy-Item -Path $rootEnvEx -Destination $rootEnv
-        Write-Status "Environment" "Created .env from .env.example" [ConsoleColor]::Yellow
+if (-not (Test-Path $serverEnv)) {
+    if (Test-Path $serverEnvEx) {
+        Copy-Item -Path $serverEnvEx -Destination $serverEnv
+        Write-Status "Environment" "Created server\.env from example" [ConsoleColor]::Yellow
     } else {
-        Write-Host "[ERROR] .env file is missing and .env.example was not found." -ForegroundColor Red
+        Write-Host "[ERROR] server\.env file is missing and server\.env.example was not found." -ForegroundColor Red
         Exit 1
     }
 } else {
-    Write-Status "Environment" "OK (.env present)" [ConsoleColor]::Green
+    Write-Status "Environment" "OK (server\.env present)" [ConsoleColor]::Green
 }
 
-if (-not (Test-Path $rootSecrets)) {
-    if (Test-Path $rootSecretsEx) {
-        Copy-Item -Path $rootSecretsEx -Destination $rootSecrets
-        Write-Status "Secrets" "Created .env.secrets template" [ConsoleColor]::Yellow
+if (-not (Test-Path $serverSecrets)) {
+    if (Test-Path $serverSecretsEx) {
+        Copy-Item -Path $serverSecretsEx -Destination $serverSecrets
+        Write-Status "Secrets" "Created server\.env.secrets template" [ConsoleColor]::Yellow
     } else {
-        Write-Status "Secrets" "Missing .env.secrets" [ConsoleColor]::Yellow
+        Write-Status "Secrets" "Missing server\.env.secrets" [ConsoleColor]::Yellow
     }
 } else {
-    Write-Status "Secrets" "OK (.env.secrets present)" [ConsoleColor]::Green
+    Write-Status "Secrets" "OK (server\.env.secrets present)" [ConsoleColor]::Green
 }
 
 # ------------------------------------------------------------------------------

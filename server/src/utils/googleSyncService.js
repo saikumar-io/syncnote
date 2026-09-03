@@ -659,27 +659,31 @@ function getPendingGoogleSyncItems(userId) {
 
   const pending = [];
   for (const note of allNotes) {
-    const currentContent = readNoteFile(note.file_path);
-    const currentHash = calculateHash(currentContent);
+    try {
+      const currentContent = readNoteFile(note.file_path);
+      const currentHash = calculateHash(currentContent);
 
-    let state = note.sync_state || 'NOT_SYNCED';
-    if (!note.gdrive_file_id || !note.last_synced_hash) {
-      state = 'NOT_SYNCED';
-    } else if (currentHash !== note.last_synced_hash) {
-      state = 'MODIFIED_OFFLINE';
-    }
+      let state = note.sync_state || 'NOT_SYNCED';
+      if (!note.gdrive_file_id || !note.last_synced_hash) {
+        state = 'NOT_SYNCED';
+      } else if (currentHash !== note.last_synced_hash) {
+        state = 'MODIFIED_OFFLINE';
+      }
 
-    if (state !== 'SYNCED') {
-      pending.push({
-        id: note.id,
-        title: note.title,
-        sync_mode: note.sync_mode,
-        sync_state: state,
-        updated_at: note.updated_at,
-        last_synced_at: note.last_synced_at,
-        last_synced_hash: note.last_synced_hash,
-        current_hash: currentHash
-      });
+      if (state !== 'SYNCED') {
+        pending.push({
+          id: note.id,
+          title: note.title,
+          sync_mode: note.sync_mode,
+          sync_state: state,
+          updated_at: note.updated_at,
+          last_synced_at: note.last_synced_at,
+          last_synced_hash: note.last_synced_hash,
+          current_hash: currentHash
+        });
+      }
+    } catch (err) {
+      console.warn(`[getPendingGoogleSyncItems] Failed inspecting note ${note.id}: ${err.message}`);
     }
   }
 

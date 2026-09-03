@@ -121,17 +121,17 @@ router.get('/status', optionalAuth, async (req, res) => {
 
     const breakdown = {
       local: allNotes.filter(n => n.sync_mode === 'local').length,
-      google: allNotes.filter(n => n.sync_mode === 'google').length,
+      google: allNotes.filter(n => n.sync_mode === 'google' || n.sync_mode === 'cloud').length,
       lan: allNotes.filter(n => n.sync_mode === 'lan').length
     };
 
     return res.json({
       status: 'ok',
-      userId: req.user.id,
-      authenticated: true,
+      userId: req.user ? req.user.id : 'usr_local_default',
+      authenticated: Boolean(req.user),
       googleAccount,
       googleDrive,
-      onlineSyncConnected: googleDrive.connected || googleAccount.connected,
+      onlineSyncConnected: Boolean(googleDrive.connected),
       gdriveFolderName: 'SyncNote',
       lanSync: {
         available: true,
@@ -145,48 +145,6 @@ router.get('/status', optionalAuth, async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to fetch sync status', details: err.message });
-  }
-});
-
-// POST /api/sync/gdrive/sync-now - Trigger manual or batch Google Drive synchronization pass
-router.post('/gdrive/sync-now', requireAuth, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const result = await syncUserNotesWithGoogleDrive(userId);
-    return res.json({
-      success: true,
-      message: 'Google Drive sync pass completed.',
-      result
-    });
-  } catch (err) {
-    console.error('Google Drive Sync Error:', err);
-    return res.status(500).json({ error: 'Google Drive sync failed', details: err.message });
-  }
-});
-
-// GET /api/sync/gdrive/pending - List Google notes modified offline or conflicting
-router.get('/gdrive/pending', requireAuth, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const pending = getPendingGoogleSyncItems(userId);
-    return res.json({
-      success: true,
-      pendingCount: pending.length,
-      items: pending
-    });
-  } catch (err) {
-    return res.status(500).json({ error: 'Failed to fetch pending sync items', details: err.message });
-  }
-});
-
-// GET /api/sync/gdrive/reachability - Check Google Drive reachability
-router.get('/gdrive/reachability', requireAuth, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const status = await checkGoogleDriveReachability(userId);
-    return res.json(status);
-  } catch (err) {
-    return res.status(500).json({ reachable: false, error: err.message });
   }
 });
 

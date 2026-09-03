@@ -21,6 +21,30 @@ export default function NoteEditorPage({
     }
   }, [noteId, activeNote?.id, setActiveNoteId]);
 
+  // Always fetch fresh note content from authoritative backend (notes file & SQLite) when noteId changes
+  useEffect(() => {
+    if (!noteId || noteId === 'draft') return;
+    let isCancelled = false;
+
+    const fetchFreshNote = async () => {
+      try {
+        const { default: notesApi } = await import('../api/notesApi');
+        const freshData = await notesApi.getById(noteId);
+        if (!isCancelled && freshData && onUpdateNote) {
+          onUpdateNote(noteId, freshData);
+        }
+      } catch (err) {
+        console.error(`[NoteEditorPage] Failed to fetch note ${noteId}:`, err);
+      }
+    };
+
+    fetchFreshNote();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [noteId, onUpdateNote]);
+
   const currentNote = notes.find((n) => n.id === noteId) || activeNote;
 
   return (

@@ -4,29 +4,38 @@
 
 ---
 
-## 💻 Setup on a New Windows Laptop
+## 💻 Setup & Startup
 
-Follow these steps to set up SyncNote on a new Windows laptop from scratch:
+Follow these steps to set up SyncNote on a new laptop (Windows or macOS/MacBook) from scratch:
 
 ### 1. Requirements
 Ensure the following tools are installed on your system:
 - **Git**: [https://git-scm.com/](https://git-scm.com/)
-- **Node.js** (v18 or higher): [https://nodejs.org/](https://nodejs.org/)
+- **Node.js** (v18 or higher): [https://nodejs.org/](https://nodejs.org/) or `brew install node`
 - **Docker Desktop**: [https://www.docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop)
 
 ---
 
 ### 2. First-Time Setup Workflow
 
-Open PowerShell, clone the repository, and run the automated setup script:
+Clone the repository and run the automated setup script for your OS:
 
+#### 🍏 macOS (MacBook) / Linux:
+```bash
+git clone <repository-url>
+cd syncnotes
+chmod +x setup.sh start.sh
+./setup.sh
+```
+
+#### 🪟 Windows PowerShell:
 ```powershell
 git clone <repository-url>
 cd syncnotes
 .\setup.ps1
 ```
 
-#### What `setup.ps1` automates:
+#### What `setup.sh` / `setup.ps1` automates:
 - Checks **Node.js**, **npm**, and **Docker** availability.
 - Launches **Docker Desktop** automatically if installed but stopped.
 - Detects or starts the **PostgreSQL container** (`syncnote-postgres` on port `5432`) using Docker Compose.
@@ -56,16 +65,12 @@ SyncNote uses a 4-file environment system to separate tracked documentation temp
 To set up a second trusted development laptop:
 
 1. Clone the repository and run setup:
-   ```powershell
-   git clone <repository-url>
-   cd syncnotes
-   .\setup.ps1
-   ```
+   - **macOS / Linux**: `./setup.sh`
+   - **Windows**: `.\setup.ps1`
 2. **Securely copy your existing `.env.secrets` file** from your primary development laptop (or password manager) into the `syncnotes` root folder (and `server/` directory).
 3. Start the application:
-   ```powershell
-   .\start.ps1
-   ```
+   - **macOS / Linux**: `./start.sh`
+   - **Windows**: `.\start.ps1`
 
 > [!IMPORTANT]
 > **Private Secret Backup Guidelines**:
@@ -75,12 +80,19 @@ To set up a second trusted development laptop:
 
 ### 5. Application Startup
 
-To start SyncNote after setup, run either:
+To start SyncNote after setup, run:
 
+#### macOS (MacBook) / Linux:
+```bash
+./start.sh
+```
+
+#### Windows:
 ```powershell
 .\start.ps1
 ```
-*or:*
+
+*or on any platform:*
 ```bash
 npm run dev
 ```
@@ -135,8 +147,10 @@ syncnotes/
 ├── scripts/
 │   └── dev-start.js            # Dev launcher (loads .env then .env.secrets)
 │
+├── setup.sh                    # Automated 1-command macOS/Linux setup script
+├── start.sh                    # Convenient daily macOS/Linux startup script
 ├── setup.ps1                   # Automated 1-command Windows setup script
-├── start.ps1                   # Convenient daily startup script
+├── start.ps1                   # Convenient daily Windows startup script
 ├── docker-compose.yml          # Docker service definition for PostgreSQL 16
 ├── .env.example                # Tracked environment variable reference template
 ├── .env.secrets.example        # Tracked sensitive secrets template (placeholders only)

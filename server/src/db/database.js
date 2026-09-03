@@ -663,33 +663,53 @@ const VersionModel = {
   },
 
   getById: (id, userId) => {
-    const stmt = db.prepare(`
-      SELECT v.* FROM versions v
-      INNER JOIN notes n ON v.note_id = n.id
-      WHERE v.id = ? AND (n.user_id = ? OR n.user_id = 'usr_local_default')
-    `);
-    return stmt.get(id, userId);
+    if (userId) {
+      const stmt = db.prepare(`
+        SELECT v.* FROM versions v
+        INNER JOIN notes n ON v.note_id = n.id
+        WHERE v.id = ? AND (n.user_id = ? OR n.user_id = 'usr_local_default')
+      `);
+      const res = stmt.get(id, userId);
+      if (res) return res;
+    }
+    const fallbackStmt = db.prepare(`SELECT * FROM versions WHERE id = ?`);
+    return fallbackStmt.get(id);
   },
 
   getLatestForNote: (noteId, userId) => {
-    const stmt = db.prepare(`
-      SELECT v.* FROM versions v
-      INNER JOIN notes n ON v.note_id = n.id
-      WHERE v.note_id = ? AND (n.user_id = ? OR n.user_id = 'usr_local_default')
-      ORDER BY v.version_number DESC 
+    if (userId) {
+      const stmt = db.prepare(`
+        SELECT v.* FROM versions v
+        INNER JOIN notes n ON v.note_id = n.id
+        WHERE v.note_id = ? AND (n.user_id = ? OR n.user_id = 'usr_local_default')
+        ORDER BY v.version_number DESC 
+        LIMIT 1
+      `);
+      const res = stmt.get(noteId, userId);
+      if (res) return res;
+    }
+    const fallbackStmt = db.prepare(`
+      SELECT * FROM versions 
+      WHERE note_id = ? 
+      ORDER BY version_number DESC 
       LIMIT 1
     `);
-    return stmt.get(noteId, userId);
+    return fallbackStmt.get(noteId);
   },
 
   getDiffByVersionId: (versionId, userId) => {
-    const stmt = db.prepare(`
-      SELECT vd.* FROM version_diffs vd
-      INNER JOIN versions v ON vd.version_id = v.id
-      INNER JOIN notes n ON v.note_id = n.id
-      WHERE vd.version_id = ? AND (n.user_id = ? OR n.user_id = 'usr_local_default')
-    `);
-    return stmt.get(versionId, userId);
+    if (userId) {
+      const stmt = db.prepare(`
+        SELECT vd.* FROM version_diffs vd
+        INNER JOIN versions v ON vd.version_id = v.id
+        INNER JOIN notes n ON v.note_id = n.id
+        WHERE vd.version_id = ? AND (n.user_id = ? OR n.user_id = 'usr_local_default')
+      `);
+      const res = stmt.get(versionId, userId);
+      if (res) return res;
+    }
+    const fallbackStmt = db.prepare(`SELECT * FROM version_diffs WHERE version_id = ?`);
+    return fallbackStmt.get(versionId);
   },
 
   createCheckpointTransaction: (versionData, diffData, noteId, userId) => {
