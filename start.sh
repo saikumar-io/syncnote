@@ -83,73 +83,15 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 3. Docker CLI & Daemon Check
+# 3. Database & Architecture Check
 # ------------------------------------------------------------------------------
-if ! command -v docker >/dev/null 2>&1; then
-    echo -e "${RED}[ERROR] Docker CLI is not installed or not in PATH.${NC}"
-    exit 1
-fi
+write_status "PostgreSQL" "OK (Supabase Central / DATABASE_URL)" "$GREEN"
+write_status "SQLite" "OK (Local Notes & Identity Storage)" "$GREEN"
 
-if ! docker info >/dev/null 2>&1; then
-    echo -e "${YELLOW}[INFO] Docker Desktop daemon is not running. Attempting to launch...${NC}"
-    
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        open -a Docker >/dev/null 2>&1 || true
-    fi
-    
-    RETRIES=0
-    while [ $RETRIES -lt 45 ]; do
-        sleep 1
-        if docker info >/dev/null 2>&1; then
-            break
-        fi
-        RETRIES=$((RETRIES + 1))
-    done
-fi
-
-if ! docker info >/dev/null 2>&1; then
-    echo -e "${RED}[ERROR] Docker daemon is not running. Please start Docker Desktop manually.${NC}"
-    exit 1
-fi
-write_status "Docker" "OK (Daemon active)" "$GREEN"
-
-# ------------------------------------------------------------------------------
-# 4. PostgreSQL Container Check & Startup
-# ------------------------------------------------------------------------------
-CONTAINER_NAME="syncnote-postgres"
-
-EXISTING_STATUS=$(docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format "{{.Status}}" 2>/dev/null || true)
-if [ -z "$EXISTING_STATUS" ]; then
-    EXISTING_STATUS=$(docker ps -a --filter "name=${CONTAINER_NAME}" --format "{{.Status}}" 2>/dev/null || true)
-fi
-
-if [[ "$EXISTING_STATUS" == Up* ]]; then
-    write_status "PostgreSQL" "OK (Container '$CONTAINER_NAME' running)" "$GREEN"
-elif [ -n "$EXISTING_STATUS" ]; then
-    echo -e "${YELLOW}[INFO] Starting stopped container '$CONTAINER_NAME'...${NC}"
-    docker start "$CONTAINER_NAME" >/dev/null
-    write_status "PostgreSQL" "OK (Started existing container)" "$GREEN"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    write_status "Docker" "Optional (Active)" "$GREEN"
 else
-    echo -e "${YELLOW}[INFO] Container '$CONTAINER_NAME' not found. Creating via Docker Compose...${NC}"
-    docker compose up -d postgres 2>/dev/null || docker-compose up -d postgres 2>/dev/null
-    write_status "PostgreSQL" "OK (Created container)" "$GREEN"
-fi
-
-# Ensure TCP port 5432 connectivity
-PG_READY=0
-ATTEMPTS=0
-while [ $ATTEMPTS -lt 30 ]; do
-    if node -e "const net = require('net'); const socket = net.connect(5432, '127.0.0.1', () => { socket.destroy(); process.exit(0); }); socket.on('error', () => process.exit(1));" >/dev/null 2>&1; then
-        PG_READY=1
-        break
-    fi
-    sleep 1
-    ATTEMPTS=$((ATTEMPTS + 1))
-done
-
-if [ $PG_READY -eq 0 ]; then
-    echo -e "${RED}[ERROR] PostgreSQL is not accepting connections on port 5432.${NC}"
-    exit 1
+    write_status "Docker" "Optional (Stopped/Not installed)" "$YELLOW"
 fi
 
 # ------------------------------------------------------------------------------

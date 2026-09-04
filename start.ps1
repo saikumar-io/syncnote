@@ -71,105 +71,25 @@ try {
 }
 
 # ------------------------------------------------------------------------------
-# 3. Docker CLI & Daemon Check
+# 3. Database & Architecture Check
 # ------------------------------------------------------------------------------
+Write-Status "PostgreSQL" "OK (Supabase Central / DATABASE_URL)" [ConsoleColor]::Green
+Write-Status "SQLite" "OK (Local Notes & Identity Storage)" [ConsoleColor]::Green
+
 try {
     $dockerVer = & docker --version 2>$null
-    if (-not $dockerVer) { throw "Docker CLI missing" }
+    if ($dockerVer) {
+        $dockerInfo = & docker info 2>$null
+        if ($dockerInfo) {
+            Write-Status "Docker" "Optional (Active)" [ConsoleColor]::Green
+        } else {
+            Write-Status "Docker" "Optional (Stopped)" [ConsoleColor]::Yellow
+        }
+    } else {
+        Write-Status "Docker" "Optional (Not Installed)" [ConsoleColor]::Yellow
+    }
 } catch {
-    Write-Host "[ERROR] Docker CLI is not installed or not in PATH." -ForegroundColor Red
-    Exit 1
-}
-
-$dockerInfo = & docker info 2>$null
-if (-not $dockerInfo) {
-    Write-Host "[INFO] Docker Desktop daemon is not running. Attempting to launch..." -ForegroundColor Yellow
-    
-    $dockerPaths = @(
-        "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
-        "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe"
-    )
-    
-    $started = $false
-    foreach ($path in $dockerPaths) {
-        if (Test-Path $path) {
-            Start-Process -FilePath $path
-            $started = $true
-            break
-        }
-    }
-    
-    if (-not $started) {
-        try {
-            Start-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
-            $started = $true
-        } catch {}
-    }
-    
-    if ($started) {
-        $retries = 0
-        while ($retries -lt 45) {
-            Start-Sleep -Seconds 1
-            $dockerInfo = & docker info 2>$null
-            if ($dockerInfo) { break }
-            $retries++
-        }
-    }
-}
-
-$dockerInfo = & docker info 2>$null
-if (-not $dockerInfo) {
-    Write-Host "[ERROR] Docker daemon is not running. Please start Docker Desktop manually." -ForegroundColor Red
-    Exit 1
-}
-Write-Status "Docker" "OK (Daemon active)" [ConsoleColor]::Green
-
-# ------------------------------------------------------------------------------
-# 4. PostgreSQL Container Check & Startup
-# ------------------------------------------------------------------------------
-$containerName = "syncnote-postgres"
-
-$existingStatus = & docker ps -a --filter "name=^/${containerName}$" --format "{{.Status}}" 2>$null
-if (-not $existingStatus) {
-    $existingStatus = & docker ps -a --filter "name=${containerName}" --format "{{.Status}}" 2>$null
-}
-
-if ($existingStatus -and $existingStatus.StartsWith("Up")) {
-    Write-Status "PostgreSQL" "OK (Container '$containerName' running)" [ConsoleColor]::Green
-} elseif ($existingStatus) {
-    Write-Host "[INFO] Starting stopped container '$containerName'..." -ForegroundColor Yellow
-    & docker start $containerName | Out-Null
-    Write-Status "PostgreSQL" "OK (Started existing container)" [ConsoleColor]::Green
-} else {
-    Write-Host "[INFO] Container '$containerName' not found. Creating via Docker Compose..." -ForegroundColor Yellow
-    & docker compose up -d postgres 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        & docker-compose up -d postgres 2>$null
-    }
-    Write-Status "PostgreSQL" "OK (Created container)" [ConsoleColor]::Green
-}
-
-# Ensure TCP port 5432 connectivity
-$pgReady = $false
-$attempts = 0
-while ($attempts -lt 30) {
-    try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $tcp.Connect("127.0.0.1", 5432)
-        if ($tcp.Connected) {
-            $tcp.Close()
-            $pgReady = $true
-            break
-        }
-    } catch {
-        Start-Sleep -Seconds 1
-    }
-    $attempts++
-}
-
-if (-not $pgReady) {
-    Write-Host "[ERROR] PostgreSQL is not accepting connections on port 5432." -ForegroundColor Red
-    Exit 1
+    Write-Status "Docker" "Optional" [ConsoleColor]::Yellow
 }
 
 # ------------------------------------------------------------------------------

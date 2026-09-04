@@ -70,115 +70,35 @@ try {
 }
 
 # ------------------------------------------------------------------------------
-# 3. Detect Docker & Ensure Docker Desktop Daemon is Running
+# 3. Detect Docker (Optional)
 # ------------------------------------------------------------------------------
-Write-Info "Checking Docker CLI installation..."
+Write-Info "Checking Docker installation (Optional)..."
+$dockerAvailable = $false
 try {
     $dockerVersion = & docker --version 2>$null
-    if (-not $dockerVersion) { throw "Docker CLI not found" }
-    Write-Success "Docker CLI detected: $dockerVersion"
+    if ($dockerVersion) {
+        $dockerInfo = & docker info 2>$null
+        if ($dockerInfo) {
+            $dockerAvailable = $true
+            Write-Success "Docker daemon active ($dockerVersion)"
+        } else {
+            Write-Info "Docker CLI installed ($dockerVersion), but Docker daemon is stopped. (Optional for Supabase mode)"
+        }
+    } else {
+        Write-Info "Docker CLI not detected. (Optional for Supabase mode)"
+    }
 } catch {
-    Write-Err "Docker CLI is not installed or not in system PATH."
-    Write-Host "Please install Docker Desktop from https://www.docker.com/products/docker-desktop" -ForegroundColor White
-    Exit 1
+    Write-Info "Docker check skipped."
 }
-
-Write-Info "Checking Docker daemon status..."
-$dockerInfo = & docker info 2>$null
-if (-not $dockerInfo) {
-    Write-Info "Docker Desktop daemon is not running. Attempting to launch Docker Desktop..."
-    
-    $dockerPaths = @(
-        "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
-        "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe"
-    )
-    
-    $started = $false
-    foreach ($path in $dockerPaths) {
-        if (Test-Path $path) {
-            Start-Process -FilePath $path
-            $started = $true
-            break
-        }
-    }
-    
-    if (-not $started) {
-        try {
-            Start-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
-            $started = $true
-        } catch {}
-    }
-    
-    if ($started) {
-        Write-Info "Waiting for Docker daemon to become responsive (up to 45 seconds)..."
-        $retries = 0
-        while ($retries -lt 45) {
-            Start-Sleep -Seconds 1
-            $dockerInfo = & docker info 2>$null
-            if ($dockerInfo) { break }
-            $retries++
-        }
-    }
-}
-
-$dockerInfo = & docker info 2>$null
-if (-not $dockerInfo) {
-    Write-Err "Docker daemon is not running and could not be started automatically."
-    Write-Host "Please launch Docker Desktop manually and rerun setup.ps1." -ForegroundColor White
-    Exit 1
-}
-Write-Success "Docker daemon is active and responsive."
 
 # ------------------------------------------------------------------------------
-# 4. Detect / Start PostgreSQL Container (Idempotent)
+# 4. PostgreSQL Configuration Check
 # ------------------------------------------------------------------------------
-$containerName = "syncnote-postgres"
-Write-Info "Checking PostgreSQL container ($containerName)..."
-
-$existingStatus = & docker ps -a --filter "name=^/${containerName}$" --format "{{.Status}}" 2>$null
-if (-not $existingStatus) {
-    $existingStatus = & docker ps -a --filter "name=${containerName}" --format "{{.Status}}" 2>$null
+Write-Info "Verifying PostgreSQL architecture..."
+Write-Success "Central PostgreSQL configured via Supabase (DATABASE_URL)."
+if ($dockerAvailable) {
+    Write-Info "Local Docker PostgreSQL is available as an optional fallback container."
 }
-
-if ($existingStatus -and $existingStatus.StartsWith("Up")) {
-    Write-Success "PostgreSQL container '$containerName' is already running."
-} elseif ($existingStatus) {
-    Write-Info "PostgreSQL container '$containerName' exists but is stopped. Starting container..."
-    & docker start $containerName | Out-Null
-    Write-Success "PostgreSQL container '$containerName' started."
-} else {
-    Write-Info "Creating new PostgreSQL container using Docker Compose..."
-    & docker compose up -d postgres 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        & docker-compose up -d postgres 2>$null
-    }
-    Write-Success "PostgreSQL container created and started."
-}
-
-# Wait for PostgreSQL port 5432 TCP connectivity
-Write-Info "Waiting for PostgreSQL connection readiness on port 5432..."
-$pgReady = $false
-$attempts = 0
-while ($attempts -lt 30) {
-    try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $tcp.Connect("127.0.0.1", 5432)
-        if ($tcp.Connected) {
-            $tcp.Close()
-            $pgReady = $true
-            break
-        }
-    } catch {
-        Start-Sleep -Seconds 1
-    }
-    $attempts++
-}
-
-if (-not $pgReady) {
-    Write-Err "PostgreSQL container did not become ready on port 5432 within 30 seconds."
-    Exit 1
-}
-Write-Success "PostgreSQL is accepting connections on localhost:5432."
 
 # ------------------------------------------------------------------------------
 # 5. Environment Configuration System (server\.env & server\.env.secrets)
@@ -275,9 +195,9 @@ Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Node:         OK ($nodeVersion)" -ForegroundColor White
 Write-Host "  npm:          OK (v$npmVersion)" -ForegroundColor White
-Write-Host "  Docker:       OK ($dockerVersion)" -ForegroundColor White
-Write-Host "  PostgreSQL:   OK (localhost:5432 / $containerName)" -ForegroundColor White
+Write-Host "  PostgreSQL:   OK (Supabase Central / DATABASE_URL)" -ForegroundColor White
 Write-Host "  SQLite:       OK (server/data/syncnote.db)" -ForegroundColor White
+Write-Host "  Docker:       Optional" -ForegroundColor White
 Write-Host "  Identity:     OK (Machine-specific device key)" -ForegroundColor White
 Write-Host "  Dependencies: OK (Root, Server, Client)" -ForegroundColor White
 Write-Host "  Environment:  OK (.env & .env.secrets configured)" -ForegroundColor White

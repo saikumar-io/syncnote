@@ -1,5 +1,4 @@
 const { execSync, spawn } = require('child_process');
-const net = require('net');
 const path = require('path');
 const fs = require('fs');
 
@@ -32,24 +31,14 @@ loadEnvFile(path.join(__dirname, '../.env'));
 loadEnvFile(path.join(__dirname, '../server/.env.secrets'), true);
 loadEnvFile(path.join(__dirname, '../.env.secrets'), true);
 
-const CONTAINER_NAME = 'syncnote-postgres';
-const PG_PORT = parseInt(process.env.POSTGRES_PORT || '5432', 10);
-
 function printBanner() {
   console.log('\n╭──────────────────────────────╮');
   console.log('│        SyncNote Dev          │');
   console.log('╰──────────────────────────────╯\n');
 }
 
-function runCmd(cmd) {
-  try {
-    return execSync(cmd, { stdio: 'pipe', encoding: 'utf8' }).trim();
-  } catch (err) {
-    return null;
-  }
-}
-
 function ensureDependencies() {
+  console.log('[1/5] Checking Node/npm dependencies...');
   const serverCookieParser = path.join(__dirname, '../server/node_modules/cookie-parser');
   const serverPg = path.join(__dirname, '../server/node_modules/pg');
   if (!fs.existsSync(serverCookieParser) || !fs.existsSync(serverPg)) {
@@ -58,124 +47,52 @@ function ensureDependencies() {
     const npmCmd = isWin ? 'npm.cmd' : 'npm';
     execSync(`${npmCmd} install --prefix server`, { stdio: 'inherit' });
     console.log('✓ Server dependencies installed successfully.');
+  } else {
+    console.log('✓ Monorepo dependencies verified.');
   }
 }
 
-async function checkDockerInstalled() {
-  console.log('[1/5] Checking Docker...');
-  const version = runCmd('docker --version');
-  if (!version) {
-    console.error('\n✗ Docker Desktop is not installed.');
-    console.error('  SyncNote requires Docker for PostgreSQL authentication.');
-    console.error('  Please install Docker Desktop and run `npm run dev` again.\n');
-    process.exit(1);
-  }
-  console.log(`✓ Docker detected: ${version}`);
-}
-
-async function checkDockerRunning() {
-  const info = runCmd('docker info');
-  if (!info) {
-    console.error('\n✗ Docker is installed but Docker Desktop is not running.');
-    console.error('  Please start Docker Desktop and try again.\n');
-    process.exit(1);
+function validateEnvironment() {
+  console.log('\n[2/5] Validating environment configuration...');
+  const dbUrl = process.env.DATABASE_URL;
+  if (dbUrl) {
+    const isSupabase = dbUrl.includes('supabase') || dbUrl.includes('pooler');
+    console.log(`✓ PostgreSQL DATABASE_URL configured (${isSupabase ? 'Supabase Central' : 'PostgreSQL'})`);
+  } else {
+    console.log('ℹ PostgreSQL DATABASE_URL not set (will fall back to local SQLite user store)');
   }
 }
 
-async function ensurePostgresContainer() {
-  console.log('\n[2/5] Checking PostgreSQL container...');
+function ensureLocalStorage() {
+  console.log('\n[3/5] Preparing local SQLite storage & device identity...');
+  const rootDir = path.join(__dirname, '..');
+  const dirs = [
+    path.join(rootDir, 'data'),
+    path.join(rootDir, 'data', 'notes'),
+    path.join(rootDir, 'server', 'data'),
+    path.join(rootDir, 'server', 'data', 'notes')
+  ];
 
-  // Check if container exists
-  const status = runCmd(`docker ps -a --filter "name=${CONTAINER_NAME}" --format "{{.Status}}"`);
-
-  if (status && status.startsWith('Up')) {
-    console.log(`✓ ${CONTAINER_NAME} already running`);
-    return;
-  }
-
-  if (status) {
-    console.log(`→ Starting existing ${CONTAINER_NAME} container...`);
-    const startResult = runCmd(`docker start ${CONTAINER_NAME}`) || runCmd('docker compose up -d postgres');
-    if (!startResult) {
-      console.error(`✗ Failed to start existing ${CONTAINER_NAME} container.`);
-      process.exit(1);
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
     }
-    console.log(`✓ Container ${CONTAINER_NAME} started`);
-    return;
   }
 
-  console.log(`[2/5] PostgreSQL container not found`);
-  console.log(`→ Creating ${CONTAINER_NAME} using Docker Compose...`);
-
-  const composeResult = runCmd('docker compose up -d postgres') || runCmd('docker-compose up -d postgres');
-  if (!composeResult) {
-    console.error(`✗ Failed to create ${CONTAINER_NAME} container.`);
-    process.exit(1);
-  }
-  console.log(`✓ PostgreSQL container created`);
-}
-
-function checkTcpPort(host, port, timeoutMs = 1000) {
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
-    let isConnected = false;
-
-    socket.setTimeout(timeoutMs);
-
-    socket.on('connect', () => {
-      isConnected = true;
-      socket.destroy();
-      resolve(true);
-    });
-
-    socket.on('timeout', () => {
-      socket.destroy();
-      resolve(false);
-    });
-
-    socket.on('error', () => {
-      socket.destroy();
-      resolve(false);
-    });
-
-    socket.connect(port, host);
-  });
-}
-
-async function waitForPostgresHealth() {
-  console.log('\n[3/5] Checking PostgreSQL health...');
-
-  const maxAttempts = 30;
-  let attempts = 0;
-  let healthy = false;
-
-  while (attempts < maxAttempts) {
-    attempts++;
-
-    // Check TCP port connectivity
-    const isPortOpen = await checkTcpPort('127.0.0.1', PG_PORT, 800);
-
-    if (isPortOpen) {
-      // Also check Docker health attribute if present
-      const healthStatus = runCmd(`docker inspect --format="{{if .State.Health}}{{.State.Health.Status}}{{else}}healthy{{end}}" ${CONTAINER_NAME}`);
-      if (!healthStatus || healthStatus === 'healthy' || healthStatus === 'starting') {
-        healthy = true;
-        break;
-      }
-    }
-
-    await new Promise((r) => setTimeout(r, 1000));
+  try {
+    require('../server/src/db/database.js');
+    console.log('✓ Local SQLite database verified');
+  } catch (err) {
+    console.warn('⚠️ Local SQLite init warning:', err.message);
   }
 
-  if (!healthy) {
-    console.error(`\n✗ PostgreSQL failed to become ready on port ${PG_PORT}.`);
-    console.error('\nDiagnostic logs (docker logs):');
-    const logs = runCmd(`docker logs ${CONTAINER_NAME} --tail 20`);
-    if (logs) console.error(logs);
-    process.exit(1);
+  try {
+    const { getOrCreateDeviceIdentity } = require('../server/src/utils/deviceCrypto.js');
+    getOrCreateDeviceIdentity();
+    console.log('✓ Device cryptographic identity verified');
+  } catch (err) {
+    console.warn('⚠️ Device identity warning:', err.message);
   }
-
-  console.log(`✓ PostgreSQL ready on localhost:${PG_PORT}`);
 }
 
 function spawnService(name, command, args, cwd) {
@@ -195,8 +112,8 @@ function spawnService(name, command, args, cwd) {
 }
 
 function startServices() {
-  console.log('\n[4/5] Starting backend...');
-  console.log('[5/5] Starting frontend...\n');
+  console.log('\n[4/5] Starting backend service (port 5000)...');
+  console.log('[5/5] Starting frontend service (port 5173)...\n');
   console.log('✓ SyncNote is ready. Launching development processes...\n');
 
   const rootDir = path.join(__dirname, '..');
@@ -220,10 +137,8 @@ function startServices() {
 async function main() {
   printBanner();
   ensureDependencies();
-  await checkDockerInstalled();
-  await checkDockerRunning();
-  await ensurePostgresContainer();
-  await waitForPostgresHealth();
+  validateEnvironment();
+  ensureLocalStorage();
   startServices();
 }
 

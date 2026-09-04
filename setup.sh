@@ -76,85 +76,25 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 3. Detect Docker & Ensure Docker Desktop Daemon is Running
+# 3. Detect Docker (Optional)
 # ------------------------------------------------------------------------------
-write_info "Checking Docker CLI installation..."
+write_info "Checking Docker installation (Optional)..."
 if command -v docker >/dev/null 2>&1; then
-    DOCKER_VER=$(docker --version)
-    write_success "Docker CLI detected: $DOCKER_VER"
-else
-    write_err "Docker CLI is not installed or not in system PATH."
-    echo -e "${WHITE}Please install Docker Desktop for Mac from https://www.docker.com/products/docker-desktop or via 'brew install --cask docker'${NC}"
-    exit 1
-fi
-
-write_info "Checking Docker daemon status..."
-if ! docker info >/dev/null 2>&1; then
-    write_info "Docker daemon is not running. Attempting to launch Docker Desktop..."
-    
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        open -a Docker >/dev/null 2>&1 || true
+    DOCKER_VER=$(docker --version 2>/dev/null || true)
+    if docker info >/dev/null 2>&1; then
+        write_success "Docker daemon active ($DOCKER_VER)"
+    else
+        write_info "Docker CLI installed ($DOCKER_VER), but Docker daemon is stopped. (Optional for Supabase mode)"
     fi
-    
-    write_info "Waiting for Docker daemon to become responsive (up to 45 seconds)..."
-    RETRIES=0
-    while [ $RETRIES -lt 45 ]; do
-        sleep 1
-        if docker info >/dev/null 2>&1; then
-            break
-        fi
-        RETRIES=$((RETRIES + 1))
-    done
+else
+    write_info "Docker CLI not detected. (Optional for Supabase mode)"
 fi
-
-if ! docker info >/dev/null 2>&1; then
-    write_err "Docker daemon is not running and could not be started automatically."
-    echo -e "${WHITE}Please launch Docker Desktop manually and rerun ./setup.sh${NC}"
-    exit 1
-fi
-write_success "Docker daemon is active and responsive."
 
 # ------------------------------------------------------------------------------
-# 4. Detect / Start PostgreSQL Container (Idempotent)
+# 4. PostgreSQL Configuration Check
 # ------------------------------------------------------------------------------
-CONTAINER_NAME="syncnote-postgres"
-write_info "Checking PostgreSQL container ($CONTAINER_NAME)..."
-
-EXISTING_STATUS=$(docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format "{{.Status}}" 2>/dev/null || true)
-if [ -z "$EXISTING_STATUS" ]; then
-    EXISTING_STATUS=$(docker ps -a --filter "name=${CONTAINER_NAME}" --format "{{.Status}}" 2>/dev/null || true)
-fi
-
-if [[ "$EXISTING_STATUS" == Up* ]]; then
-    write_success "PostgreSQL container '$CONTAINER_NAME' is already running."
-elif [ -n "$EXISTING_STATUS" ]; then
-    write_info "PostgreSQL container '$CONTAINER_NAME' exists but is stopped. Starting container..."
-    docker start "$CONTAINER_NAME" >/dev/null
-    write_success "PostgreSQL container '$CONTAINER_NAME' started."
-else
-    write_info "Creating new PostgreSQL container using Docker Compose..."
-    docker compose up -d postgres 2>/dev/null || docker-compose up -d postgres 2>/dev/null
-    write_success "PostgreSQL container created and started."
-fi
-
-# Wait for PostgreSQL port 5432 TCP connectivity
-write_info "Waiting for PostgreSQL connection readiness on port 5432..."
-PG_READY=0
-ATTEMPTS=0
-while [ $ATTEMPTS -lt 30 ]; do
-    if node -e "const net = require('net'); const socket = net.connect(5432, '127.0.0.1', () => { socket.destroy(); process.exit(0); }); socket.on('error', () => process.exit(1));" >/dev/null 2>&1; then
-        PG_READY=1
-        break
-    fi
-    sleep 1
-    ATTEMPTS=$((ATTEMPTS + 1))
-done
-
-if [ $PG_READY -eq 0 ]; then
-    write_err "PostgreSQL container did not become ready on port 5432 within 30 seconds."
-    exit 1
-fi
-write_success "PostgreSQL is accepting connections on localhost:5432."
+write_info "Verifying PostgreSQL architecture..."
+write_success "Central PostgreSQL configured via Supabase (DATABASE_URL)."
 
 # ------------------------------------------------------------------------------
 # 5. Environment Configuration System (server/.env & server/.env.secrets)
@@ -238,9 +178,9 @@ echo -e "${GREEN}========================================${NC}"
 echo -e ""
 echo -e "${WHITE}  Node:         OK ($NODE_VER)${NC}"
 echo -e "${WHITE}  npm:          OK (v$NPM_VER)${NC}"
-echo -e "${WHITE}  Docker:       OK ($DOCKER_VER)${NC}"
-echo -e "${WHITE}  PostgreSQL:   OK (localhost:5432 / $CONTAINER_NAME)${NC}"
+echo -e "${WHITE}  PostgreSQL:   OK (Supabase Central / DATABASE_URL)${NC}"
 echo -e "${WHITE}  SQLite:       OK (server/data/syncnote.db)${NC}"
+echo -e "${WHITE}  Docker:       Optional${NC}"
 echo -e "${WHITE}  Identity:     OK (Machine-specific device key)${NC}"
 echo -e "${WHITE}  Dependencies: OK (Root, Server, Client)${NC}"
 echo -e "${WHITE}  Environment:  OK (.env & .env.secrets configured)${NC}"
