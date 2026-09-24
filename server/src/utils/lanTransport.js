@@ -60,6 +60,32 @@ async function checkPeerReachable(remoteIp, remotePort = 5000, timeoutMs = 1500)
 }
 
 /**
+ * Send an explicit connection handshake to a discovered peer on LAN
+ */
+async function sendLanConnect(remoteIp, remotePort = 5000, localProfile, localUserId = 'usr_local_default') {
+  const payload = {
+    deviceId: localProfile.deviceId,
+    deviceName: localProfile.deviceName,
+    deviceType: localProfile.deviceType || 'desktop',
+    publicKey: localProfile.publicKey,
+    port: parseInt(process.env.PORT || '5000', 10),
+    userId: localUserId
+  };
+
+  const res = await httpRequest({
+    hostname: remoteIp,
+    port: remotePort,
+    path: '/api/lan/connect',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    }
+  }, payload, 2500);
+
+  return res;
+}
+
+/**
  * Send an explicit pairing request to a remote device
  */
 async function sendPairingRequest(remoteIp, remotePort = 5000, localProfile, localUserId) {
@@ -307,5 +333,6 @@ module.exports = {
   pollPairingStatus,
   sendEncryptedLanSync,
   sendEncryptedLanUnpair,
-  sendEncryptedLanHeartbeat
+  sendEncryptedLanHeartbeat,
+  sendLanConnect
 };

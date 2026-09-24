@@ -166,7 +166,18 @@ export function SyncProvider({ children }) {
         }
 
         setPairedDevices(prevDevices => {
-          if (!prevDevices || prevDevices.length === 0) return [];
+          if (!prevDevices || prevDevices.length === 0) {
+            if (res.presence.length > 0) {
+              fetchPairedDevices();
+            }
+            return [];
+          }
+
+          const prevIds = new Set(prevDevices.map(d => d.id));
+          const hasNew = res.presence.some(p => !prevIds.has(p.id));
+          if (hasNew) {
+            fetchPairedDevices();
+          }
 
           return prevDevices
             .filter(device => presenceMap.has(device.id))

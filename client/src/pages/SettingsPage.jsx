@@ -572,44 +572,25 @@ export default function SettingsPage({ theme, setTheme }) {
                 </div>
               </div>
 
-              {/* LAN SYNC CARD */}
+              {/* LAN DEVICES CARD */}
               <div style={{ background: 'var(--bg-app)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', padding: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <div>
                   <div style={{ fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>
-                    LAN Sync
+                    LAN Devices
                   </div>
-                  <div style={{ fontSize: '0.74rem', color: 'var(--accent-emerald)', fontWeight: 600 }}>
-                    ● Available
+                  <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
+                    {sync.pairedDevices && sync.pairedDevices.length > 0
+                      ? `${sync.pairedDevices.length} device${sync.pairedDevices.length === 1 ? '' : 's'} on local network`
+                      : 'Peer-to-peer sync over local Wi-Fi'}
                   </div>
                 </div>
                 <button
                   type="button"
                   className="btn-primary"
                   onClick={() => navigate('/settings/sync/lan')}
-                  style={{ padding: '6px 12px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
+                  style={{ padding: '6px 14px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
                 >
-                  <span>Scan for Devices</span>
-                  <ArrowRight size={13} />
-                </button>
-              </div>
-
-              {/* PAIRED DEVICES CARD */}
-              <div style={{ background: 'var(--bg-app)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', padding: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div>
-                  <div style={{ fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>
-                    Paired Devices
-                  </div>
-                  <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
-                    {sync.pairedDevices ? `${sync.pairedDevices.length} device${sync.pairedDevices.length === 1 ? '' : 's'}` : '0 devices'}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => navigate('/settings/sync/paired-devices')}
-                  style={{ padding: '6px 12px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
-                >
-                  <span>View Devices</span>
+                  <span>View LAN Devices</span>
                   <ArrowRight size={13} />
                 </button>
               </div>
