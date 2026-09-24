@@ -22,11 +22,12 @@ export default function LanSyncPage() {
 
   const [isScanning, setIsScanning] = useState(false);
   const [pairingDeviceId, setPairingDeviceId] = useState(null);
+  const [pairingStatus, setPairingStatus] = useState({}); // { [devId]: 'WAITING_APPROVAL' }
   const [syncingDeviceId, setSyncingDeviceId] = useState(null);
   const [unpairingDeviceId, setUnpairingDeviceId] = useState(null);
   const [deviceMessages, setDeviceMessages] = useState({});
 
-  // On mount: load paired devices, run discovery, and check reachability
+  // On mount: load paired devices, run discovery, check reachability, and poll for pending requests
   useEffect(() => {
     let isMounted = true;
 
@@ -39,13 +40,24 @@ export default function LanSyncPage() {
         if (sync.checkDevicesPresence) {
           await sync.checkDevicesPresence();
         }
+        if (sync.fetchPendingPairingRequests) {
+          await sync.fetchPendingPairingRequests();
+        }
       } catch (e) {}
     };
 
     init();
 
+    // Fast poll for pending incoming pairing requests so approval prompt appears promptly
+    const pendingInterval = setInterval(() => {
+      if (isMounted && sync.fetchPendingPairingRequests) {
+        sync.fetchPendingPairingRequests();
+      }
+    }, 2000);
+
     return () => {
       isMounted = false;
+      clearInterval(pendingInterval);
     };
   }, []);
 
@@ -61,6 +73,9 @@ export default function LanSyncPage() {
       if (sync.checkDevicesPresence) {
         await sync.checkDevicesPresence();
       }
+      if (sync.fetchPendingPairingRequests) {
+        await sync.fetchPendingPairingRequests();
+      }
     } catch (err) {
       console.warn('LAN scan error:', err);
     } finally {
@@ -68,23 +83,42 @@ export default function LanSyncPage() {
     }
   };
 
-  // Handle Pair: establishes mutual cryptographic trust
+  // Handle Approve: user accepts incoming pairing request
+  const handleApprove = async (requestId) => {
+    try {
+      await sync.approveLanPairing(requestId);
+    } catch (err) {
+      console.error('Failed to approve pairing:', err);
+      alert(`Approval error: ${err.message}`);
+    }
+  };
+
+  // Handle Reject: user declines incoming pairing request
+  const handleReject = async (requestId) => {
+    try {
+      await sync.rejectLanPairing(requestId);
+    } catch (err) {
+      console.error('Failed to reject pairing:', err);
+    }
+  };
+
+  // Handle Pair: initiates pairing and waits for remote approval
   const handlePair = async (dev) => {
     const devId = dev.deviceId || dev.id;
     setPairingDeviceId(devId);
-    setDeviceMessages(prev => ({ ...prev, [devId]: { type: 'info', text: 'Connecting...' } }));
+    setPairingStatus(prev => ({ ...prev, [devId]: 'WAITING_APPROVAL' }));
 
     try {
-      await sync.pairDevice(dev);
-      setDeviceMessages(prev => ({ ...prev, [devId]: { type: 'success', text: 'Connected' } }));
-      setTimeout(() => {
-        setDeviceMessages(prev => {
-          const next = { ...prev };
-          delete next[devId];
-          return next;
-        });
-      }, 3000);
+      const result = await sync.pairDevice(dev);
+      if (result && result.status === 'APPROVED') {
+        // Automatically moved to Paired Devices
+      } else if (result && result.status === 'REJECTED') {
+        // Reverted to UNPAIRED without popup
+      } else if (result && result.status === 'TIMEOUT') {
+        // Timed out waiting for approval: reverted cleanly
+      }
     } catch (err) {
+      console.warn('Pairing error:', err);
       setDeviceMessages(prev => ({ ...prev, [devId]: { type: 'error', text: err.message || 'Pairing failed' } }));
       setTimeout(() => {
         setDeviceMessages(prev => {
@@ -95,6 +129,11 @@ export default function LanSyncPage() {
       }, 5000);
     } finally {
       setPairingDeviceId(null);
+      setPairingStatus(prev => {
+        const next = { ...prev };
+        delete next[devId];
+        return next;
+      });
     }
   };
 
@@ -143,14 +182,18 @@ export default function LanSyncPage() {
     }
 
     setUnpairingDeviceId(devId);
-    setDeviceMessages(prev => ({ ...prev, [devId]: { type: 'info', text: 'Unpairing...' } }));
 
     try {
       await sync.unpairDevice(devId);
     } catch (err) {
-      alert(`Failed to unpair: ${err.message}`);
+      console.warn('Unpair warning:', err);
     } finally {
       setUnpairingDeviceId(null);
+      setDeviceMessages(prev => {
+        const next = { ...prev };
+        delete next[devId];
+        return next;
+      });
     }
   };
 
@@ -227,6 +270,89 @@ export default function LanSyncPage() {
         </div>
       )}
 
+      {/* SECTION: INCOMING PAIRING REQUEST APPROVAL PROMPT */}
+      {sync.pendingPairingRequests && sync.pendingPairingRequests.length > 0 && (
+        <div style={{ marginBottom: '24px' }}>
+          {sync.pendingPairingRequests.map(req => (
+            <div
+              key={req.id}
+              style={{
+                background: 'var(--bg-app)',
+                border: '1.5px solid var(--accent-primary)',
+                boxShadow: '0 4px 14px rgba(99, 102, 241, 0.12)',
+                borderRadius: 'var(--radius-md)',
+                padding: '16px 20px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '16px',
+                flexWrap: 'wrap',
+                marginBottom: '12px'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                <div style={{
+                  width: '42px',
+                  height: '42px',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'rgba(99, 102, 241, 0.12)',
+                  color: 'var(--accent-primary)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0
+                }}>
+                  {getDeviceIcon(req.requesterDeviceType)}
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                    SyncNote device wants to connect
+                  </div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                    Device: <strong style={{ color: 'var(--text-primary)' }}>{req.requesterDeviceName} ({req.requesterDeviceType || 'desktop'})</strong>
+                  </div>
+                  {req.requesterDeviceIp && (
+                    <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                      IP: <strong>{req.requesterDeviceIp}</strong>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => handleApprove(req.id)}
+                  style={{
+                    padding: '6px 18px',
+                    fontSize: '0.8rem',
+                    background: 'var(--accent-emerald)',
+                    borderColor: 'var(--accent-emerald)',
+                    fontWeight: 600
+                  }}
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => handleReject(req.id)}
+                  style={{
+                    padding: '6px 14px',
+                    fontSize: '0.8rem',
+                    color: 'var(--accent-danger)',
+                    fontWeight: 600
+                  }}
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* SECTION 1: AVAILABLE ON LAN */}
       <div style={{ marginBottom: '32px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
@@ -260,6 +386,7 @@ export default function LanSyncPage() {
             {availableDevices.map(dev => {
               const devId = dev.deviceId || dev.id;
               const isPairing = pairingDeviceId === devId;
+              const isWaitingApproval = pairingStatus[devId] === 'WAITING_APPROVAL';
               const msg = deviceMessages[devId];
 
               return (
@@ -337,12 +464,21 @@ export default function LanSyncPage() {
                     <button
                       type="button"
                       className="btn-primary"
-                      disabled={isPairing}
+                      disabled={isPairing || isWaitingApproval}
                       onClick={() => handlePair(dev)}
                       style={{ padding: '6px 16px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}
                     >
-                      <Link size={13} className={isPairing ? 'spin' : ''} />
-                      <span>{isPairing ? 'Pairing...' : 'Pair'}</span>
+                      {isWaitingApproval ? (
+                        <>
+                          <RefreshCw size={13} className="spin" />
+                          <span>Waiting for approval...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Link size={13} className={isPairing ? 'spin' : ''} />
+                          <span>Pair</span>
+                        </>
+                      )}
                     </button>
                   </div>
                 </div>

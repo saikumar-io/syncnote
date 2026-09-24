@@ -351,8 +351,9 @@ router.post('/connect', (req, res) => {
 
 /**
  * POST /api/lan/pair
- * Local user explicitly clicks [Pair] on an available discovered device.
- * Handshakes with the peer's /api/lan/connect to establish mutual cryptographic trust.
+ * Initiated when user on this machine clicks [Pair] on a discovered peer.
+ * Sends an explicit authenticated pairing request to peer's /api/lan/pair/request.
+ * Does NOT mark the device as paired until peer approves (or if already trusted).
  */
 router.post('/pair', async (req, res) => {
   try {
@@ -370,42 +371,66 @@ router.post('/pair', async (req, res) => {
 
     const peerPort = targetPort || 5000;
 
-    // 1. Send connection handshake to target peer
-    let targetProfile = null;
+    // Check if device is ALREADY paired and trusted locally
+    const existing = LanPairingModel.getById(targetDeviceId);
+    if (existing && existing.status === 'TRUSTED') {
+      return res.json({
+        success: true,
+        status: 'APPROVED',
+        approved: true,
+        alreadyPaired: true,
+        pairedDevice: existing
+      });
+    }
+
+    // 1. Send pairing request to target peer
+    let pairReqRes;
     try {
-      const connectRes = await sendLanConnect(targetIp, peerPort, localProfile, currentUserId);
-      if (connectRes && connectRes.status === 200 && connectRes.data) {
-        targetProfile = connectRes.data.localDevice;
-      }
+      pairReqRes = await sendPairingRequest(targetIp, peerPort, localProfile, currentUserId);
     } catch (err) {
-      console.warn(`[LAN Pair] Connect handshake error to ${targetIp}:${peerPort}: ${err.message}`);
+      console.warn(`[LAN Pair] Pairing request error to ${targetIp}:${peerPort}: ${err.message}`);
+      return res.status(502).json({ error: `Could not reach device at ${targetIp}:${peerPort}: ${err.message}` });
     }
 
-    const finalPublicKey = targetPublicKey || targetProfile?.publicKey;
-    if (!finalPublicKey) {
-      return res.status(400).json({ error: 'Could not obtain peer public key for secure pairing.' });
+    // If the remote peer was already paired with us and immediately approved
+    if (pairReqRes && pairReqRes.status === 'APPROVED') {
+      const finalPublicKey = targetPublicKey || pairReqRes.localDevice?.publicKey;
+      const pairedDev = LanPairingModel.createPairing({
+        id: targetDeviceId,
+        deviceName: targetDeviceName || pairReqRes.localDevice?.deviceName || 'SyncNote Device',
+        deviceIp: targetIp,
+        devicePort: peerPort,
+        pairingToken: pairReqRes.pairingToken || crypto.randomBytes(32).toString('hex'),
+        publicKey: finalPublicKey,
+        deviceType: targetDeviceType || pairReqRes.localDevice?.deviceType || 'desktop',
+        userId: currentUserId,
+        status: 'TRUSTED'
+      });
+
+      resetDeviceSequence(targetDeviceId);
+      console.log(`[LAN Pair] Automatically restored mutual trust with already-approved '${pairedDev.device_name}' (${targetDeviceId})`);
+
+      return res.json({
+        success: true,
+        status: 'APPROVED',
+        approved: true,
+        pairedDevice: pairedDev
+      });
     }
 
-    // 2. Save target device locally as TRUSTED (clearing any prior revocation)
-    const pairedDev = LanPairingModel.createPairing({
-      id: targetDeviceId,
-      deviceName: targetDeviceName || targetProfile?.deviceName || 'SyncNote Device',
-      deviceIp: targetIp,
-      devicePort: peerPort,
-      pairingToken: crypto.randomBytes(32).toString('hex'),
-      publicKey: finalPublicKey,
-      deviceType: targetDeviceType || targetProfile?.deviceType || 'desktop',
-      userId: currentUserId,
-      status: 'TRUSTED'
-    });
-
-    resetDeviceSequence(targetDeviceId);
-    console.log(`[LAN Pair] Successfully paired with '${pairedDev.device_name}' (${targetDeviceId})`);
+    // Remote peer created a PENDING request waiting for its user's approval
+    console.log(`[LAN Pair] Request submitted to ${targetIp}:${peerPort}. Awaiting user approval on peer. Request ID: ${pairReqRes.requestId}`);
 
     return res.json({
       success: true,
-      message: 'Device paired successfully',
-      pairedDevice: pairedDev
+      status: 'PENDING',
+      requestId: pairReqRes.requestId,
+      targetDeviceId,
+      targetDeviceName: targetDeviceName || pairReqRes.localDevice?.deviceName || 'SyncNote Device',
+      targetDeviceType: targetDeviceType || pairReqRes.localDevice?.deviceType || 'desktop',
+      targetIp,
+      targetPort: peerPort,
+      targetPublicKey: targetPublicKey || pairReqRes.localDevice?.publicKey
     });
   } catch (err) {
     console.error('Error during LAN pair:', err);
@@ -414,7 +439,10 @@ router.post('/pair', async (req, res) => {
 });
 
 /**
- * Backward compatibility: POST /api/lan/pair/request
+ * POST /api/lan/pair/request
+ * Inbound pairing request from a remote peer:
+ * Creates a PENDING pairing request in database so the local user can Approve or Reject.
+ * Never marks device as TRUSTED automatically unless already trusted.
  */
 router.post('/pair/request', (req, res) => {
   try {
@@ -422,7 +450,7 @@ router.post('/pair/request', (req, res) => {
     const localProfile = getPublicDeviceProfile();
 
     if (!requesterDeviceId || !requesterPublicKey) {
-      return res.status(400).json({ error: 'Missing required parameters.' });
+      return res.status(400).json({ error: 'Missing requesterDeviceId or requesterPublicKey.' });
     }
 
     if (requesterDeviceId === localProfile.deviceId) {
@@ -430,33 +458,85 @@ router.post('/pair/request', (req, res) => {
     }
 
     const peerIp = req.ip || req.socket?.remoteAddress;
+
+    // Check if requester is ALREADY trusted
     const existing = LanPairingModel.getById(requesterDeviceId);
-    if (existing && existing.status === 'REVOKED') {
-      return res.status(403).json({ error: 'Device pairing revoked.', code: 'UNPAIRED_DEVICE' });
+    if (existing && existing.status === 'TRUSTED') {
+      return res.json({
+        success: true,
+        status: 'APPROVED',
+        approved: true,
+        alreadyPaired: true,
+        localDevice: localProfile,
+        pairingToken: existing.pairing_token
+      });
     }
 
-    const pairedDevice = LanPairingModel.createPairing({
-      id: requesterDeviceId,
-      deviceName: requesterDeviceName || 'SyncNote Device',
-      deviceIp: peerIp,
-      devicePort: requesterPort || 5000,
-      pairingToken: existing?.pairing_token || crypto.randomBytes(32).toString('hex'),
-      publicKey: requesterPublicKey,
-      deviceType: requesterDeviceType || 'desktop',
-      userId: requesterUserId || 'usr_local_default',
-      status: 'TRUSTED'
+    // Create a PENDING request in lan_pairing_requests table
+    const pendingReq = LanPairingRequestModel.create({
+      requesterDeviceId,
+      requesterDeviceName: requesterDeviceName || 'SyncNote Device',
+      requesterDeviceType: requesterDeviceType || 'desktop',
+      requesterDeviceIp: peerIp,
+      requesterPort: requesterPort || 5000,
+      requesterPublicKey,
+      requesterUserId: requesterUserId || 'usr_local_default',
+      targetUserId: 'usr_local_default'
     });
+
+    console.log(`[LAN Pairing] Created pending pairing request ${pendingReq.id} from '${requesterDeviceName}' (${requesterDeviceId})`);
 
     return res.json({
       success: true,
-      status: 'APPROVED',
-      approved: true,
-      alreadyPaired: true,
-      localDevice: localProfile,
-      pairingToken: pairedDevice.pairing_token
+      status: 'PENDING',
+      requestId: pendingReq.id,
+      localDevice: localProfile
     });
   } catch (err) {
-    return res.status(500).json({ error: 'Connection failed', details: err.message });
+    console.error('Error handling pairing request:', err);
+    return res.status(500).json({ error: 'Pairing request failed', details: err.message });
+  }
+});
+
+/**
+ * GET /api/lan/pair/status/:requestId
+ * Remote peer polls this endpoint to check if the local user approved or rejected pairing
+ */
+router.get('/pair/status/:requestId', (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const pairingReq = LanPairingRequestModel.getById(requestId);
+    if (!pairingReq) {
+      return res.status(404).json({ error: 'Pairing request not found' });
+    }
+
+    const localProfile = getPublicDeviceProfile();
+
+    if (pairingReq.status === 'APPROVED') {
+      return res.json({
+        success: true,
+        status: 'APPROVED',
+        approved: true,
+        pairingToken: pairingReq.pairing_token,
+        localDevice: localProfile
+      });
+    }
+
+    if (pairingReq.status === 'REJECTED') {
+      return res.json({
+        success: true,
+        status: 'REJECTED',
+        approved: false
+      });
+    }
+
+    return res.json({
+      success: true,
+      status: 'PENDING',
+      approved: false
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to retrieve pairing request status', details: err.message });
   }
 });
 
@@ -630,7 +710,6 @@ router.post('/unpair', (req, res) => {
 
     // 5. Revoke the requesting device locally (idempotent: safe if already revoked)
     LanPairingModel.revokePairing(senderDeviceId, senderDevice.user_id);
-    resetDeviceSequence(senderDeviceId);
     console.log(`[LAN Unpair] Successfully revoked pairing for peer '${senderDevice.device_name}' (${senderDeviceId}) upon remote request.`);
 
     // 6. Return authenticated encrypted acknowledgement (UNPAIR_ACK)
@@ -650,6 +729,9 @@ router.post('/unpair', (req, res) => {
       localProfile.deviceId,
       senderDevice.id
     );
+
+    // Reset sequence tracking after encrypting the acknowledgement
+    resetDeviceSequence(senderDeviceId);
 
     return res.json({
       success: true,
@@ -797,12 +879,170 @@ router.get('/discover', async (req, res) => {
   }
 });
 
-// Backward compatibility stubs for legacy pairing callers
-router.get('/pair/pending', (req, res) => res.json({ success: true, pending: [] }));
-router.post('/pair/approve', (req, res) => res.json({ success: true }));
-router.post('/pair/reject', (req, res) => res.json({ success: true }));
-router.post('/pair/send-request', (req, res) => res.json({ success: true, status: 'APPROVED' }));
-router.post('/pair/check-status', (req, res) => res.json({ success: true, status: 'APPROVED' }));
+/**
+ * GET /api/lan/pair/pending
+ * Returns list of pending inbound pairing requests awaiting user approval
+ */
+router.get('/pair/pending', (req, res) => {
+  try {
+    const userId = req.user ? req.user.id : 'usr_local_default';
+    const pending = LanPairingRequestModel.getPendingForUser(userId);
+    return res.json({
+      success: true,
+      pending: pending.map(r => ({
+        id: r.id,
+        requesterDeviceId: r.requester_device_id,
+        requesterDeviceName: r.requester_device_name,
+        requesterDeviceType: r.requester_device_type,
+        requesterDeviceIp: r.requester_device_ip,
+        requesterPort: r.requester_port,
+        createdAt: r.created_at
+      }))
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch pending pairing requests', details: err.message });
+  }
+});
+
+/**
+ * POST /api/lan/pair/approve
+ * User explicitly clicks [Approve] on an incoming pairing prompt.
+ * Marks the request as APPROVED and creates a TRUSTED pairing in database.
+ */
+router.post('/pair/approve', (req, res) => {
+  try {
+    const { requestId } = req.body || {};
+    const userId = req.user ? req.user.id : 'usr_local_default';
+
+    if (!requestId) {
+      return res.status(400).json({ error: 'requestId is required.' });
+    }
+
+    const pairingReq = LanPairingRequestModel.getById(requestId);
+    if (!pairingReq) {
+      return res.status(404).json({ error: 'Pairing request not found.' });
+    }
+
+    const pairingToken = pairingReq.pairing_token || crypto.randomBytes(32).toString('hex');
+
+    // 1. Mark request as APPROVED
+    LanPairingRequestModel.approve(requestId, pairingToken);
+
+    // 2. Add requester to lan_paired_devices as TRUSTED
+    const pairedDev = LanPairingModel.createPairing({
+      id: pairingReq.requester_device_id,
+      deviceName: pairingReq.requester_device_name,
+      deviceIp: pairingReq.requester_device_ip,
+      devicePort: pairingReq.requester_port || 5000,
+      pairingToken,
+      publicKey: pairingReq.requester_public_key,
+      deviceType: pairingReq.requester_device_type || 'desktop',
+      userId,
+      status: 'TRUSTED'
+    });
+
+    resetDeviceSequence(pairingReq.requester_device_id);
+    console.log(`[LAN Pair Approval] User approved device '${pairedDev.device_name}' (${pairedDev.id})`);
+
+    return res.json({
+      success: true,
+      message: 'Pairing approved',
+      pairedDevice: pairedDev
+    });
+  } catch (err) {
+    console.error('Error approving pairing request:', err);
+    return res.status(500).json({ error: 'Failed to approve pairing', details: err.message });
+  }
+});
+
+/**
+ * POST /api/lan/pair/reject
+ * User explicitly clicks [Reject] on an incoming pairing prompt.
+ */
+router.post('/pair/reject', (req, res) => {
+  try {
+    const { requestId } = req.body || {};
+    if (!requestId) {
+      return res.status(400).json({ error: 'requestId is required.' });
+    }
+
+    const pairingReq = LanPairingRequestModel.getById(requestId);
+    if (!pairingReq) {
+      return res.status(404).json({ error: 'Pairing request not found.' });
+    }
+
+    LanPairingRequestModel.reject(requestId);
+    console.log(`[LAN Pair Rejection] User rejected pairing request ${requestId} from '${pairingReq.requester_device_name}'`);
+
+    return res.json({
+      success: true,
+      message: 'Pairing request rejected'
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to reject pairing', details: err.message });
+  }
+});
+
+/**
+ * POST /api/lan/pair/check-status
+ * Requester polls status of an outgoing pairing request to remote peer.
+ * When approved by remote peer, this node saves the device as TRUSTED locally.
+ */
+router.post('/pair/check-status', async (req, res) => {
+  try {
+    const { remoteIp, remotePort, requestId, targetDeviceId, targetDeviceName, targetDeviceType, targetPublicKey } = req.body || {};
+    const currentUserId = req.user ? req.user.id : 'usr_local_default';
+
+    if (!remoteIp || !requestId) {
+      return res.status(400).json({ error: 'remoteIp and requestId are required.' });
+    }
+
+    const peerPort = remotePort || 5000;
+    const statusRes = await pollPairingStatus(remoteIp, peerPort, requestId);
+
+    if (statusRes && statusRes.status === 'APPROVED') {
+      const finalPublicKey = targetPublicKey || statusRes.localDevice?.publicKey;
+      const pairedDev = LanPairingModel.createPairing({
+        id: targetDeviceId,
+        deviceName: targetDeviceName || statusRes.localDevice?.deviceName || 'SyncNote Device',
+        deviceIp: remoteIp,
+        devicePort: peerPort,
+        pairingToken: statusRes.pairingToken || crypto.randomBytes(32).toString('hex'),
+        publicKey: finalPublicKey,
+        deviceType: targetDeviceType || statusRes.localDevice?.deviceType || 'desktop',
+        userId: currentUserId,
+        status: 'TRUSTED'
+      });
+
+      resetDeviceSequence(targetDeviceId);
+      console.log(`[LAN Pair] Pairing approved remotely by '${pairedDev.device_name}' (${targetDeviceId}). Now paired locally.`);
+
+      return res.json({
+        success: true,
+        status: 'APPROVED',
+        approved: true,
+        pairedDevice: pairedDev
+      });
+    }
+
+    if (statusRes && statusRes.status === 'REJECTED') {
+      console.log(`[LAN Pair] Pairing request was rejected by remote device (${targetDeviceId}).`);
+      return res.json({
+        success: true,
+        status: 'REJECTED',
+        approved: false
+      });
+    }
+
+    return res.json({
+      success: true,
+      status: 'PENDING',
+      approved: false
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to poll pairing status', details: err.message });
+  }
+});
 
 /**
  * GET /api/lan/devices
@@ -970,7 +1210,6 @@ router.delete('/devices/:id', async (req, res) => {
 
   // STEP 1: Immediately revoke pairing locally so future sync attempts are blocked
   LanPairingModel.revokePairing(id, userId);
-  resetDeviceSequence(id);
   console.log(`[LAN Revocation] Revoked LAN trust locally for device ${id}`);
 
   // STEP 2: If peer has an IP address and public key, send authenticated UNPAIR_REQUEST
@@ -988,8 +1227,11 @@ router.delete('/devices/:id', async (req, res) => {
       console.warn(`[LAN Revocation] Remote device '${existing.device_name}' was offline or unreachable: ${err.message}`);
       remoteNotified = false;
       remoteMessage = 'Device removed locally. Remote revocation will be enforced when the device reconnects.';
+    } finally {
+      resetDeviceSequence(id);
     }
   } else {
+    resetDeviceSequence(id);
     remoteNotified = false;
     remoteMessage = 'Device removed locally. Remote revocation will be enforced when the device reconnects.';
   }

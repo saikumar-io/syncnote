@@ -359,19 +359,65 @@ export function SyncProvider({ children }) {
   };
 
   // Pair an available LAN device
-  const pairDevice = async (device) => {
+  const pairDevice = async (device, onStatusChange) => {
     try {
+      const targetDeviceId = device.deviceId || device.id;
+      const targetIp = device.ip || device.deviceIp;
+      const targetPort = device.port || device.devicePort || 5000;
+      const targetPublicKey = device.publicKey;
+      const targetDeviceName = device.deviceName || 'SyncNote Device';
+      const targetDeviceType = device.deviceType || 'desktop';
+
       const res = await apiClient.post('/api/lan/pair', {
-        targetDeviceId: device.deviceId || device.id,
-        targetIp: device.ip || device.deviceIp,
-        targetPort: device.port || device.devicePort || 5000,
-        targetPublicKey: device.publicKey,
-        targetDeviceName: device.deviceName,
-        targetDeviceType: device.deviceType || 'desktop'
+        targetDeviceId,
+        targetIp,
+        targetPort,
+        targetPublicKey,
+        targetDeviceName,
+        targetDeviceType
       });
-      await fetchPairedDevices();
-      await discoverLanDevices();
-      checkDevicesPresence();
+
+      if (res && res.status === 'APPROVED') {
+        await fetchPairedDevices();
+        await discoverLanDevices();
+        checkDevicesPresence();
+        return { status: 'APPROVED', pairedDevice: res.pairedDevice };
+      }
+
+      if (res && res.status === 'PENDING' && res.requestId) {
+        if (onStatusChange) onStatusChange('AWAITING_APPROVAL');
+
+        const startTime = Date.now();
+        const timeoutMs = 30000;
+
+        while (Date.now() - startTime < timeoutMs) {
+          await new Promise(r => setTimeout(r, 1500));
+
+          const checkRes = await apiClient.post('/api/lan/pair/check-status', {
+            remoteIp: targetIp,
+            remotePort: targetPort,
+            requestId: res.requestId,
+            targetDeviceId,
+            targetDeviceName,
+            targetDeviceType,
+            targetPublicKey
+          });
+
+          if (checkRes && checkRes.status === 'APPROVED') {
+            await fetchPairedDevices();
+            await discoverLanDevices();
+            checkDevicesPresence();
+            return { status: 'APPROVED', pairedDevice: checkRes.pairedDevice };
+          }
+
+          if (checkRes && checkRes.status === 'REJECTED') {
+            return { status: 'REJECTED' };
+          }
+        }
+
+        return { status: 'TIMEOUT' };
+      }
+
       return res;
     } catch (err) {
       throw err;
@@ -382,7 +428,7 @@ export function SyncProvider({ children }) {
   const unpairDevice = async (deviceId) => {
     try {
       // Optimistically remove immediately from local state
-      setPairedDevices(prev => (prev || []).filter(d => d.id !== deviceId));
+      setPairedDevices(prev => (prev || []).filter(d => d.id !== deviceId && d.deviceId !== deviceId));
       delete consecutiveFailuresRef.current[deviceId];
       const res = await apiClient.delete(`/api/lan/devices/${deviceId}`);
       await fetchPairedDevices();
