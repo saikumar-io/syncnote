@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node src/server.js"
+    "dev": "node src/server.js",
+    "test:lan": "node tests/test_lan_security.js && node tests/test_lan_sync_two_nodes.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

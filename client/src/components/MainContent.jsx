@@ -704,6 +704,14 @@ export default function MainContent({
             >
               LAN
             </button>
+            <button
+              type="button"
+              className={`sync-mode-segment-btn ${currentNoteMode === 'both' ? 'active' : ''}`}
+              onClick={() => handleDirectModeChange('both')}
+              title="Prefer LAN when available, fallback to Cloud"
+            >
+              BOTH
+            </button>
           </div>
 
           {/* Sync Status Badge & Action */}

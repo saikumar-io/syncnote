@@ -155,6 +155,10 @@ export function SyncProvider({ children }) {
 
       setSyncStatus('SYNCED');
       await refreshSyncStatus();
+      
+      // Dispatch real-time note update event for UI
+      window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
+
       return gdriveRes;
     } catch (err) {
       console.error('Trigger sync error:', err);
@@ -178,6 +182,10 @@ export function SyncProvider({ children }) {
       }
       await refreshSyncStatus();
       setSyncStatus('SYNCED');
+
+      // Dispatch real-time note update event for UI
+      window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
+
       return res;
     } catch (err) {
       setSyncStatus('FAILED');
@@ -188,15 +196,44 @@ export function SyncProvider({ children }) {
     }
   }, [refreshSyncStatus]);
 
-  // Request LAN Pairing
+  // Fetch Pending Inbound Pairing Requests
+  const fetchPendingPairingRequests = useCallback(async () => {
+    try {
+      const res = await apiClient.get('/api/lan/pair/pending');
+      if (res && res.pending) {
+        setPendingPairingRequests(res.pending);
+      }
+    } catch (err) {}
+  }, []);
+
+  // Request LAN Pairing with a discovered peer
   const requestLanPairing = async (device) => {
     try {
-      const res = await apiClient.post('/api/lan/pair/request', {
-        requestingDeviceId: device.deviceId,
-        requestingDeviceName: device.deviceName,
-        requestingDeviceIp: device.ip
+      const res = await apiClient.post('/api/lan/pair/send-request', {
+        remoteIp: device.ip,
+        remotePort: device.port || 5000,
+        remoteDeviceId: device.deviceId
       });
-      fetchPairedDevices();
+      return res;
+    } catch (err) {
+      throw err;
+    }
+  };
+
+  // Poll status of an outgoing pairing request
+  const pollOutgoingPairingStatus = async (remoteIp, remotePort, requestId, remoteDeviceId, remoteDeviceName, remotePublicKey) => {
+    try {
+      const res = await apiClient.post('/api/lan/pair/check-status', {
+        remoteIp,
+        remotePort: remotePort || 5000,
+        requestId,
+        remoteDeviceId,
+        remoteDeviceName,
+        remotePublicKey
+      });
+      if (res && res.status === 'APPROVED') {
+        await fetchPairedDevices();
+      }
       return res;
     } catch (err) {
       throw err;
@@ -207,21 +244,42 @@ export function SyncProvider({ children }) {
   const approveLanPairing = async (requestId) => {
     try {
       const res = await apiClient.post('/api/lan/pair/approve', { requestId });
-      fetchPairedDevices();
+      await fetchPairedDevices();
+      await fetchPendingPairingRequests();
       return res;
     } catch (err) {
       throw err;
     }
   };
 
-  // Synchronize over LAN with a paired device
-  const syncOverLan = async (pairedDevice, notes, notebooks) => {
+  // Reject LAN Pairing
+  const rejectLanPairing = async (requestId) => {
+    try {
+      const res = await apiClient.post('/api/lan/pair/reject', { requestId });
+      await fetchPendingPairingRequests();
+      return res;
+    } catch (err) {
+      throw err;
+    }
+  };
+
+  // Unpair / Revoke LAN Device
+  const unpairDevice = async (deviceId) => {
+    try {
+      const res = await apiClient.delete(`/api/lan/devices/${deviceId}`);
+      await fetchPairedDevices();
+      return res;
+    } catch (err) {
+      throw err;
+    }
+  };
+
+  // Outbound LAN sync with a paired device
+  const triggerLanSync = async (deviceId) => {
     setSyncStatus('SYNCING');
     setIsSyncing(true);
     try {
-      const res = await apiClient.post('/api/lan/sync', { notes, notebooks }, {
-        headers: { 'X-LAN-Pairing-Token': pairedDevice.pairing_token }
-      });
+      const res = await apiClient.post('/api/lan/sync/outbound', { deviceId });
       if (res && res.success) {
         if (res.conflictCount > 0) {
           setSyncStatus('CONFLICT');
@@ -229,6 +287,8 @@ export function SyncProvider({ children }) {
         } else {
           setSyncStatus('SYNCED');
         }
+        await fetchPairedDevices();
+        window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
       }
       return res;
     } catch (err) {
@@ -239,17 +299,24 @@ export function SyncProvider({ children }) {
     }
   };
 
+  // Synchronize over LAN with a paired device (direct payload fallback)
+  const syncOverLan = async (pairedDevice, notes, notebooks) => {
+    return triggerLanSync(pairedDevice.id || pairedDevice.deviceId);
+  };
+
   // Initial load and status polling
   useEffect(() => {
     refreshSyncStatus();
     fetchPairedDevices();
+    fetchPendingPairingRequests();
 
     const interval = setInterval(() => {
       refreshSyncStatus();
-    }, 15000);
+      fetchPendingPairingRequests();
+    }, 10000);
 
     return () => clearInterval(interval);
-  }, [refreshSyncStatus, fetchPairedDevices]);
+  }, [refreshSyncStatus, fetchPairedDevices, fetchPendingPairingRequests]);
 
   const value = {
     syncStatus,
@@ -274,8 +341,13 @@ export function SyncProvider({ children }) {
     refreshSyncStatus,
     discoverLanDevices,
     fetchPairedDevices,
+    fetchPendingPairingRequests,
     requestLanPairing,
+    pollOutgoingPairingStatus,
     approveLanPairing,
+    rejectLanPairing,
+    unpairDevice,
+    triggerLanSync,
     syncOverLan
   };
 

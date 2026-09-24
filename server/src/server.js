@@ -48,6 +48,8 @@ app.get('/', (req, res) => {
   });
 });
 
+const { startLanDiscoveryService } = require('./utils/lanDiscoveryService');
+
 // Start Express Listener
 app.listen(PORT, () => {
   console.log(`=================================`);
@@ -59,4 +61,7 @@ app.listen(PORT, () => {
   console.log(` - GOOGLE_CALLBACK_URL: ${process.env.GOOGLE_CALLBACK_URL || 'http://localhost:5000/api/auth/google/callback'}`);
   console.log(` - FRONTEND_URL: ${process.env.FRONTEND_URL || 'http://localhost:5173'}`);
   console.log(`=================================`);
+
+  // Start background LAN UDP discovery service
+  startLanDiscoveryService();
 });

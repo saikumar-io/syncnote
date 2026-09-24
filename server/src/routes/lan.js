@@ -6,17 +6,36 @@ const http = require('http');
 const { requireAuth } = require('../middleware/authMiddleware');
 const { 
   LanPairingModel, 
+  LanPairingRequestModel,
   NoteModel, 
   NotebookModel,
-  VersionModel
+  VersionModel,
+  SessionModel
 } = require('../db/database');
-const { writeNoteFile, readNoteFile, getNoteFilePath, calculateHash, generateVersionId } = require('../utils/fileStorage');
+const { 
+  writeNoteFile, 
+  readNoteFile, 
+  getNoteFilePath, 
+  calculateHash, 
+  generateVersionId 
+} = require('../utils/fileStorage');
 const {
   getPublicDeviceProfile,
   deriveSharedSessionKey,
   encryptLanPayload,
   decryptLanPayload
 } = require('../utils/deviceCrypto');
+const {
+  computeLineDiffHunks,
+  reconstructVersionContent
+} = require('../utils/versionControl');
+const { discoverDevicesUDP } = require('../utils/lanDiscoveryService');
+const {
+  checkPeerReachable,
+  sendPairingRequest,
+  pollPairingStatus,
+  sendEncryptedLanSync
+} = require('../utils/lanTransport');
 
 // In-memory store for active pairing PIN codes (5 min expiration)
 const activePairingCodes = new Map();
@@ -36,55 +55,490 @@ function getLocalIpAddresses() {
   return addresses;
 }
 
-// Require authentication for all LAN endpoints
-router.use(requireAuth);
+/**
+ * Ingest incoming notes and notebooks from a paired peer,
+ * passing through the existing note storage and version control engine.
+ * Ensures complete idempotency and zero duplicate versions.
+ */
+function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebooks = [], senderDevice, currentUserId) {
+  const appliedNotes = [];
+  const conflicts = [];
+
+  // 1. Ingest Notebooks
+  for (const nb of incomingNotebooks) {
+    if (!nb || !nb.id) continue;
+    const existingNb = NotebookModel.getById(nb.id, currentUserId);
+    if (!existingNb) {
+      NotebookModel.create(nb.id, nb.name || 'General Notes', currentUserId);
+    }
+  }
+
+  // 2. Ingest Notes (Strict policy: only notes marked 'lan' or 'both')
+  for (const remoteNote of incomingNotes) {
+    if (!remoteNote || !remoteNote.id) continue;
+    const mode = remoteNote.sync_mode;
+    if (mode !== 'lan' && mode !== 'both') {
+      continue; // Strictly skip local or cloud-only notes
+    }
+
+    const existing = NoteModel.getById(remoteNote.id, currentUserId);
+    const remoteContent = typeof remoteNote.content === 'string' ? remoteNote.content : '';
+    const remoteHash = remoteNote.content_hash || calculateHash(remoteContent);
+
+    if (existing) {
+      const localContent = readNoteFile(existing.file_path);
+      const localHash = calculateHash(localContent);
+
+      // IDEMPOTENCY CHECK: Identical content -> SKIP completely! No duplicate version.
+      if (localHash === remoteHash || localContent === remoteContent) {
+        appliedNotes.push({ id: existing.id, action: 'UNCHANGED' });
+        continue;
+      }
+
+      // Contents differ: check if remote note is an update of latest local checkpoint
+      const latestLocalVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
+      const isFastForward = Boolean(
+        latestLocalVersion &&
+        (remoteNote.parent_version_id === latestLocalVersion.id ||
+         remoteNote.previous_content_hash === latestLocalVersion.content_hash ||
+         localContent.trim().length === 0)
+      );
+
+      if (isFastForward) {
+        // Safe fast-forward update from peer
+        writeNoteFile(existing.file_path, remoteContent);
+        const nextVerNum = (latestLocalVersion ? latestLocalVersion.version_number : 0) + 1;
+        const diffHunks = computeLineDiffHunks(localContent, remoteContent);
+        const newVerId = remoteNote.current_version_id || `v${nextVerNum}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+        const versionData = {
+          id: newVerId,
+          note_id: existing.id,
+          version_number: nextVerNum,
+          parent_version_id: latestLocalVersion ? latestLocalVersion.id : null,
+          message: `Updated via LAN sync from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'}`,
+          device_id: senderDevice.id || senderDevice.deviceId,
+          created_at: remoteNote.updated_at || new Date().toISOString(),
+          content_hash: remoteHash,
+          is_snapshot: 0,
+          is_auto: 0
+        };
+
+        VersionModel.createCheckpointTransaction(versionData, diffHunks, existing.id, currentUserId);
+        SessionModel.upsert(existing.id, newVerId, remoteHash, 'clean', currentUserId);
+
+        NoteModel.update(
+          existing.id,
+          remoteNote.title || existing.title,
+          existing.file_path,
+          remoteNote.notebook_id || existing.notebook_id,
+          remoteHash,
+          newVerId,
+          currentUserId,
+          remoteNote.sync_mode || existing.sync_mode
+        );
+
+        appliedNotes.push({ id: existing.id, action: 'UPDATED' });
+      } else {
+        // Concurrent Conflict: Both sides modified since last synchronization
+        conflicts.push({
+          noteId: existing.id,
+          title: existing.title,
+          localContent,
+          remoteContent,
+          localUpdated: existing.updated_at,
+          remoteUpdated: remoteNote.updated_at,
+          deviceName: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer'
+        });
+
+        // Existing conflict handling: Create conflict copy note preserving both versions
+        const conflictTitle = `${existing.title} (LAN Conflict from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'})`;
+        const conflictPath = getNoteFilePath(conflictTitle, 'General Notes');
+        writeNoteFile(conflictPath, remoteContent);
+
+        const conflictNoteId = `note_conflict_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const diffHunks = computeLineDiffHunks('', remoteContent);
+        const conflictVerId = `v1_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+        NoteModel.create(
+          conflictNoteId,
+          conflictTitle,
+          conflictPath,
+          existing.notebook_id,
+          remoteHash,
+          conflictVerId,
+          currentUserId,
+          remoteNote.sync_mode || 'lan'
+        );
+
+        VersionModel.createCheckpointTransaction({
+          id: conflictVerId,
+          note_id: conflictNoteId,
+          version_number: 1,
+          parent_version_id: null,
+          message: `Conflict copy created from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'}`,
+          device_id: senderDevice.id || senderDevice.deviceId,
+          created_at: new Date().toISOString(),
+          content_hash: remoteHash,
+          is_snapshot: 0,
+          is_auto: 0
+        }, diffHunks, conflictNoteId, currentUserId);
+
+        SessionModel.upsert(conflictNoteId, conflictVerId, remoteHash, 'clean', currentUserId);
+        appliedNotes.push({ id: existing.id, action: 'CONFLICT_COPY_CREATED', conflictNoteId });
+      }
+    } else {
+      // New note: Safe import from peer
+      const noteTitle = remoteNote.title || 'Untitled Note';
+      const filePath = getNoteFilePath(noteTitle, 'General Notes');
+      writeNoteFile(filePath, remoteContent);
+
+      const v1Id = remoteNote.current_version_id || `v1_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const diffHunks = computeLineDiffHunks('', remoteContent);
+
+      NoteModel.create(
+        remoteNote.id,
+        noteTitle,
+        filePath,
+        remoteNote.notebook_id || null,
+        remoteHash,
+        v1Id,
+        currentUserId,
+        remoteNote.sync_mode || 'lan'
+      );
+
+      VersionModel.createCheckpointTransaction({
+        id: v1Id,
+        note_id: remoteNote.id,
+        version_number: 1,
+        parent_version_id: null,
+        message: `Imported via LAN sync from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'}`,
+        device_id: senderDevice.id || senderDevice.deviceId,
+        created_at: remoteNote.created_at || new Date().toISOString(),
+        content_hash: remoteHash,
+        is_snapshot: 0,
+        is_auto: 0
+      }, diffHunks, remoteNote.id, currentUserId);
+
+      SessionModel.upsert(remoteNote.id, v1Id, remoteHash, 'clean', currentUserId);
+      appliedNotes.push({ id: remoteNote.id, action: 'CREATED' });
+    }
+  }
+
+  return { appliedNotes, conflicts };
+}
+
+/* ==========================================================================
+   UNAUTHENTICATED P2P LAN ENDPOINTS
+   (Authenticated cryptographically via Device Identity / ECDH & AES-256-GCM)
+   ========================================================================== */
 
 /**
  * GET /api/lan/info
- * Returns local device public identity profile (NEVER includes private key)
+ * Public discovery endpoint: returns only safe metadata.
+ * Never exposes note contents, passwords, tokens, or private keys.
  */
 router.get('/info', (req, res) => {
   const profile = getPublicDeviceProfile();
   return res.json({
-    ...profile,
+    deviceId: profile.deviceId,
+    deviceName: profile.deviceName,
+    deviceType: profile.deviceType,
+    publicKey: profile.publicKey,
+    protocolVersion: '1.0.0',
     syncnoteVersion: '1.0.0',
-    port: process.env.PORT || 5000,
+    port: parseInt(process.env.PORT || '5000', 10),
     ipAddresses: getLocalIpAddresses(),
-    lanSyncAvailable: true,
-    userId: req.user ? req.user.id : 'usr_local_default',
-    userEmail: req.user ? req.user.email : 'local@syncnote'
+    lanSyncAvailable: true
   });
 });
 
 /**
+ * POST /api/lan/pair/request
+ * Peer-to-Peer: Remote device submits explicit pairing request to this device.
+ */
+router.post('/pair/request', (req, res) => {
+  try {
+    const { 
+      requesterDeviceId, 
+      requesterDeviceName, 
+      requesterDeviceType, 
+      requesterPublicKey, 
+      requesterUserId, 
+      requesterPort 
+    } = req.body || {};
+
+    if (!requesterDeviceId || !requesterPublicKey) {
+      return res.status(400).json({ error: 'Missing required pairing parameters (requesterDeviceId, requesterPublicKey).' });
+    }
+
+    const localProfile = getPublicDeviceProfile();
+    if (requesterDeviceId === localProfile.deviceId) {
+      return res.status(400).json({ error: 'Cannot pair a device with itself.' });
+    }
+
+    const requesterIp = req.ip || req.socket?.remoteAddress;
+
+    // Check if already paired
+    const alreadyPaired = LanPairingModel.getById(requesterDeviceId);
+    if (alreadyPaired && alreadyPaired.status === 'TRUSTED') {
+      LanPairingModel.updateLastSeen(requesterDeviceId, requesterIp, requesterPort || 5000);
+      return res.json({
+        success: true,
+        requestId: `req_already_paired_${Date.now()}`,
+        status: 'APPROVED',
+        message: 'Device already paired and trusted.',
+        localDevice: localProfile,
+        pairingToken: alreadyPaired.pairing_token
+      });
+    }
+
+    // Persist pending pairing request for explicit local user approval
+    const existingReq = LanPairingRequestModel.getByRequesterId(requesterDeviceId, requesterUserId || 'usr_local_default');
+    if (existingReq && existingReq.status === 'PENDING') {
+      return res.json({
+        success: true,
+        requestId: existingReq.id,
+        status: 'PENDING',
+        message: 'Pairing request already pending approval.'
+      });
+    }
+
+    const newReq = LanPairingRequestModel.create({
+      requesterDeviceId,
+      requesterDeviceName: requesterDeviceName || 'SyncNote Device',
+      requesterDeviceType: requesterDeviceType || 'desktop',
+      requesterDeviceIp: requesterIp,
+      requesterPort: requesterPort || 5000,
+      requesterPublicKey,
+      requesterUserId: requesterUserId || 'usr_local_default',
+      targetUserId: 'usr_local_default'
+    });
+
+    console.log(`[LAN Pairing] Received pairing request from '${requesterDeviceName}' (${requesterDeviceId}). Awaiting user approval.`);
+
+    return res.json({
+      success: true,
+      requestId: newReq.id,
+      status: 'PENDING',
+      message: 'Pairing request received. Waiting for user approval on this device.'
+    });
+  } catch (err) {
+    console.error('Error handling pairing request:', err);
+    return res.status(500).json({ error: 'Failed to process pairing request', details: err.message });
+  }
+});
+
+/**
+ * GET /api/lan/pair/status/:requestId
+ * Peer-to-Peer: Remote requester polls for approval status
+ */
+router.get('/pair/status/:requestId', (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const pairingReq = LanPairingRequestModel.getById(requestId);
+
+    if (!pairingReq) {
+      return res.status(404).json({ error: 'Pairing request not found or expired.' });
+    }
+
+    const localProfile = getPublicDeviceProfile();
+
+    if (pairingReq.status === 'APPROVED') {
+      return res.json({
+        requestId: pairingReq.id,
+        status: 'APPROVED',
+        approved: true,
+        pairingToken: pairingReq.pairing_token,
+        localDevice: localProfile
+      });
+    }
+
+    if (pairingReq.status === 'REJECTED') {
+      return res.json({
+        requestId: pairingReq.id,
+        status: 'REJECTED',
+        approved: false,
+        message: 'Pairing request was declined by the user.'
+      });
+    }
+
+    return res.json({
+      requestId: pairingReq.id,
+      status: 'PENDING',
+      approved: false,
+      message: 'Waiting for approval.'
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to query pairing status', details: err.message });
+  }
+});
+
+/**
+ * POST /api/lan/sync
+ * Authenticated & Encrypted Inbound LAN Sync endpoint (AES-256-GCM with replay protection)
+ */
+router.post('/sync', (req, res) => {
+  try {
+    const { envelope, plainSyncRequest } = req.body || {};
+    const localProfile = getPublicDeviceProfile();
+
+    let decryptedPayload = null;
+    let senderDevice = null;
+
+    if (envelope) {
+      const { senderDeviceId } = envelope;
+
+      // 1. Check if sender is in trusted paired devices list
+      senderDevice = LanPairingModel.getById(senderDeviceId);
+      if (!senderDevice || senderDevice.status !== 'TRUSTED') {
+        console.warn(`[LAN Sync Security Reject] Device '${senderDeviceId}' is not paired or has been REVOKED.`);
+        return res.status(403).json({
+          error: 'SECURITY REJECTED: Sender device is not paired or has been revoked.',
+          code: 'UNPAIRED_DEVICE'
+        });
+      }
+
+      if (!senderDevice.public_key) {
+        return res.status(403).json({ error: 'SECURITY REJECTED: Missing sender public key.' });
+      }
+
+      // 2. Derive Shared AES-256 session key using sender public key
+      const sessionKey = deriveSharedSessionKey(senderDevice.public_key);
+
+      // 3. Decrypt payload & verify sequence number / authTag / signature
+      try {
+        decryptedPayload = decryptLanPayload(envelope, sessionKey, senderDeviceId, senderDevice.public_key);
+      } catch (cryptoErr) {
+        console.error(`[LAN Sync Security Reject] Cryptographic verification failed: ${cryptoErr.message}`);
+        return res.status(401).json({
+          error: `SECURITY REJECTED: Cryptographic verification failed (${cryptoErr.message})`,
+          code: 'CRYPTO_FAILURE'
+        });
+      }
+    } else if (plainSyncRequest) {
+      // Fallback for token-verified direct testing requests
+      const pairingToken = req.headers['x-lan-pairing-token'];
+      if (!pairingToken) {
+        return res.status(401).json({ error: 'SECURITY REJECTED: Missing LAN pairing authorization header.' });
+      }
+      senderDevice = LanPairingModel.getByToken(pairingToken);
+      if (!senderDevice || senderDevice.status !== 'TRUSTED') {
+        return res.status(403).json({ error: 'SECURITY REJECTED: Invalid or revoked LAN pairing token.' });
+      }
+      decryptedPayload = plainSyncRequest;
+    } else {
+      return res.status(400).json({ error: 'Missing sync payload parameters.' });
+    }
+
+    const currentUserId = senderDevice.user_id || 'usr_local_default';
+
+    // 4. Update sender device last seen and IP
+    LanPairingModel.updateLastSeen(senderDevice.id, req.ip, senderDevice.device_port);
+
+    // 5. Ingest incoming notes and notebooks through existing sync and version control engine
+    const { appliedNotes, conflicts } = applyIncomingNotesAndNotebooks(
+      decryptedPayload.notes || [],
+      decryptedPayload.notebooks || [],
+      senderDevice,
+      currentUserId
+    );
+
+    // 6. Gather local notes eligible for LAN sync (strictly sync_mode === 'lan' || sync_mode === 'both')
+    const selectedNoteIds = LanPairingModel.getDeviceSelectedNotes(senderDevice.id);
+    let localNotes = NoteModel.getAll(currentUserId).filter(n => n.sync_mode === 'lan' || n.sync_mode === 'both');
+
+    if (selectedNoteIds && selectedNoteIds.length > 0) {
+      localNotes = localNotes.filter(n => selectedNoteIds.includes(n.id));
+    }
+
+    const localNotesWithContent = localNotes.map(n => ({
+      ...n,
+      content: readNoteFile(n.file_path)
+    }));
+    const localNotebooks = NotebookModel.getAll(currentUserId);
+
+    const responseData = {
+      appliedCount: appliedNotes.length,
+      conflictCount: conflicts.length,
+      conflicts,
+      localLanNotes: localNotesWithContent,
+      localNotebooks
+    };
+
+    // 7. Encrypt response back to sender
+    if (senderDevice && senderDevice.public_key) {
+      const sessionKey = deriveSharedSessionKey(senderDevice.public_key);
+      const seq = outgoingSequenceCounter++;
+      const encryptedResponse = encryptLanPayload(responseData, sessionKey, seq, localProfile.deviceId, senderDevice.id);
+
+      return res.json({
+        success: true,
+        encryptedEnvelope: encryptedResponse
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: responseData
+    });
+  } catch (err) {
+    console.error('Error during LAN Sync:', err);
+    return res.status(500).json({ error: 'LAN Sync failed', details: err.message });
+  }
+});
+
+/* ==========================================================================
+   AUTHENTICATED CLIENT UI ENDPOINTS (User must be logged in locally)
+   ========================================================================== */
+
+router.use(requireAuth);
+
+/**
  * GET /api/lan/discover
- * Discover nearby SyncNote instances on the local subnet
+ * Discover nearby SyncNote instances on the local subnet via UDP Broadcast & Subnet Scanning
  */
 router.get('/discover', async (req, res) => {
   try {
     const localIps = getLocalIpAddresses();
-    const discovered = [];
+    const localProfile = getPublicDeviceProfile();
     const currentUserId = req.user ? req.user.id : 'usr_local_default';
     const pairedDevices = LanPairingModel.getPairedDevices(currentUserId);
     const pairedMap = new Map();
     pairedDevices.forEach(d => pairedMap.set(d.id, d));
 
+    const discoveredMap = new Map();
+
+    // 1. Run Background UDP Broadcast Probe (1.0s)
+    try {
+      const udpDevices = await discoverDevicesUDP(1000);
+      for (const dev of udpDevices) {
+        if (dev.deviceId && dev.deviceId !== localProfile.deviceId) {
+          discoveredMap.set(dev.deviceId, dev);
+        }
+      }
+    } catch (e) {
+      console.warn('[LAN Discovery UDP Warning]:', e.message);
+    }
+
+    // 2. Perform Subnet Scanning on standard ports (.1 to .254)
     const targetSubnets = localIps.map(ip => ip.substring(0, ip.lastIndexOf('.')));
     const scanPromises = [];
+    const scanPort = parseInt(process.env.PORT || '5000', 10);
 
     for (const subnet of targetSubnets) {
-      for (let i = 1; i <= 25; i++) {
+      for (let i = 1; i <= 254; i++) {
         const targetIp = `${subnet}.${i}`;
+        // Skip scanning own primary IP on same port
         if (localIps.includes(targetIp)) continue;
 
         scanPromises.push(new Promise((resolve) => {
           const reqOpt = {
             hostname: targetIp,
-            port: process.env.PORT || 5000,
+            port: scanPort,
             path: '/api/lan/info',
             method: 'GET',
-            timeout: 600,
-            headers: req.headers.cookie ? { 'Cookie': req.headers.cookie } : {}
+            timeout: 400
           };
 
           const lanReq = http.request(reqOpt, (lanRes) => {
@@ -94,16 +548,11 @@ router.get('/discover', async (req, res) => {
               try {
                 if (lanRes.statusCode === 200) {
                   const data = JSON.parse(body);
-                  if (data.deviceId && data.lanSyncAvailable) {
-                    const isPaired = pairedMap.has(data.deviceId);
-                    const pairedInfo = pairedMap.get(data.deviceId);
-                    const status = isPaired ? 'Connected' : 'Not paired';
-
-                    discovered.push({
+                  if (data.deviceId && data.deviceId !== localProfile.deviceId && data.lanSyncAvailable) {
+                    discoveredMap.set(data.deviceId, {
                       ...data,
                       ip: targetIp,
-                      status,
-                      isPaired
+                      port: scanPort
                     });
                   }
                 }
@@ -119,15 +568,218 @@ router.get('/discover', async (req, res) => {
       }
     }
 
-    await Promise.all(scanPromises);
+    // Also check localhost alternate test ports (e.g. 5000, 5002) for local multi-instance testing
+    const testPorts = [5000, 5002].filter(p => p !== scanPort);
+    for (const testPort of testPorts) {
+      scanPromises.push(new Promise((resolve) => {
+        const reqOpt = {
+          hostname: '127.0.0.1',
+          port: testPort,
+          path: '/api/lan/info',
+          method: 'GET',
+          timeout: 400
+        };
+
+        const lanReq = http.request(reqOpt, (lanRes) => {
+          let body = '';
+          lanRes.on('data', chunk => body += chunk);
+          lanRes.on('end', () => {
+            try {
+              if (lanRes.statusCode === 200) {
+                const data = JSON.parse(body);
+                if (data.deviceId && data.deviceId !== localProfile.deviceId) {
+                  discoveredMap.set(data.deviceId, {
+                    ...data,
+                    ip: '127.0.0.1',
+                    port: testPort
+                  });
+                }
+              }
+            } catch (e) {}
+            resolve();
+          });
+        });
+
+        lanReq.on('error', () => resolve());
+        lanReq.on('timeout', () => { lanReq.destroy(); resolve(); });
+        lanReq.end();
+      }));
+    }
+
+    // Run scans in batches
+    const BATCH_SIZE = 40;
+    for (let b = 0; b < scanPromises.length; b += BATCH_SIZE) {
+      const batch = scanPromises.slice(b, b + BATCH_SIZE);
+      await Promise.all(batch);
+    }
+
+    // Format & annotate discovered devices
+    const discovered = Array.from(discoveredMap.values()).map(dev => {
+      const isPaired = pairedMap.has(dev.deviceId);
+      return {
+        ...dev,
+        status: isPaired ? 'Connected' : 'Not paired',
+        isPaired
+      };
+    });
 
     return res.json({
       success: true,
-      localDevice: getPublicDeviceProfile(),
+      localDevice: localProfile,
       discovered
     });
   } catch (err) {
+    console.error('LAN discovery error:', err);
     return res.status(500).json({ error: 'LAN discovery failed', details: err.message });
+  }
+});
+
+/**
+ * GET /api/lan/pair/pending
+ * UI: List pending pairing requests waiting for this user's approval
+ */
+router.get('/pair/pending', (req, res) => {
+  try {
+    const currentUserId = req.user ? req.user.id : 'usr_local_default';
+    const pending = LanPairingRequestModel.getPendingForUser(currentUserId);
+    return res.json({ success: true, pending });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch pending pairing requests', details: err.message });
+  }
+});
+
+/**
+ * POST /api/lan/pair/approve
+ * UI: User explicitly approves an incoming pairing request
+ */
+router.post('/pair/approve', (req, res) => {
+  try {
+    const { requestId } = req.body || {};
+    const currentUserId = req.user ? req.user.id : 'usr_local_default';
+
+    if (!requestId) {
+      return res.status(400).json({ error: 'Missing requestId parameter.' });
+    }
+
+    const pairingReq = LanPairingRequestModel.getById(requestId);
+    if (!pairingReq) {
+      return res.status(404).json({ error: 'Pairing request not found.' });
+    }
+
+    // Generate high-entropy pairing token
+    const pairingToken = crypto.randomBytes(32).toString('hex');
+    LanPairingRequestModel.approve(requestId, pairingToken);
+
+    // Save as TRUSTED in lan_paired_devices table
+    const pairedDevice = LanPairingModel.createPairing({
+      id: pairingReq.requester_device_id,
+      deviceName: pairingReq.requester_device_name,
+      deviceIp: pairingReq.requester_device_ip,
+      devicePort: pairingReq.requester_port || 5000,
+      pairingToken,
+      publicKey: pairingReq.requester_public_key,
+      deviceType: pairingReq.requester_device_type || 'desktop',
+      userId: currentUserId,
+      status: 'TRUSTED'
+    });
+
+    console.log(`[LAN Pairing Approval] User approved device '${pairingReq.requester_device_name}' (${pairingReq.requester_device_id})`);
+
+    return res.json({
+      success: true,
+      message: `Device '${pairingReq.requester_device_name}' approved and paired.`,
+      pairedDevice
+    });
+  } catch (err) {
+    console.error('Error approving pairing request:', err);
+    return res.status(500).json({ error: 'Failed to approve pairing request', details: err.message });
+  }
+});
+
+/**
+ * POST /api/lan/pair/reject
+ * UI: User explicitly rejects an incoming pairing request
+ */
+router.post('/pair/reject', (req, res) => {
+  try {
+    const { requestId } = req.body || {};
+    if (!requestId) return res.status(400).json({ error: 'Missing requestId parameter.' });
+
+    const updated = LanPairingRequestModel.reject(requestId);
+    return res.json({ success: true, message: 'Pairing request rejected.', request: updated });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to reject pairing request', details: err.message });
+  }
+});
+
+/**
+ * POST /api/lan/pair/send-request
+ * UI: Send an explicit pairing request to a discovered remote peer
+ */
+router.post('/pair/send-request', async (req, res) => {
+  try {
+    const { remoteIp, remotePort, remoteDeviceId } = req.body || {};
+    const localProfile = getPublicDeviceProfile();
+    const currentUserId = req.user ? req.user.id : 'usr_local_default';
+
+    if (!remoteIp) {
+      return res.status(400).json({ error: 'Remote IP address is required.' });
+    }
+
+    const targetPort = remotePort || 5000;
+    const requestResult = await sendPairingRequest(remoteIp, targetPort, localProfile, currentUserId);
+
+    return res.json({
+      success: true,
+      remoteDeviceId,
+      remoteIp,
+      remotePort: targetPort,
+      ...requestResult
+    });
+  } catch (err) {
+    return res.status(500).json({ error: `Pairing request failed: ${err.message}` });
+  }
+});
+
+/**
+ * POST /api/lan/pair/check-status
+ * UI: Poll whether remote peer has approved our submitted pairing request
+ */
+router.post('/pair/check-status', async (req, res) => {
+  try {
+    const { remoteIp, remotePort, requestId, remoteDeviceId, remoteDeviceName, remotePublicKey, remoteDeviceType } = req.body || {};
+    const currentUserId = req.user ? req.user.id : 'usr_local_default';
+
+    if (!remoteIp || !requestId) {
+      return res.status(400).json({ error: 'remoteIp and requestId are required.' });
+    }
+
+    const statusData = await pollPairingStatus(remoteIp, remotePort || 5000, requestId);
+
+    if (statusData.status === 'APPROVED' && statusData.approved) {
+      // Remote approved! Persist trusted peer record locally
+      const pairedDev = LanPairingModel.createPairing({
+        id: statusData.localDevice?.deviceId || remoteDeviceId,
+        deviceName: statusData.localDevice?.deviceName || remoteDeviceName || 'Remote Device',
+        deviceIp: remoteIp,
+        devicePort: remotePort || 5000,
+        pairingToken: statusData.pairingToken || crypto.randomBytes(32).toString('hex'),
+        publicKey: statusData.localDevice?.publicKey || remotePublicKey,
+        deviceType: statusData.localDevice?.deviceType || remoteDeviceType || 'desktop',
+        userId: currentUserId,
+        status: 'TRUSTED'
+      });
+
+      return res.json({
+        success: true,
+        status: 'APPROVED',
+        pairedDevice: pairedDev
+      });
+    }
+
+    return res.json(statusData);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to check pairing status: ${err.message}` });
   }
 });
 
@@ -137,7 +789,6 @@ router.get('/discover', async (req, res) => {
  */
 router.post('/pair/generate-code', (req, res) => {
   const profile = getPublicDeviceProfile();
-  // Generate random 6-digit numeric PIN
   const num = crypto.randomInt(100000, 999999);
   const formattedCode = `${num.toString().slice(0, 3)} ${num.toString().slice(3)}`;
   const rawCode = num.toString();
@@ -168,7 +819,7 @@ router.post('/pair/generate-code', (req, res) => {
  * Submit pairing PIN code from remote device to establish mutual cryptographic trust
  */
 router.post('/pair/verify-code', (req, res) => {
-  const { code, remoteDeviceId, remoteDeviceName, remotePublicKey, remoteDeviceType } = req.body || {};
+  const { code, remoteDeviceId, remoteDeviceName, remotePublicKey, remoteDeviceType, remoteDevicePort } = req.body || {};
   const cleanCode = (code || '').replace(/\s+/g, '');
   const currentUserId = req.user ? req.user.id : 'usr_local_default';
 
@@ -187,22 +838,20 @@ router.post('/pair/verify-code', (req, res) => {
     return res.status(400).json({ error: 'Pairing code has expired.' });
   }
 
-  // Account restriction check (Requirement 11)
   if (stored.userId && currentUserId && stored.userId !== 'usr_local_default' && currentUserId !== 'usr_local_default' && stored.userId !== currentUserId) {
     return res.status(400).json({ error: 'This device belongs to a different SyncNote account.' });
   }
 
-  // Single-use code invalidation
   activePairingCodes.delete(cleanCode);
 
   const pairingToken = crypto.randomBytes(32).toString('hex');
   const localProfile = getPublicDeviceProfile();
 
-  // Create trusted pairing relationship in SQLite
   const pairedDevice = LanPairingModel.createPairing({
     id: remoteDeviceId,
     deviceName: remoteDeviceName || 'Remote SyncNote Device',
     deviceIp: req.ip,
+    devicePort: remoteDevicePort || 5000,
     pairingToken,
     publicKey: remotePublicKey,
     deviceType: remoteDeviceType || 'desktop',
@@ -224,14 +873,13 @@ router.post('/pair/verify-code', (req, res) => {
  * Direct pairing with a discovered same-account device
  */
 router.post('/pair/direct', (req, res) => {
-  const { remoteDeviceId, remoteDeviceName, remotePublicKey, remoteDeviceType, remoteUserId } = req.body || {};
+  const { remoteDeviceId, remoteDeviceName, remotePublicKey, remoteDeviceType, remoteUserId, remoteDevicePort, remoteDeviceIp } = req.body || {};
   const currentUserId = req.user ? req.user.id : 'usr_local_default';
 
   if (!remoteDeviceId || !remotePublicKey) {
     return res.status(400).json({ error: 'Missing required parameters for direct device pairing.' });
   }
 
-  // Account restriction check (Requirement 11)
   if (remoteUserId && currentUserId && remoteUserId !== 'usr_local_default' && currentUserId !== 'usr_local_default' && remoteUserId !== currentUserId) {
     return res.status(400).json({ error: 'This device belongs to a different SyncNote account.' });
   }
@@ -240,7 +888,8 @@ router.post('/pair/direct', (req, res) => {
   const pairedDevice = LanPairingModel.createPairing({
     id: remoteDeviceId,
     deviceName: remoteDeviceName || 'SyncNote Device',
-    deviceIp: req.ip,
+    deviceIp: remoteDeviceIp || req.ip,
+    devicePort: remoteDevicePort || 5000,
     pairingToken,
     publicKey: remotePublicKey,
     deviceType: remoteDeviceType || 'desktop',
@@ -257,28 +906,43 @@ router.post('/pair/direct', (req, res) => {
 
 /**
  * GET /api/lan/devices
- * List all trusted & paired LAN devices for the user
+ * List all trusted & paired LAN devices for the user with reachability status
  */
-router.get('/devices', (req, res) => {
-  const userId = req.user ? req.user.id : 'usr_local_default';
-  const devices = LanPairingModel.getPairedDevices(userId);
-  const localProfile = getPublicDeviceProfile();
+router.get('/devices', async (req, res) => {
+  try {
+    const userId = req.user ? req.user.id : 'usr_local_default';
+    const devices = LanPairingModel.getPairedDevices(userId);
+    const localProfile = getPublicDeviceProfile();
 
-  return res.json({
-    success: true,
-    localDevice: localProfile,
-    devices: devices.map(d => ({
-      id: d.id,
-      deviceName: d.device_name,
-      deviceType: d.device_type || 'desktop',
-      deviceIp: d.device_ip,
-      status: d.status,
-      pairedAt: d.created_at,
-      lastSeen: d.last_seen,
-      publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
-      selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
-    }))
-  });
+    // Check reachability for devices
+    const deviceStatuses = await Promise.all(devices.map(async (d) => {
+      let isOnline = false;
+      if (d.device_ip) {
+        isOnline = await checkPeerReachable(d.device_ip, d.device_port || 5000, 500);
+      }
+      return {
+        id: d.id,
+        deviceName: d.device_name,
+        deviceType: d.device_type || 'desktop',
+        deviceIp: d.device_ip,
+        devicePort: d.device_port || 5000,
+        status: d.status,
+        pairedAt: d.created_at,
+        lastSeen: d.last_seen,
+        isOnline,
+        publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
+        selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
+      };
+    }));
+
+    return res.json({
+      success: true,
+      localDevice: localProfile,
+      devices: deviceStatuses
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to list paired devices', details: err.message });
+  }
 });
 
 /**
@@ -316,7 +980,7 @@ router.patch('/devices/:id', (req, res) => {
 
 /**
  * DELETE /api/lan/devices/:id
- * Revoke a paired LAN device (Immediate rejection of future LAN sync requests)
+ * Revoke/Unpair a LAN device (Immediate rejection of future LAN sync requests)
  */
 router.delete('/devices/:id', (req, res) => {
   const { id } = req.params;
@@ -327,7 +991,8 @@ router.delete('/devices/:id', (req, res) => {
     return res.status(404).json({ error: 'Device not found.' });
   }
 
-  const revoked = LanPairingModel.revokePairing(id, userId);
+  // Revoke pairing status so any future sync attempts are blocked with 403
+  LanPairingModel.revokePairing(id, userId);
   console.log(`[LAN Revocation] Revoked LAN trust for device ${id}`);
 
   return res.json({
@@ -338,176 +1003,75 @@ router.delete('/devices/:id', (req, res) => {
 });
 
 /**
- * POST /api/lan/sync
- * Authenticated & Encrypted LAN Sync endpoint (AES-256-GCM with replay protection)
+ * POST /api/lan/sync/outbound
+ * Trigger outbound encrypted LAN sync from this node to a paired peer
  */
-router.post('/sync', (req, res) => {
+router.post('/sync/outbound', async (req, res) => {
   try {
-    const { envelope, plainSyncRequest } = req.body || {};
+    const deviceId = req.body?.deviceId || req.body?.targetDeviceId;
     const currentUserId = req.user ? req.user.id : 'usr_local_default';
     const localProfile = getPublicDeviceProfile();
 
-    let decryptedPayload = null;
-    let senderDevice = null;
-
-    if (envelope) {
-      const { senderDeviceId } = envelope;
-
-      // 1. Check if sender is in trusted paired devices list
-      senderDevice = LanPairingModel.getById(senderDeviceId);
-      if (!senderDevice || senderDevice.status !== 'TRUSTED') {
-        console.warn(`[LAN Sync Security Reject] Device '${senderDeviceId}' is not paired or has been REVOKED.`);
-        return res.status(403).json({
-          error: 'SECURITY REJECTED: Sender device is not paired or has been revoked.',
-          code: 'UNPAIRED_DEVICE'
-        });
-      }
-
-      if (!senderDevice.public_key) {
-        return res.status(403).json({ error: 'SECURITY REJECTED: Missing sender public key.' });
-      }
-
-      // 2. Derive Shared AES-256 session key using sender public key
-      const sessionKey = deriveSharedSessionKey(senderDevice.public_key);
-
-      // 3. Decrypt payload & verify sequence number / authTag / signature
-      try {
-        decryptedPayload = decryptLanPayload(envelope, sessionKey, senderDeviceId, senderDevice.public_key);
-      } catch (cryptoErr) {
-        console.error(`[LAN Sync Security Reject] Cryptographic verification failed: ${cryptoErr.message}`);
-        return res.status(401).json({
-          error: `SECURITY REJECTED: Cryptographic verification failed (${cryptoErr.message})`,
-          code: 'CRYPTO_FAILURE'
-        });
-      }
-    } else if (plainSyncRequest) {
-      // Fallback for direct token-verified local testing requests
-      const pairingToken = req.headers['x-lan-pairing-token'];
-      if (!pairingToken) {
-        return res.status(401).json({ error: 'SECURITY REJECTED: Missing LAN pairing authorization header.' });
-      }
-      senderDevice = LanPairingModel.getByToken(pairingToken);
-      if (!senderDevice || senderDevice.status !== 'TRUSTED') {
-        return res.status(403).json({ error: 'SECURITY REJECTED: Invalid or revoked LAN pairing token.' });
-      }
-      decryptedPayload = plainSyncRequest;
-    } else {
-      return res.status(400).json({ error: 'Missing sync payload parameters.' });
+    if (!deviceId) {
+      return res.status(400).json({ error: 'deviceId is required to initiate outbound LAN sync.' });
     }
 
-    // 4. Update sender device last seen
-    LanPairingModel.updateLastSeen(senderDevice.id, req.ip);
-
-    // 5. STRICT ISOLATION FILTER: ONLY notes with sync_mode === "lan" may participate in LAN sync!
-    const incomingNotes = (decryptedPayload.notes || []).filter(n => n.sync_mode === 'lan');
-    const incomingNotebooks = decryptedPayload.notebooks || [];
-
-    const appliedNotes = [];
-    const conflicts = [];
-
-    // Apply Notebooks
-    for (const nb of incomingNotebooks) {
-      const existingNb = NotebookModel.getById(nb.id, currentUserId);
-      if (!existingNb) {
-        NotebookModel.create(nb.id, nb.name, currentUserId);
-      }
+    const peer = LanPairingModel.getById(deviceId);
+    if (!peer || peer.status !== 'TRUSTED') {
+      return res.status(403).json({ error: 'Device is not paired or has been unshared/revoked.' });
     }
 
-    // Apply LAN Notes
-    for (const remoteNote of incomingNotes) {
-      // Double check note mode guarantee
-      if (remoteNote.sync_mode !== 'lan') {
-        continue; // Strictly skip non-lan notes
-      }
-
-      const existing = NoteModel.getById(remoteNote.id, currentUserId);
-
-      if (existing) {
-        const localContent = readNoteFile(existing.file_path);
-        const contentChanged = localContent !== remoteNote.content;
-
-        if (contentChanged) {
-          conflicts.push({
-            noteId: existing.id,
-            title: existing.title,
-            localContent,
-            remoteContent: remoteNote.content,
-            localUpdated: existing.updated_at,
-            remoteUpdated: remoteNote.updated_at,
-            deviceName: senderDevice.device_name
-          });
-
-          // Create conflict copy note preserving both versions
-          const conflictTitle = `${existing.title} (LAN Conflict from ${senderDevice.device_name})`;
-          const conflictPath = getNoteFilePath(conflictTitle, 'General Notes');
-          writeNoteFile(conflictPath, remoteNote.content || '');
-
-          NoteModel.create(
-            `note_conflict_${Date.now()}`,
-            conflictTitle,
-            conflictPath,
-            existing.notebook_id,
-            calculateHash(remoteNote.content || ''),
-            generateVersionId(),
-            currentUserId,
-            'lan'
-          );
-        } else {
-          appliedNotes.push(existing.id);
-        }
-      } else {
-        // Safe import for new LAN note
-        const filePath = getNoteFilePath(remoteNote.title || 'Untitled LAN Note', 'General Notes');
-        writeNoteFile(filePath, remoteNote.content || '');
-        const hash = calculateHash(remoteNote.content || '');
-        const verId = generateVersionId();
-
-        NoteModel.create(
-          remoteNote.id,
-          remoteNote.title,
-          filePath,
-          remoteNote.notebook_id,
-          hash,
-          verId,
-          currentUserId,
-          'lan'
-        );
-        appliedNotes.push(remoteNote.id);
-      }
+    if (!peer.device_ip) {
+      return res.status(400).json({ error: 'Peer IP address is unknown. Discover peer first.' });
     }
 
-    // Prepare encrypted response payload containing local LAN notes (strictly sync_mode === 'lan')
-    const localLanNotes = NoteModel.getAll(currentUserId)
-      .filter(n => n.sync_mode === 'lan')
-      .map(n => ({ ...n, content: readNoteFile(n.file_path) }));
-    const localNotebooks = NotebookModel.getAll(currentUserId);
+    // 1. Gather notes with sync_mode === 'lan' or sync_mode === 'both'
+    const selectedNoteIds = LanPairingModel.getDeviceSelectedNotes(peer.id);
+    let eligibleNotes = NoteModel.getAll(currentUserId).filter(n => n.sync_mode === 'lan' || n.sync_mode === 'both');
 
-    const responseData = {
-      appliedCount: appliedNotes.length,
-      conflictCount: conflicts.length,
-      conflicts,
-      localLanNotes,
-      localNotebooks
-    };
-
-    if (senderDevice && senderDevice.public_key) {
-      const sessionKey = deriveSharedSessionKey(senderDevice.public_key);
-      const seq = outgoingSequenceCounter++;
-      const encryptedResponse = encryptLanPayload(responseData, sessionKey, seq, localProfile.deviceId, senderDevice.id);
-
-      return res.json({
-        success: true,
-        encryptedEnvelope: encryptedResponse
-      });
+    if (selectedNoteIds && selectedNoteIds.length > 0) {
+      eligibleNotes = eligibleNotes.filter(n => selectedNoteIds.includes(n.id));
     }
+
+    const notesWithContent = eligibleNotes.map(n => ({
+      ...n,
+      content: readNoteFile(n.file_path)
+    }));
+    const notebooks = NotebookModel.getAll(currentUserId);
+
+    // 2. Transmit encrypted payload over LAN transport
+    const peerPort = peer.device_port || 5000;
+    const remoteData = await sendEncryptedLanSync(
+      peer.device_ip,
+      peerPort,
+      localProfile,
+      peer,
+      { notes: notesWithContent, notebooks }
+    );
+
+    // 3. Ingest received peer changes through existing note and version control engine
+    const { appliedNotes, conflicts } = applyIncomingNotesAndNotebooks(
+      remoteData.localLanNotes || [],
+      remoteData.localNotebooks || [],
+      peer,
+      currentUserId
+    );
+
+    // 4. Update last seen timestamp
+    LanPairingModel.updateLastSeen(peer.id, peer.device_ip, peerPort);
 
     return res.json({
       success: true,
-      data: responseData
+      deviceId: peer.id,
+      deviceName: peer.device_name,
+      appliedCount: appliedNotes.length,
+      conflictCount: conflicts.length,
+      conflicts,
+      details: appliedNotes
     });
   } catch (err) {
-    console.error('Error during LAN Sync:', err);
-    return res.status(500).json({ error: 'LAN Sync failed', details: err.message });
+    console.error('Error during outbound LAN sync:', err);
+    return res.status(500).json({ error: `Outbound LAN sync failed: ${err.message}` });
   }
 });
 

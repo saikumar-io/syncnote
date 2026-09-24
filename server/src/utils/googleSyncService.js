@@ -22,8 +22,8 @@ function rejectGoogleUpload(note) {
     throw new Error('PRIVACY REJECTED: Invalid note payload provided for Google Drive upload.');
   }
 
-  if (note.sync_mode !== 'google' && note.sync_mode !== 'cloud') {
-    const errorMsg = `CRITICAL PRIVACY VIOLATION REJECTED: Note '${note.title || note.id}' has sync_mode '${note.sync_mode || 'local'}'. ONLY notes explicitly set to 'cloud' may be uploaded to Google Drive.`;
+  if (note.sync_mode !== 'google' && note.sync_mode !== 'cloud' && note.sync_mode !== 'both') {
+    const errorMsg = `CRITICAL PRIVACY VIOLATION REJECTED: Note '${note.title || note.id}' has sync_mode '${note.sync_mode || 'local'}'. ONLY notes explicitly set to 'cloud' or 'both' may be uploaded to Google Drive.`;
     console.error(`[Google Sync Security Guard] ${errorMsg}`);
     throw new Error(errorMsg);
   }
@@ -57,8 +57,8 @@ function getGoogleAccountStatus(userId) {
   };
 }
 
-const { NoteModel, NotebookModel, GoogleDriveAuthModel } = require('../db/database');
-const { calculateHash, readNoteFile } = require('./fileStorage');
+const { NoteModel, NotebookModel, GoogleDriveAuthModel, VersionModel } = require('../db/database');
+const { calculateHash, readNoteFile, writeNoteFile, getNoteFilePath, generateVersionId } = require('./fileStorage');
 
 /**
  * Get connected Google Drive status (Cloud Storage) for a user
@@ -549,7 +549,7 @@ async function fetchNotesFromGoogleDrive(userId) {
 }
 
 /**
- * Perform a full SyncNote Google Drive synchronization pass for a user.
+ * Perform a full SyncNote Google Drive synchronization pass for a user (Cloud Pull + Local Push).
  */
 async function syncUserNotesWithGoogleDrive(userId) {
   const userKey = userId ? String(userId) : 'usr_local_default';
@@ -560,12 +560,11 @@ async function syncUserNotesWithGoogleDrive(userId) {
   }
 
   const folderId = await getOrCreateSyncNoteFolder(authInfo);
-  const allNotes = NoteModel.getAll(userKey);
-  const googleNotes = allNotes.filter(n => n.sync_mode === 'cloud' || n.sync_mode === 'google');
 
   const results = {
     success: true,
     synced: 0,
+    imported: 0,
     modifiedOffline: 0,
     conflicts: 0,
     failed: 0,
@@ -574,6 +573,125 @@ async function syncUserNotesWithGoogleDrive(userId) {
     lastSyncAt: new Date().toISOString(),
     items: []
   };
+
+  // ==========================================
+  // PHASE 1: CLOUD PULL / IMPORT FROM DRIVE
+  // ==========================================
+  if (authInfo.accessToken && !authInfo.accessToken.startsWith('drive_access_')) {
+    try {
+      console.log(`[Google Drive Cloud Pull] Fetching file list from Drive folder '${folderId}'...`);
+      const listQuery = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+      const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${listQuery}&fields=files(id,name,mimeType,modifiedTime,createdTime)`, {
+        headers: { Authorization: `Bearer ${authInfo.accessToken}` }
+      });
+
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        const cloudFiles = (listData && listData.files) || [];
+        console.log(`[Google Drive Cloud Pull] Found ${cloudFiles.length} file(s) in SyncNote Drive folder.`);
+
+        const currentLocalNotes = NoteModel.getAll(userKey);
+
+        for (const cloudFile of cloudFiles) {
+          if (cloudFile.mimeType === 'application/vnd.google-apps.folder') continue;
+
+          const title = cloudFile.name.replace(/\.md$/i, '').trim() || 'Untitled Cloud Note';
+
+          // Match local note by gdrive_file_id or exact title match
+          let localNote = currentLocalNotes.find(n => n.gdrive_file_id === cloudFile.id);
+          if (!localNote) {
+            localNote = currentLocalNotes.find(n => n.title.toLowerCase() === title.toLowerCase() && (n.sync_mode === 'cloud' || n.sync_mode === 'google' || n.sync_mode === 'both'));
+          }
+
+          if (localNote) {
+            // Existing note locally: check if local has unpushed offline edits
+            const localContent = readNoteFile(localNote.file_path);
+            const localHash = calculateHash(localContent);
+            const isUnsyncedLocalEdits = localNote.sync_state === 'MODIFIED_OFFLINE' || (localNote.last_synced_hash && localHash !== localNote.last_synced_hash);
+
+            if (isUnsyncedLocalEdits) {
+              console.log(`[Google Drive Cloud Pull] Local note '${localNote.title}' has unsynced local edits. Preserving local version.`);
+              results.modifiedOffline++;
+            } else {
+              // Local note is SYNCED or untouched: download latest remote content
+              const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${cloudFile.id}?alt=media`, {
+                headers: { Authorization: `Bearer ${authInfo.accessToken}` }
+              });
+              if (fileRes.ok) {
+                const remoteContent = await fileRes.text();
+                const remoteHash = calculateHash(remoteContent);
+
+                if (remoteHash !== localHash || !localNote.gdrive_file_id) {
+                  writeNoteFile(localNote.file_path, remoteContent);
+                  NoteModel.update(localNote.id, localNote.title, localNote.file_path, localNote.notebook_id, remoteHash, localNote.current_version_id, userKey, 'cloud');
+                  NoteModel.updateSyncMetadata(localNote.id, userKey, {
+                    gdriveFileId: cloudFile.id,
+                    lastSyncedHash: remoteHash,
+                    lastSyncedAt: new Date().toISOString(),
+                    syncState: 'SYNCED',
+                    syncError: null
+                  });
+                  console.log(`[Google Drive Cloud Pull] Updated local note '${localNote.title}' from Drive.`);
+                  results.synced++;
+                  results.items.push({ id: localNote.id, title: localNote.title, state: 'PULLED', gdriveFileId: cloudFile.id });
+                }
+              }
+            }
+          } else {
+            // New note on Cloud: Import into SQLite database & physical file
+            console.log(`[Google Drive Cloud Pull] Importing new cloud note '${title}' (${cloudFile.id})...`);
+            const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${cloudFile.id}?alt=media`, {
+              headers: { Authorization: `Bearer ${authInfo.accessToken}` }
+            });
+
+            if (fileRes.ok) {
+              const remoteContent = await fileRes.text();
+              const remoteHash = calculateHash(remoteContent);
+
+              const safeTitle = title;
+              const filePath = getNoteFilePath(safeTitle, 'General Notes');
+              writeNoteFile(filePath, remoteContent);
+
+              const newNoteId = `note_cloud_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+              const versionId = generateVersionId();
+
+              NoteModel.create(
+                newNoteId,
+                safeTitle,
+                filePath,
+                null,
+                remoteHash,
+                versionId,
+                userKey,
+                'cloud'
+              );
+
+              NoteModel.updateSyncMetadata(newNoteId, userKey, {
+                gdriveFileId: cloudFile.id,
+                lastSyncedHash: remoteHash,
+                lastSyncedAt: new Date().toISOString(),
+                syncState: 'SYNCED',
+                syncError: null
+              });
+
+              console.log(`[Google Drive Cloud Pull] Successfully imported note '${safeTitle}' to local SQLite DB.`);
+              results.imported++;
+              results.synced++;
+              results.items.push({ id: newNoteId, title: safeTitle, state: 'IMPORTED', gdriveFileId: cloudFile.id });
+            }
+          }
+        }
+      }
+    } catch (pullErr) {
+      console.warn(`[Google Drive Cloud Pull Warning] Cloud pull encountered non-fatal notice:`, pullErr.message);
+    }
+  }
+
+  // ==========================================
+  // PHASE 2: LOCAL PUSH TO DRIVE
+  // ==========================================
+  const allNotes = NoteModel.getAll(userKey);
+  const googleNotes = allNotes.filter(n => n.sync_mode === 'cloud' || n.sync_mode === 'google' || n.sync_mode === 'both');
 
   for (const note of googleNotes) {
     try {
@@ -589,8 +707,10 @@ async function syncUserNotesWithGoogleDrive(userId) {
 
       // Skip upload if unchanged and already has confirmed Drive file ID
       if (note.gdrive_file_id && note.last_synced_hash === currentHash && note.sync_state === 'SYNCED') {
-        results.synced++;
-        results.items.push({ id: note.id, title: note.title, state: 'SYNCED', gdriveFileId: note.gdrive_file_id });
+        if (!results.items.some(i => i.id === note.id)) {
+          results.synced++;
+          results.items.push({ id: note.id, title: note.title, state: 'SYNCED', gdriveFileId: note.gdrive_file_id });
+        }
         continue;
       }
 
@@ -602,21 +722,10 @@ async function syncUserNotesWithGoogleDrive(userId) {
       const safeTitle = (note.title || 'Untitled Note').replace(/[^a-zA-Z0-9_\-\s]/g, '_').trim();
       const fileName = `${safeTitle}.md`;
 
-      console.log(`[Google Drive Sync] Starting sync pass`);
-      console.log(`[Google Drive Sync] User: ${userKey}`);
-      console.log(`[Google Drive Sync] Note: ${note.title}`);
-      console.log(`[Google Drive Sync] Mode: ${note.sync_mode}`);
-      console.log(`[Google Drive Sync] Folder ID: ${folderId}`);
-      console.log(`[Google Drive Sync] Existing file ID: ${note.gdrive_file_id || 'none'}`);
-      console.log(`[Google Drive Sync] Creating Drive file`);
+      console.log(`[Google Drive Sync] Pushing local note '${note.title}' to Drive...`);
 
       const confirmedFileId = await uploadFileToDriveAPI(authInfo, folderId, fileName, currentContent, note.gdrive_file_id);
-      console.log(`[Google Drive Sync] Drive API success`);
-      console.log(`[Google Drive Sync] File ID: ${confirmedFileId}`);
-      console.log(`[Google Drive Sync] Verifying Drive file`);
-
       await verifyDriveFileAPI(authInfo, confirmedFileId, folderId);
-      console.log(`[Google Drive Sync] Verification success`);
 
       const now = new Date().toISOString();
       const metaUpdate = NoteModel.updateSyncMetadata(note.id, userKey, {
@@ -631,8 +740,7 @@ async function syncUserNotesWithGoogleDrive(userId) {
         throw new Error('Failed to update SQLite metadata');
       }
 
-      console.log(`[Google Drive Sync] SQLite metadata update success`);
-      console.log(`[Google Drive Sync] Successfully synced note '${note.title}'`);
+      console.log(`[Google Drive Sync] Successfully synced note '${note.title}' to Drive.`);
 
       results.synced++;
       results.items.push({ id: note.id, title: note.title, state: 'SYNCED', gdriveFileId: confirmedFileId });
@@ -655,7 +763,7 @@ async function syncUserNotesWithGoogleDrive(userId) {
  */
 function getPendingGoogleSyncItems(userId) {
   const userKey = userId ? String(userId) : 'usr_local_default';
-  const allNotes = NoteModel.getAll(userKey).filter(n => n.sync_mode === 'cloud' || n.sync_mode === 'google');
+  const allNotes = NoteModel.getAll(userKey).filter(n => n.sync_mode === 'cloud' || n.sync_mode === 'google' || n.sync_mode === 'both');
 
   const pending = [];
   for (const note of allNotes) {

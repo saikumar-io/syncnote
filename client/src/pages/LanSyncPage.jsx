@@ -3,6 +3,7 @@ import { useSync } from '../context/SyncContext';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from '../utils/router';
 import PairDeviceModal from '../components/PairDeviceModal';
+import { formatRelativeTime } from '../utils/timeUtils';
 import { 
   Wifi, 
   Search, 
@@ -18,7 +19,11 @@ import {
   AlertCircle,
   XCircle,
   CheckCircle2,
-  AlertTriangle
+  AlertTriangle,
+  Radio,
+  Unlink,
+  Check,
+  X
 } from 'lucide-react';
 
 export default function LanSyncPage({ notes = [], notebooks = [] }) {
@@ -31,18 +36,18 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
   const [nearbyDevices, setNearbyDevices] = useState([]);
   const [scanSecondsRemaining, setScanSecondsRemaining] = useState(10);
   
-  const [selectedDeviceForPairing, setSelectedDeviceForPairing] = useState(null);
   const [isPairModalOpen, setIsPairModalOpen] = useState(false);
   const [accountMismatchMsg, setAccountMismatchMsg] = useState('');
 
-  // Active connected device for note sync
-  const [activeSyncDevice, setActiveSyncDevice] = useState(null);
-  const [selectedNoteIds, setSelectedNoteIds] = useState([]);
-  const [syncProgressState, setSyncProgressState] = useState(null);
-  const [syncStatusMessage, setSyncStatusMessage] = useState('');
+  // Per-device pairing state: { [deviceId]: 'Pairing requested' | 'Waiting for approval' | 'Paired' | 'Failed' }
+  const [devicePairingState, setDevicePairingState] = useState({});
+  // Per-device sync state: { [deviceId]: 'Connecting' | 'Syncing' | 'Synced' | 'Failed' }
+  const [deviceSyncState, setDeviceSyncState] = useState({});
+  const [deviceSyncMessage, setDeviceSyncMessage] = useState({});
 
   const scanTimerRef = useRef(null);
   const pollIntervalRef = useRef(null);
+  const activePairPollers = useRef({});
 
   // Stop scanning helper
   const stopScanning = () => {
@@ -51,7 +56,7 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
     setIsScanning(false);
   };
 
-  // Start 10-second continuous radar scan
+  // Start 10-second continuous scan
   const startRadarScan = async () => {
     stopScanning();
     setIsScanning(true);
@@ -59,19 +64,16 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
     setScanSecondsRemaining(10);
     setAccountMismatchMsg('');
 
-    // Trigger immediate discovery polling
     try {
       await sync.discoverLanDevices();
     } catch (e) {}
 
-    // Poll discovery endpoint every 2.5 seconds during scan window
     pollIntervalRef.current = setInterval(async () => {
       try {
         await sync.discoverLanDevices();
       } catch (e) {}
     }, 2500);
 
-    // Countdown timer for 10 seconds
     let secondsLeft = 10;
     scanTimerRef.current = setInterval(() => {
       secondsLeft -= 1;
@@ -83,7 +85,12 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
   };
 
   useEffect(() => {
-    return () => stopScanning();
+    // Initial scan on mount
+    startRadarScan();
+    return () => {
+      stopScanning();
+      Object.values(activePairPollers.current).forEach(clearInterval);
+    };
   }, []);
 
   useEffect(() => {
@@ -92,111 +99,163 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
     }
   }, [sync.nearbyDevices]);
 
-  // Filter only LAN-enabled notes
-  const lanNotes = notes.filter((n) => n.sync_mode === 'lan');
-
-  // Handle device bubble click
-  const handleDeviceBubbleClick = (device) => {
-    // Same-account validation check
-    if (device.userId && currentUser && device.userId !== currentUser.id) {
-      setAccountMismatchMsg(`Different SyncNote account on '${device.deviceName || 'Device'}'. Pairing unavailable.`);
+  // Handle explicit pair request to a discovered device
+  const handleInitiatePair = async (device) => {
+    const devId = device.deviceId || device.id;
+    // Same-account validation
+    if (device.userId && currentUser && device.userId !== currentUser.id && device.userId !== 'usr_local_default' && currentUser.id !== 'usr_local_default') {
+      setAccountMismatchMsg(`Different SyncNote account on '${device.deviceName || 'Device'}'. Cross-account pairing rejected.`);
       return;
     }
 
     setAccountMismatchMsg('');
-    if (device.isPaired) {
-      setActiveSyncDevice(device);
-    } else {
-      setSelectedDeviceForPairing(device);
-      setIsPairModalOpen(true);
+    setDevicePairingState(prev => ({ ...prev, [devId]: 'Pairing requested' }));
+
+    try {
+      const res = await sync.requestLanPairing(device);
+      if (res && res.alreadyPaired) {
+        setDevicePairingState(prev => ({ ...prev, [devId]: 'Paired' }));
+        await sync.fetchPairedDevices();
+        return;
+      }
+
+      if (res && res.requestId) {
+        setDevicePairingState(prev => ({ ...prev, [devId]: 'Waiting for approval' }));
+
+        // Start polling for approval from peer
+        const pollInterval = setInterval(async () => {
+          try {
+            const statusRes = await sync.pollOutgoingPairingStatus(
+              device.ip,
+              device.port || 5000,
+              res.requestId,
+              devId,
+              device.deviceName,
+              device.publicKey
+            );
+
+            if (statusRes && statusRes.status === 'APPROVED') {
+              clearInterval(activePairPollers.current[devId]);
+              delete activePairPollers.current[devId];
+              setDevicePairingState(prev => ({ ...prev, [devId]: 'Paired' }));
+              await sync.fetchPairedDevices();
+              await sync.discoverLanDevices();
+            } else if (statusRes && statusRes.status === 'REJECTED') {
+              clearInterval(activePairPollers.current[devId]);
+              delete activePairPollers.current[devId];
+              setDevicePairingState(prev => ({ ...prev, [devId]: 'Failed' }));
+            }
+          } catch (pollErr) {
+            // keep polling until timeout
+          }
+        }, 1500);
+
+        activePairPollers.current[devId] = pollInterval;
+
+        // Auto-timeout polling after 60s
+        setTimeout(() => {
+          if (activePairPollers.current[devId]) {
+            clearInterval(activePairPollers.current[devId]);
+            delete activePairPollers.current[devId];
+            setDevicePairingState(prev => {
+              if (prev[devId] === 'Waiting for approval') {
+                return { ...prev, [devId]: 'Failed' };
+              }
+              return prev;
+            });
+          }
+        }, 60000);
+      }
+    } catch (err) {
+      setDevicePairingState(prev => ({ ...prev, [devId]: 'Failed' }));
+      setAccountMismatchMsg(err.message || 'Pairing request failed.');
     }
   };
 
-  // Note Selection Handlers
-  const handleSelectAll = () => {
-    setSelectedNoteIds(lanNotes.map((n) => n.id));
-  };
-
-  const handleClearAll = () => {
-    setSelectedNoteIds([]);
-  };
-
-  const toggleNoteSelection = (noteId) => {
-    setSelectedNoteIds((prev) => 
-      prev.includes(noteId) ? prev.filter((id) => id !== noteId) : [...prev, noteId]
-    );
-  };
-
-  // Perform Encrypted LAN Synchronization
-  const handleSyncSelected = async () => {
-    if (!activeSyncDevice) return;
-    if (selectedNoteIds.length === 0) {
-      setSyncStatusMessage('Please select at least one LAN note to synchronize.');
+  // Handle Unpair
+  const handleUnpair = async (dev) => {
+    if (!window.confirm(`Are you sure you want to unpair '${dev.deviceName || dev.device_name}'? It will no longer be able to sync notes.`)) {
       return;
     }
 
-    setSyncProgressState('PREPARING');
-    setSyncStatusMessage('Preparing encrypted note payload...');
-
     try {
-      await new Promise((r) => setTimeout(r, 600));
-      setSyncProgressState('SENDING');
-      setSyncStatusMessage('Sending encrypted notes over local Wi-Fi...');
-
-      const notesToSync = lanNotes.filter((n) => selectedNoteIds.includes(n.id));
-      await sync.syncOverLan(activeSyncDevice, notesToSync, notebooks);
-
-      setSyncProgressState('RECEIVING');
-      setSyncStatusMessage('Receiving updates from remote device...');
-
-      await new Promise((r) => setTimeout(r, 600));
-      setSyncProgressState('VERIFYING');
-      setSyncStatusMessage('Verifying cryptographic SHA-256 integrity...');
-
-      await new Promise((r) => setTimeout(r, 600));
-      setSyncProgressState('COMPLETE');
-      setSyncStatusMessage('LAN Synchronization complete!');
+      await sync.unpairDevice(dev.id);
+      await sync.discoverLanDevices();
     } catch (err) {
-      console.error('LAN Sync execution error:', err);
-      setSyncProgressState(null);
-      setSyncStatusMessage(err.message || 'LAN Synchronization failed. Ensure devices are on same network.');
+      alert(`Failed to unpair: ${err.message}`);
     }
   };
 
+  // Handle Sync Now with Paired Device
+  const handleSyncWithDevice = async (dev) => {
+    const devId = dev.id;
+    setDeviceSyncState(prev => ({ ...prev, [devId]: 'Connecting' }));
+    setDeviceSyncMessage(prev => ({ ...prev, [devId]: 'Connecting...' }));
+
+    try {
+      await new Promise(r => setTimeout(r, 300));
+      setDeviceSyncState(prev => ({ ...prev, [devId]: 'Syncing' }));
+      setDeviceSyncMessage(prev => ({ ...prev, [devId]: 'Syncing notes over LAN...' }));
+
+      const res = await sync.triggerLanSync(dev.id);
+
+      setDeviceSyncState(prev => ({ ...prev, [devId]: 'Synced' }));
+      const msg = res.conflictCount > 0 
+        ? `Synced (${res.conflictCount} conflict copy created)` 
+        : `Synced (${res.appliedCount || 0} updated)`;
+      setDeviceSyncMessage(prev => ({ ...prev, [devId]: msg }));
+
+      setTimeout(() => {
+        setDeviceSyncState(prev => ({ ...prev, [devId]: null }));
+        setDeviceSyncMessage(prev => ({ ...prev, [devId]: null }));
+      }, 4000);
+    } catch (err) {
+      console.error('LAN Sync error:', err);
+      setDeviceSyncState(prev => ({ ...prev, [devId]: 'Failed' }));
+      setDeviceSyncMessage(prev => ({ ...prev, [devId]: err.message || 'Sync failed' }));
+
+      setTimeout(() => {
+        setDeviceSyncState(prev => ({ ...prev, [devId]: null }));
+        setDeviceSyncMessage(prev => ({ ...prev, [devId]: null }));
+      }, 5000);
+    }
+  };
+
+  // Filter available devices that are NOT yet in paired list
+  const pairedIds = new Set((sync.pairedDevices || []).map(d => d.id));
+  const availableDevices = nearbyDevices.filter(d => !pairedIds.has(d.deviceId));
+
   return (
     <div className="page-container" style={{ maxWidth: '880px', margin: '0 auto', padding: '24px 16px' }}>
-      {/* Dynamic inline styles for radar pulse CSS animation */}
-      <style>{`
-        @keyframes radarExpand {
-          0% { transform: scale(0.2); opacity: 0.9; }
-          100% { transform: scale(1.4); opacity: 0; }
-        }
-        @keyframes bubbleFloat {
-          0%, 100% { transform: translateY(0px); }
-          50% { transform: translateY(-4px); }
-        }
-      `}</style>
-
-      {/* Top Header & Breadcrumb */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px' }}>
+      {/* Top Header & Breadcrumbs */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
         <button 
           className="btn-secondary"
           onClick={() => navigate('/settings')}
-          style={{ padding: '6px 10px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+          style={{ padding: '6px 12px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}
         >
           <ArrowLeft size={14} />
           <span>Back to Settings</span>
         </button>
+
+        <button
+          className="btn-secondary"
+          onClick={() => setIsPairModalOpen(true)}
+          style={{ padding: '6px 12px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}
+        >
+          <Lock size={13} />
+          <span>Pair via 6-Digit PIN</span>
+        </button>
       </div>
 
-      <div className="page-header-bar" style={{ marginBottom: '24px' }}>
+      <div className="page-header-bar" style={{ marginBottom: '20px' }}>
         <div>
           <h1 className="page-heading" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <Wifi size={24} style={{ color: 'var(--accent-emerald)' }} />
-            <span>LAN Sync & Nearby Discovery</span>
+            <span>LAN Devices & Synchronization</span>
           </h1>
           <p className="page-subheading" style={{ marginTop: '4px' }}>
-            Private device-to-device synchronization over local Wi-Fi. LAN notes are <strong>NEVER</strong> sent to cloud servers.
+            Encrypted peer-to-peer note synchronization over local Wi-Fi. Notes marked for LAN are synchronized directly without cloud servers.
           </p>
         </div>
 
@@ -209,7 +268,7 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
               style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', fontSize: '0.84rem', color: 'var(--accent-danger)' }}
             >
               <XCircle size={15} />
-              <span>Cancel Scan</span>
+              <span>Stop Scan ({scanSecondsRemaining}s)</span>
             </button>
           ) : (
             <button
@@ -219,7 +278,7 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
               style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', fontSize: '0.84rem' }}
             >
               <Search size={15} />
-              <span>{hasScanned ? 'Search Again' : 'Scan for Devices'}</span>
+              <span>Scan for Devices</span>
             </button>
           )}
         </div>
@@ -232,170 +291,144 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
         </div>
       )}
 
-      {/* CONTINUOUS ANIMATED RADAR SCANNER WORKSPACE */}
-      <div style={{
-        background: 'var(--bg-app)',
-        border: '1px solid var(--border-subtle)',
-        borderRadius: 'var(--radius-md)',
-        padding: '36px 20px',
-        textAlign: 'center',
-        marginBottom: '28px',
-        position: 'relative',
-        minHeight: '340px',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        overflow: 'hidden'
-      }}>
-        {/* Radar Animation Area */}
+      {/* PENDING INBOUND PAIRING REQUESTS BANNER */}
+      {sync.pendingPairingRequests && sync.pendingPairingRequests.length > 0 && (
         <div style={{
-          position: 'relative',
-          width: '280px',
-          height: '280px',
+          background: 'rgba(99, 102, 241, 0.1)',
+          border: '1px solid var(--accent-primary)',
+          borderRadius: 'var(--radius-md)',
+          padding: '16px',
+          marginBottom: '24px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', color: 'var(--accent-primary)', fontWeight: 600, fontSize: '0.88rem' }}>
+            <Radio size={16} className="spin" />
+            <span>Incoming Pairing Requests ({sync.pendingPairingRequests.length})</span>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {sync.pendingPairingRequests.map(req => (
+              <div 
+                key={req.id} 
+                style={{ 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'space-between',
+                  padding: '10px 14px',
+                  background: 'var(--bg-app)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--border-subtle)'
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                    {req.requester_device_name || 'SyncNote Device'}
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                    Device ID: {req.requester_device_id} • IP: {req.requester_device_ip || 'LAN'}
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={() => sync.approveLanPairing(req.id)}
+                    style={{ padding: '5px 12px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  >
+                    <Check size={13} />
+                    <span>Approve</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => sync.rejectLanPairing(req.id)}
+                    style={{ padding: '5px 12px', fontSize: '0.76rem', color: 'var(--accent-danger)' }}
+                  >
+                    <X size={13} />
+                    <span>Reject</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* DISCOVERING / SCANNING STATE INDICATOR */}
+      {isScanning && (
+        <div style={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          margin: '0 auto 16px auto'
+          gap: '10px',
+          padding: '12px',
+          background: 'var(--bg-app)',
+          border: '1px solid var(--border-subtle)',
+          borderRadius: 'var(--radius-md)',
+          marginBottom: '20px',
+          fontSize: '0.82rem',
+          color: 'var(--accent-primary)'
         }}>
-          {/* Concentric Static Rings */}
-          <div style={{ position: 'absolute', width: '260px', height: '260px', borderRadius: '50%', border: '1px dashed var(--border-subtle)', opacity: 0.6 }} />
-          <div style={{ position: 'absolute', width: '180px', height: '180px', borderRadius: '50%', border: '1px solid var(--border-subtle)', opacity: 0.5 }} />
-          <div style={{ position: 'absolute', width: '100px', height: '100px', borderRadius: '50%', border: '1px solid var(--border-subtle)', opacity: 0.5 }} />
+          <RefreshCw size={15} className="spin" />
+          <span><strong>Discovering:</strong> Broadcasting safe UDP discovery probe on local subnet ({scanSecondsRemaining}s remaining)...</span>
+        </div>
+      )}
 
-          {/* Animated Expanding Pulse Rings during active scanning */}
-          {isScanning && (
-            <>
-              <div style={{
-                position: 'absolute', width: '240px', height: '240px', borderRadius: '50%',
-                border: '2px solid var(--accent-emerald)',
-                animation: 'radarExpand 2.2s cubic-bezier(0.1, 0.4, 0.8, 1) infinite'
-              }} />
-              <div style={{
-                position: 'absolute', width: '240px', height: '240px', borderRadius: '50%',
-                border: '1.5px solid var(--accent-emerald)',
-                animation: 'radarExpand 2.2s cubic-bezier(0.1, 0.4, 0.8, 1) infinite 0.75s'
-              }} />
-            </>
-          )}
-
-          {/* Center Point Icon */}
-          <div style={{
-            width: '54px', height: '54px', borderRadius: '50%',
-            background: 'var(--bg-card)', border: '2px solid var(--accent-emerald)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 0 20px rgba(16, 185, 129, 0.3)', zIndex: 5
-          }}>
-            <Wifi size={24} style={{ color: 'var(--accent-emerald)' }} />
-          </div>
-
-          {/* DYNAMICALLY DISCOVERED DEVICE BUBBLES AROUND RADAR */}
-          {nearbyDevices.map((dev, idx) => {
-            const total = nearbyDevices.length;
-            const angle = (idx / total) * 2 * Math.PI - Math.PI / 2;
-            const radius = 105; // radius in px
-            const posX = 140 + radius * Math.cos(angle) - 45; // 45px offset
-            const posY = 140 + radius * Math.sin(angle) - 32;
-
-            const isCurrentAccount = !dev.userId || !currentUser || dev.userId === currentUser.id;
-
-            return (
-              <div
-                key={dev.deviceId || dev.ip || idx}
-                onClick={() => handleDeviceBubbleClick(dev)}
-                title={`${dev.deviceName} (${dev.ip}) - Click to connect`}
-                style={{
-                  position: 'absolute',
-                  left: `${posX}px`,
-                  top: `${posY}px`,
-                  width: '90px',
-                  padding: '8px 6px',
-                  background: 'var(--bg-card)',
-                  border: `1.5px solid ${dev.isPaired ? 'var(--accent-emerald)' : isCurrentAccount ? 'var(--accent-primary)' : 'var(--accent-warning)'}`,
-                  borderRadius: 'var(--radius-md)',
-                  cursor: 'pointer',
-                  boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
-                  zIndex: 10,
-                  animation: 'bubbleFloat 3s ease-in-out infinite',
-                  transition: 'all 0.3s ease'
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '4px', color: dev.isPaired ? 'var(--accent-emerald)' : 'var(--accent-primary)' }}>
-                  {dev.deviceType === 'mobile' ? <Smartphone size={18} /> : dev.deviceType === 'desktop' ? <Monitor size={18} /> : <Laptop size={18} />}
-                </div>
-                <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {dev.deviceName || 'SyncNote'}
-                </div>
-                <div style={{ fontSize: '0.64rem', color: dev.isPaired ? 'var(--accent-emerald)' : 'var(--text-muted)' }}>
-                  {dev.isPaired ? '● Trusted' : isCurrentAccount ? 'Found' : 'Diff Acc'}
-                </div>
-              </div>
-            );
-          })}
+      {/* ========================================================
+          SECTION 1: AVAILABLE ON LAN
+          ======================================================== */}
+      <div style={{ marginBottom: '32px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+          <h2 style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Radio size={16} style={{ color: 'var(--accent-primary)' }} />
+            <span>Available on LAN ({availableDevices.length})</span>
+          </h2>
+          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+            Nearby SyncNote instances detected via safe broadcast
+          </span>
         </div>
 
-        {/* Scan Status & Instructions */}
-        {isScanning ? (
-          <div>
-            <h3 style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-              <RefreshCw size={15} className="spin-icon text-muted" />
-              <span>Searching for nearby SyncNote devices... ({scanSecondsRemaining}s)</span>
-            </h3>
-            <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-              Listening for local SyncNote broadcasts on your Wi-Fi network...
-            </p>
-          </div>
-        ) : !hasScanned ? (
-          <div>
-            <h3 style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
-              LAN Device Discovery
-            </h3>
-            <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-              Click "Scan for Devices" to begin a continuous 10-second search for nearby devices.
-            </p>
-          </div>
-        ) : nearbyDevices.length > 0 ? (
-          <div>
-            <h3 style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--accent-emerald)', marginBottom: '4px' }}>
-              Found {nearbyDevices.length} Device{nearbyDevices.length === 1 ? '' : 's'} Nearby
-            </h3>
-            <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-              Click on any device bubble around the radar to pair or start synchronizing notes.
-            </p>
+        {availableDevices.length === 0 ? (
+          <div style={{
+            background: 'var(--bg-app)',
+            border: '1px dashed var(--border-subtle)',
+            borderRadius: 'var(--radius-md)',
+            padding: '24px',
+            textAlign: 'center',
+            color: 'var(--text-muted)',
+            fontSize: '0.8rem'
+          }}>
+            {isScanning ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
+                <RefreshCw size={18} className="spin" style={{ color: 'var(--accent-primary)' }} />
+                <span>Searching for other SyncNote devices on this Wi-Fi...</span>
+              </div>
+            ) : (
+              <div>
+                <span>No unpaired SyncNote devices currently discovered on this local network.</span>
+                <div style={{ marginTop: '8px' }}>
+                  <button 
+                    type="button" 
+                    className="btn-secondary" 
+                    onClick={startRadarScan}
+                    style={{ padding: '4px 12px', fontSize: '0.74rem' }}
+                  >
+                    Scan Again
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         ) : (
-          /* NO DEVICES FOUND STATE (Shows ONLY after full scan window ends with 0 devices) */
-          <div>
-            <div style={{ color: 'var(--accent-warning)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', marginBottom: '6px' }}>
-              <AlertCircle size={20} />
-              <span style={{ fontSize: '0.94rem', fontWeight: 600 }}>No SyncNote devices found</span>
-            </div>
-            <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', maxWidth: '440px', margin: '0 auto 12px auto' }}>
-              No SyncNote devices were found on this network. Please ensure:
-            </p>
-            <ul style={{ fontSize: '0.74rem', color: 'var(--text-muted)', textAlign: 'left', display: 'inline-block', marginBottom: '14px', lineHeight: 1.6 }}>
-              <li>• Both devices are connected to the exact same Wi-Fi / LAN network</li>
-              <li>• SyncNote is active and running on the target computer</li>
-              <li>• Local discovery is enabled on both devices</li>
-            </ul>
-          </div>
-        )}
-      </div>
-
-      {/* DISCOVERED DEVICES DETAILED CARDS LIST */}
-      {nearbyDevices.length > 0 && (
-        <div style={{ marginBottom: '28px' }}>
-          <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '12px' }}>
-            Discovered Devices ({nearbyDevices.length})
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '12px' }}>
-            {nearbyDevices.map((dev) => {
-              const isCurrentAccount = !dev.userId || !currentUser || dev.userId === currentUser.id;
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))', gap: '12px' }}>
+            {availableDevices.map(dev => {
+              const devId = dev.deviceId || dev.id;
+              const pairState = devicePairingState[devId] || 'Available';
+              const isDiffAccount = dev.userId && currentUser && dev.userId !== currentUser.id && dev.userId !== 'usr_local_default' && currentUser.id !== 'usr_local_default';
 
               return (
-                <div 
-                  key={dev.deviceId || dev.ip}
+                <div
+                  key={devId}
                   style={{
                     background: 'var(--bg-app)',
                     border: '1px solid var(--border-subtle)',
@@ -409,231 +442,244 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
                 >
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
                     <div style={{
-                      width: '38px', height: '38px', borderRadius: 'var(--radius-sm)',
-                      background: dev.isPaired ? 'rgba(16, 185, 129, 0.12)' : 'rgba(59, 130, 246, 0.12)', 
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', 
-                      color: dev.isPaired ? 'var(--accent-emerald)' : 'var(--accent-primary)', flexShrink: 0
+                      width: '38px',
+                      height: '38px',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'rgba(99, 102, 241, 0.1)',
+                      color: 'var(--accent-primary)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0
                     }}>
-                      <Laptop size={20} />
+                      {dev.deviceType === 'mobile' ? <Smartphone size={20} /> : dev.deviceType === 'desktop' ? <Monitor size={20} /> : <Laptop size={20} />}
                     </div>
 
-                    <div>
-                      <div style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {dev.deviceName || 'SyncNote Device'}
                       </div>
                       <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                        {dev.deviceType || 'Desktop'} • IP: {dev.ip}
+                        IP: {dev.ip || 'Local'}:{dev.port || 5000}
                       </div>
-                      {!isCurrentAccount && (
-                        <div style={{ fontSize: '0.7rem', color: 'var(--accent-warning)', marginTop: '2px', fontWeight: 600 }}>
+                      {isDiffAccount && (
+                        <div style={{ fontSize: '0.68rem', color: 'var(--accent-warning)', marginTop: '2px', fontWeight: 600 }}>
                           Different SyncNote Account
                         </div>
                       )}
                     </div>
                   </div>
 
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: '10px', borderTop: '1px solid var(--border-subtle)' }}>
-                    <span style={{ fontSize: '0.72rem', color: dev.isPaired ? 'var(--accent-emerald)' : 'var(--text-muted)', fontWeight: 600 }}>
-                      {dev.isPaired ? '● Paired & Trusted' : '○ Available'}
-                    </span>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    paddingTop: '10px',
+                    borderTop: '1px solid var(--border-subtle)'
+                  }}>
+                    {/* Pairing status badge */}
+                    <div style={{ fontSize: '0.74rem' }}>
+                      {pairState === 'Pairing requested' && (
+                        <span style={{ color: 'var(--accent-primary)', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                          <RefreshCw size={11} className="spin" />
+                          <span>Pairing requested</span>
+                        </span>
+                      )}
+                      {pairState === 'Waiting for approval' && (
+                        <span style={{ color: 'var(--accent-warning)', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                          <RefreshCw size={11} className="spin" />
+                          <span>Waiting for approval</span>
+                        </span>
+                      )}
+                      {pairState === 'Paired' && (
+                        <span style={{ color: 'var(--accent-emerald)', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                          <CheckCircle2 size={12} />
+                          <span>Paired</span>
+                        </span>
+                      )}
+                      {pairState === 'Failed' && (
+                        <span style={{ color: 'var(--accent-danger)', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                          <AlertCircle size={12} />
+                          <span>Failed</span>
+                        </span>
+                      )}
+                      {pairState === 'Available' && (
+                        <span style={{ color: 'var(--text-muted)' }}>
+                          ○ {isDiffAccount ? 'Unavailable' : 'Available'}
+                        </span>
+                      )}
+                    </div>
 
-                    {dev.isPaired ? (
-                      <button
-                        type="button"
-                        className="btn-primary"
-                        onClick={() => setActiveSyncDevice(dev)}
-                        style={{ padding: '4px 12px', fontSize: '0.76rem' }}
-                      >
-                        Sync Notes
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        disabled={!isCurrentAccount}
-                        onClick={() => {
-                          if (isCurrentAccount) {
-                            setSelectedDeviceForPairing(dev);
-                            setIsPairModalOpen(true);
-                          }
-                        }}
-                        style={{ padding: '4px 12px', fontSize: '0.76rem' }}
-                      >
-                        {isCurrentAccount ? 'Pair Device' : 'Unavailable'}
-                      </button>
-                    )}
+                    {/* Pair button */}
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={isDiffAccount || pairState === 'Pairing requested' || pairState === 'Waiting for approval'}
+                      onClick={() => handleInitiatePair(dev)}
+                      style={{ padding: '4px 12px', fontSize: '0.74rem' }}
+                    >
+                      {pairState === 'Waiting for approval' ? 'Waiting...' : pairState === 'Pairing requested' ? 'Sending...' : 'Pair'}
+                    </button>
                   </div>
                 </div>
               );
             })}
           </div>
+        )}
+      </div>
+
+      {/* ========================================================
+          SECTION 2: PAIRED DEVICES
+          ======================================================== */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+          <h2 style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <ShieldCheck size={16} style={{ color: 'var(--accent-emerald)' }} />
+            <span>Paired Devices ({sync.pairedDevices ? sync.pairedDevices.length : 0})</span>
+          </h2>
+          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+            Cryptographically authenticated devices trusted for direct note exchange
+          </span>
         </div>
-      )}
 
-      {/* NOTE SELECTION & SYNCHRONIZATION WORKSPACE */}
-      {activeSyncDevice && (
-        <div style={{
-          background: 'var(--bg-app)',
-          border: '1px solid var(--accent-emerald)',
-          borderRadius: 'var(--radius-md)',
-          padding: '20px',
-          marginBottom: '24px'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-            <div>
-              <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                Connected to: <span style={{ color: 'var(--accent-emerald)' }}>{activeSyncDevice.deviceName}</span>
-              </div>
-              <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                Select LAN-enabled notes to synchronize over encrypted local transfer:
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <button 
-                type="button" 
-                className="btn-secondary" 
-                onClick={handleSelectAll}
-                style={{ padding: '4px 10px', fontSize: '0.74rem' }}
-              >
-                Select All
-              </button>
-              <button 
-                type="button" 
-                className="btn-secondary" 
-                onClick={handleClearAll}
-                style={{ padding: '4px 10px', fontSize: '0.74rem' }}
-              >
-                Clear
-              </button>
-            </div>
+        {(!sync.pairedDevices || sync.pairedDevices.length === 0) ? (
+          <div style={{
+            background: 'var(--bg-app)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-md)',
+            padding: '28px',
+            textAlign: 'center',
+            color: 'var(--text-muted)',
+            fontSize: '0.8rem'
+          }}>
+            <Laptop size={28} style={{ margin: '0 auto 8px auto', display: 'block', opacity: 0.3 }} />
+            <div style={{ color: 'var(--text-primary)', fontWeight: 600, marginBottom: '4px' }}>No Paired Devices Yet</div>
+            <span>Pair with a nearby device from the "Available on LAN" section above to begin synchronizing.</span>
           </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {sync.pairedDevices.map(dev => {
+              const devId = dev.id;
+              const syncState = deviceSyncState[devId];
+              const syncMsg = deviceSyncMessage[devId];
 
-          {/* Notes Selection Table */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px', maxHeight: '300px', overflowY: 'auto' }}>
-            {lanNotes.length === 0 ? (
-              <div style={{ padding: '24px', textAlign: 'center', background: 'var(--bg-input)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
-                <p style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)', margin: '0 0 4px 0' }}>
-                  No notes configured for LAN Sync
-                </p>
-                <p style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', margin: 0 }}>
-                  Change a note's sync mode to <strong>[ LAN ]</strong> via the Note Context Menu to enable peer-to-peer synchronization.
-                </p>
-              </div>
-            ) : (
-              lanNotes.map((note) => {
-                const isSelected = selectedNoteIds.includes(note.id);
-
-                return (
-                  <div 
-                    key={note.id}
-                    onClick={() => toggleNoteSelection(note.id)}
-                    style={{
+              return (
+                <div
+                  key={devId}
+                  style={{
+                    background: 'var(--bg-app)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 'var(--radius-md)',
+                    padding: '14px 18px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '14px',
+                    flexWrap: 'wrap'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{
+                      width: '38px',
+                      height: '38px',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'rgba(16, 185, 129, 0.1)',
+                      color: 'var(--accent-emerald)',
                       display: 'flex',
                       alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '10px 12px',
-                      background: isSelected ? 'rgba(16, 185, 129, 0.08)' : 'var(--bg-input)',
-                      border: `1px solid ${isSelected ? 'var(--accent-emerald)' : 'var(--border-subtle)'}`,
-                      borderRadius: 'var(--radius-sm)',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      {isSelected ? (
-                        <CheckSquare size={16} style={{ color: 'var(--accent-emerald)' }} />
-                      ) : (
-                        <Square size={16} style={{ color: 'var(--text-muted)' }} />
-                      )}
-
-                      <div>
-                        <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                          {note.title || 'Untitled Note'}
-                        </div>
-                      </div>
+                      justifyContent: 'center',
+                      flexShrink: 0
+                    }}>
+                      {dev.deviceType === 'mobile' ? <Smartphone size={20} /> : dev.deviceType === 'desktop' ? <Monitor size={20} /> : <Laptop size={20} />}
                     </div>
 
-                    <span style={{
-                      fontSize: '0.68rem',
-                      fontWeight: 600,
-                      padding: '2px 6px',
-                      borderRadius: '3px',
-                      background: 'rgba(16, 185, 129, 0.15)',
-                      color: 'var(--accent-emerald)'
-                    }}>
-                      [ LAN ]
-                    </span>
+                    <div>
+                      <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>{dev.deviceName || dev.device_name}</span>
+                        {/* Online / Offline badge */}
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          fontSize: '0.68rem',
+                          fontWeight: 600,
+                          padding: '1px 6px',
+                          borderRadius: '4px',
+                          background: dev.isOnline ? 'rgba(16, 185, 129, 0.12)' : 'rgba(156, 163, 175, 0.12)',
+                          color: dev.isOnline ? 'var(--accent-emerald)' : 'var(--text-muted)'
+                        }}>
+                          <span style={{
+                            width: '6px',
+                            height: '6px',
+                            borderRadius: '50%',
+                            background: dev.isOnline ? 'var(--accent-emerald)' : 'var(--text-muted)'
+                          }} />
+                          {dev.isOnline ? 'Online' : 'Offline'}
+                        </span>
+                      </div>
+
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                        Last seen: <strong>{dev.lastSeen ? formatRelativeTime(dev.lastSeen) : 'Never'}</strong> • IP: {dev.deviceIp || dev.device_ip || 'Unknown'}
+                      </div>
+
+                      {/* Active state message if syncing/synced/failed */}
+                      {syncState && (
+                        <div style={{
+                          fontSize: '0.7rem',
+                          marginTop: '4px',
+                          fontWeight: 600,
+                          color: syncState === 'Synced' ? 'var(--accent-emerald)' : syncState === 'Failed' ? 'var(--accent-danger)' : 'var(--accent-primary)'
+                        }}>
+                          {syncState === 'Connecting' && 'Connecting to peer...'}
+                          {syncState === 'Syncing' && 'Syncing notes over encrypted channel...'}
+                          {syncState === 'Synced' && (syncMsg || 'Successfully synchronized')}
+                          {syncState === 'Failed' && (syncMsg || 'Synchronization failed')}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                );
-              })
-            )}
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    {/* Sync button */}
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={syncState === 'Connecting' || syncState === 'Syncing'}
+                      onClick={() => handleSyncWithDevice(dev)}
+                      style={{ padding: '6px 14px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      <RefreshCw size={12} className={(syncState === 'Connecting' || syncState === 'Syncing') ? 'spin' : ''} />
+                      <span>
+                        {syncState === 'Connecting' ? 'Connecting...' : syncState === 'Syncing' ? 'Syncing...' : 'Sync'}
+                      </span>
+                    </button>
+
+                    {/* Unpair button */}
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => handleUnpair(dev)}
+                      title="Unpair and revoke trust"
+                      style={{ padding: '6px 12px', fontSize: '0.76rem', color: 'var(--accent-danger)', display: 'flex', alignItems: 'center', gap: '4px' }}
+                    >
+                      <Unlink size={13} />
+                      <span>Unpair</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
+        )}
+      </div>
 
-          {/* Sync Progress Banner */}
-          {syncProgressState && (
-            <div style={{
-              background: 'var(--bg-input)',
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-sm)',
-              padding: '12px',
-              marginBottom: '16px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                  {syncStatusMessage}
-                </span>
-                <span style={{ fontSize: '0.74rem', fontWeight: 600, color: 'var(--accent-emerald)' }}>
-                  {syncProgressState}
-                </span>
-              </div>
-
-              {/* Progress Steps Bar */}
-              <div style={{ display: 'flex', gap: '4px', height: '6px', width: '100%', background: 'var(--bg-app)', borderRadius: '3px', overflow: 'hidden' }}>
-                <div style={{ flex: 1, background: ['PREPARING','SENDING','RECEIVING','VERIFYING','COMPLETE'].includes(syncProgressState) ? 'var(--accent-emerald)' : 'transparent', transition: 'all 0.3s' }} />
-                <div style={{ flex: 1, background: ['SENDING','RECEIVING','VERIFYING','COMPLETE'].includes(syncProgressState) ? 'var(--accent-emerald)' : 'transparent', transition: 'all 0.3s' }} />
-                <div style={{ flex: 1, background: ['RECEIVING','VERIFYING','COMPLETE'].includes(syncProgressState) ? 'var(--accent-emerald)' : 'transparent', transition: 'all 0.3s' }} />
-                <div style={{ flex: 1, background: ['VERIFYING','COMPLETE'].includes(syncProgressState) ? 'var(--accent-emerald)' : 'transparent', transition: 'all 0.3s' }} />
-                <div style={{ flex: 1, background: syncProgressState === 'COMPLETE' ? 'var(--accent-emerald)' : 'transparent', transition: 'all 0.3s' }} />
-              </div>
-            </div>
-          )}
-
-          {/* Action Buttons */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '10px' }}>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => {
-                setActiveSyncDevice(null);
-                setSyncProgressState(null);
-              }}
-              style={{ padding: '6px 14px', fontSize: '0.78rem' }}
-            >
-              Cancel
-            </button>
-
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={handleSyncSelected}
-              disabled={selectedNoteIds.length === 0 || !!syncProgressState}
-              style={{ padding: '6px 16px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}
-            >
-              <RefreshCw size={14} className={syncProgressState && syncProgressState !== 'COMPLETE' ? 'spin-icon' : ''} />
-              <span>{syncProgressState && syncProgressState !== 'COMPLETE' ? 'Synchronizing...' : 'Sync Selected'}</span>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* PAIR DEVICE MODAL */}
+      {/* 6-Digit PIN Pairing Modal */}
       <PairDeviceModal
         isOpen={isPairModalOpen}
         onClose={() => setIsPairModalOpen(false)}
-        targetDevice={selectedDeviceForPairing}
         onDevicePaired={() => {
           sync.fetchPairedDevices();
-          startRadarScan();
+          sync.discoverLanDevices();
         }}
       />
     </div>

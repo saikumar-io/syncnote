@@ -136,23 +136,25 @@ function deriveSharedSessionKey(remotePublicKeyHex) {
 }
 
 /**
- * Sign data with local private key
+ * Sign data with shared session key (HMAC-SHA256)
  */
-function signPayload(payloadString) {
-  const identity = getOrCreateDeviceIdentity();
-  const hmac = crypto.createHmac('sha256', identity.privateKey);
+function signPayload(payloadString, macKey) {
+  const key = macKey || getLocalMasterKey();
+  const hmac = crypto.createHmac('sha256', key);
   hmac.update(payloadString);
   return hmac.digest('hex');
 }
 
 /**
- * Verify payload signature using remote public key
+ * Verify payload signature using shared session key
  */
-function verifyPayloadSignature(payloadString, signatureHex, remotePublicKeyHex) {
-  // HMAC-based verification using remote public key as shared reference
-  const hmac = crypto.createHmac('sha256', remotePublicKeyHex);
+function verifyPayloadSignature(payloadString, signatureHex, macKey) {
+  if (!signatureHex || !macKey) return false;
+  const key = macKey;
+  const hmac = crypto.createHmac('sha256', key);
   hmac.update(payloadString);
   const expected = hmac.digest('hex');
+  if (signatureHex.length !== expected.length) return false;
   return crypto.timingSafeEqual(Buffer.from(signatureHex, 'hex'), Buffer.from(expected, 'hex'));
 }
 
@@ -169,7 +171,7 @@ function encryptLanPayload(payload, sessionKey, sequenceNumber, senderDeviceId, 
   const authTag = cipher.getAuthTag().toString('hex');
   
   const timestamp = Date.now();
-  const signature = signPayload(`${senderDeviceId}:${recipientDeviceId}:${sequenceNumber}:${timestamp}:${ciphertext}`);
+  const signature = signPayload(`${senderDeviceId}:${recipientDeviceId}:${sequenceNumber}:${timestamp}:${ciphertext}`, sessionKey);
 
   return {
     senderDeviceId,
@@ -215,12 +217,12 @@ function decryptLanPayload(envelope, sessionKey, expectedSenderDeviceId, remoteP
     throw new Error(`SECURITY REJECTED: Replayed or duplicate sequence number ${sequenceNumber} (last seen: ${lastSeq})`);
   }
 
-  // 4. Verify Signature
-  if (signature && remotePublicKeyHex) {
+  // 4. Verify Signature using sessionKey
+  if (signature && sessionKey) {
     const isValidSig = verifyPayloadSignature(
       `${senderDeviceId}:${recipientDeviceId}:${sequenceNumber}:${timestamp}:${ciphertext}`,
       signature,
-      remotePublicKeyHex
+      sessionKey
     );
     if (!isValidSig) {
       throw new Error('SECURITY REJECTED: Invalid digital signature on LAN message');

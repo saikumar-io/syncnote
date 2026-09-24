@@ -94,6 +94,11 @@ export default function SyncModeModal({
       message = `Make "${note.title || 'Untitled Note'}" available for Google Drive Sync? All changes will be securely synchronized to your Google Drive "SyncNote" folder.`;
       confirmBtnLabel = 'Enable Cloud Sync';
     }
+  } else if (targetMode === 'both') {
+    icon = <Wifi size={24} style={{ color: '#06b6d4' }} />;
+    title = 'LAN + Cloud Hybrid Sync';
+    message = `Enable dual synchronization for "${note.title || 'Untitled Note'}". This note will prefer fast LAN synchronization when paired devices are reachable on the same local network, and fall back to Google Drive cloud sync when away.`;
+    confirmBtnLabel = 'Enable Both (LAN + Cloud)';
   } else if (currentMode === 'cloud' && (targetMode === 'local' || targetMode === 'lan')) {
     icon = <Shield size={24} style={{ color: '#f59e0b' }} />;
     title = targetMode === 'local' ? 'Switch to Local Only' : 'Switch to LAN Sync';

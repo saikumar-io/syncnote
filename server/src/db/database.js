@@ -244,11 +244,28 @@ const initDatabase = () => {
       id TEXT PRIMARY KEY,
       device_name TEXT NOT NULL,
       device_ip TEXT,
+      device_port INTEGER DEFAULT 5000,
       pairing_token TEXT NOT NULL,
       user_id TEXT NOT NULL,
       status TEXT DEFAULT 'TRUSTED',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS lan_pairing_requests (
+      id TEXT PRIMARY KEY,
+      requester_device_id TEXT NOT NULL,
+      requester_device_name TEXT NOT NULL,
+      requester_device_type TEXT DEFAULT 'desktop',
+      requester_device_ip TEXT,
+      requester_port INTEGER DEFAULT 5000,
+      requester_public_key TEXT NOT NULL,
+      requester_user_id TEXT NOT NULL,
+      target_user_id TEXT NOT NULL,
+      pairing_token TEXT,
+      status TEXT DEFAULT 'PENDING',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS device_selected_notes (
@@ -261,6 +278,7 @@ const initDatabase = () => {
     CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status);
     CREATE INDEX IF NOT EXISTS idx_sync_queue_entity ON sync_queue(entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_lan_paired_user_id ON lan_paired_devices(user_id);
+    CREATE INDEX IF NOT EXISTS idx_lan_pairing_req_status ON lan_pairing_requests(status);
   `);
 
   try {
@@ -296,9 +314,10 @@ const initDatabase = () => {
     try { db.exec(`ALTER TABLE notebooks ADD COLUMN ${col};`); } catch (e) {}
   });
 
-  // Ensure public_key and device_type exist on lan_paired_devices table
+  // Ensure public_key, device_type and device_port exist on lan_paired_devices table
   try { db.exec("ALTER TABLE lan_paired_devices ADD COLUMN public_key TEXT;"); } catch (e) {}
   try { db.exec("ALTER TABLE lan_paired_devices ADD COLUMN device_type TEXT DEFAULT 'desktop';"); } catch (e) {}
+  try { db.exec("ALTER TABLE lan_paired_devices ADD COLUMN device_port INTEGER DEFAULT 5000;"); } catch (e) {}
 
   // Ensure default notebook exists
   const nbCount = db.prepare("SELECT COUNT(*) as count FROM notebooks").get();
@@ -502,7 +521,7 @@ const NoteModel = {
 
   create: (id, title, filePath, notebookId, contentHash, currentVersionId, userId, syncMode = 'local') => {
     const safeUserId = userId || 'usr_local_default';
-    const normalizeMode = (m) => (m === 'cloud' || m === 'google') ? 'cloud' : (m === 'lan' ? 'lan' : 'local');
+    const normalizeMode = (m) => (m === 'cloud' || m === 'google') ? 'cloud' : (m === 'lan' ? 'lan' : (m === 'both' ? 'both' : 'local'));
     const finalSyncMode = normalizeMode(syncMode);
     const now = new Date().toISOString();
     const stmt = db.prepare(`
@@ -519,7 +538,7 @@ const NoteModel = {
     const existing = NoteModel.getById(id, safeUserId);
     if (!existing) return null;
 
-    const normalizeMode = (m) => (m === 'cloud' || m === 'google') ? 'cloud' : (m === 'lan' ? 'lan' : 'local');
+    const normalizeMode = (m) => (m === 'cloud' || m === 'google') ? 'cloud' : (m === 'lan' ? 'lan' : (m === 'both' ? 'both' : 'local'));
     const finalTitle = title !== undefined ? title : existing.title;
     const finalFilePath = filePath !== undefined ? filePath : existing.file_path;
     const finalNotebookId = notebookId !== undefined ? notebookId : existing.notebook_id;
@@ -912,27 +931,32 @@ const LanPairingModel = {
     return db.prepare('SELECT * FROM lan_paired_devices WHERE public_key = ? AND status = \'TRUSTED\'').get(publicKey);
   },
 
-  createPairing: ({ id, deviceName, deviceIp, pairingToken, publicKey, deviceType = 'desktop', userId, status = 'TRUSTED' }) => {
+  createPairing: ({ id, deviceName, deviceIp, devicePort = 5000, pairingToken, publicKey, deviceType = 'desktop', userId, status = 'TRUSTED' }) => {
     const now = new Date().toISOString();
     const stmt = db.prepare(`
-      INSERT INTO lan_paired_devices (id, device_name, device_ip, pairing_token, public_key, device_type, user_id, status, created_at, last_seen)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO lan_paired_devices (id, device_name, device_ip, device_port, pairing_token, public_key, device_type, user_id, status, created_at, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         device_name = excluded.device_name,
-        device_ip = excluded.device_ip,
+        device_ip = COALESCE(excluded.device_ip, lan_paired_devices.device_ip),
+        device_port = COALESCE(excluded.device_port, lan_paired_devices.device_port),
         pairing_token = excluded.pairing_token,
         public_key = COALESCE(excluded.public_key, lan_paired_devices.public_key),
         device_type = excluded.device_type,
         status = excluded.status,
         last_seen = excluded.last_seen
     `);
-    stmt.run(id, deviceName, deviceIp || null, pairingToken, publicKey || null, deviceType, userId || 'usr_local_default', status, now, now);
+    stmt.run(id, deviceName, deviceIp || null, devicePort || 5000, pairingToken, publicKey || null, deviceType, userId || 'usr_local_default', status, now, now);
     return LanPairingModel.getById(id);
   },
 
-  updateLastSeen: (id, deviceIp) => {
+  updateLastSeen: (id, deviceIp, devicePort) => {
     const now = new Date().toISOString();
-    db.prepare('UPDATE lan_paired_devices SET last_seen = ?, device_ip = ? WHERE id = ?').run(now, deviceIp || null, id);
+    if (devicePort) {
+      db.prepare('UPDATE lan_paired_devices SET last_seen = ?, device_ip = COALESCE(?, device_ip), device_port = ? WHERE id = ?').run(now, deviceIp || null, devicePort, id);
+    } else {
+      db.prepare('UPDATE lan_paired_devices SET last_seen = ?, device_ip = COALESCE(?, device_ip) WHERE id = ?').run(now, deviceIp || null, id);
+    }
   },
 
   revokePairing: (id, userId) => {
@@ -969,6 +993,59 @@ const LanPairingModel = {
     });
     transaction(noteIds);
     return LanPairingModel.getDeviceSelectedNotes(deviceId);
+  }
+};
+
+// LAN Pairing Request Helper Methods
+const LanPairingRequestModel = {
+  create: ({ id, requesterDeviceId, requesterDeviceName, requesterDeviceType = 'desktop', requesterDeviceIp, requesterPort = 5000, requesterPublicKey, requesterUserId, targetUserId, pairingToken = null }) => {
+    const now = new Date().toISOString();
+    const reqId = id || `pair_req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const stmt = db.prepare(`
+      INSERT INTO lan_pairing_requests (id, requester_device_id, requester_device_name, requester_device_type, requester_device_ip, requester_port, requester_public_key, requester_user_id, target_user_id, pairing_token, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+    `);
+    stmt.run(reqId, requesterDeviceId, requesterDeviceName, requesterDeviceType, requesterDeviceIp || null, requesterPort, requesterPublicKey, requesterUserId || 'usr_local_default', targetUserId || 'usr_local_default', pairingToken, now, now);
+    return LanPairingRequestModel.getById(reqId);
+  },
+
+  getById: (id) => {
+    return db.prepare('SELECT * FROM lan_pairing_requests WHERE id = ?').get(id);
+  },
+
+  getByRequesterId: (requesterDeviceId, targetUserId) => {
+    return db.prepare('SELECT * FROM lan_pairing_requests WHERE requester_device_id = ? AND (target_user_id = ? OR target_user_id = \'usr_local_default\') ORDER BY created_at DESC LIMIT 1').get(requesterDeviceId, targetUserId || 'usr_local_default');
+  },
+
+  getPendingForUser: (userId) => {
+    const stmt = db.prepare(`
+      SELECT * FROM lan_pairing_requests 
+      WHERE (target_user_id = ? OR target_user_id = 'usr_local_default') AND status = 'PENDING'
+      ORDER BY created_at DESC
+    `);
+    return stmt.all(userId || 'usr_local_default');
+  },
+
+  approve: (id, pairingToken) => {
+    const now = new Date().toISOString();
+    const stmt = db.prepare(`
+      UPDATE lan_pairing_requests 
+      SET status = 'APPROVED', pairing_token = ?, updated_at = ?
+      WHERE id = ?
+    `);
+    stmt.run(pairingToken, now, id);
+    return LanPairingRequestModel.getById(id);
+  },
+
+  reject: (id) => {
+    const now = new Date().toISOString();
+    const stmt = db.prepare(`
+      UPDATE lan_pairing_requests 
+      SET status = 'REJECTED', updated_at = ?
+      WHERE id = ?
+    `);
+    stmt.run(now, id);
+    return LanPairingRequestModel.getById(id);
   }
 };
 
@@ -1075,5 +1152,6 @@ module.exports = {
   SessionModel,
   SyncQueueModel,
   LanPairingModel,
+  LanPairingRequestModel,
   GoogleDriveAuthModel
 };

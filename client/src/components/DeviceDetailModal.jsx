@@ -83,13 +83,12 @@ export default function DeviceDetailModal({ isOpen, device, onClose, onDeviceUpd
     setSyncing(true);
     setStatusMsg({ type: '', text: '' });
     try {
-      // Trigger LAN sync endpoint
-      await apiClient.post('/api/sync/push', {});
+      await apiClient.post('/api/lan/sync/outbound', { targetDeviceId: device.id });
       setSyncing(false);
       setStatusMsg({ type: 'success', text: 'P2P LAN sync cycle completed.' });
     } catch (err) {
       setSyncing(false);
-      setStatusMsg({ type: 'error', text: 'LAN sync failed or device unreachable.' });
+      setStatusMsg({ type: 'error', text: err?.message || 'LAN sync failed or device unreachable.' });
     }
   };
 

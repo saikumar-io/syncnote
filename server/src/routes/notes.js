@@ -144,7 +144,7 @@ router.post('/', async (req, res) => {
     const finalTitle = (typeof title === 'string' && title.trim().length > 0) ? title.trim() : 'Untitled Note';
     const finalContent = typeof content === 'string' ? content : '';
     const finalNotebookId = notebook_id || null;
-    const finalSyncMode = ['local', 'google', 'cloud', 'lan'].includes(sync_mode) ? (sync_mode === 'google' ? 'cloud' : sync_mode) : 'local';
+    const finalSyncMode = ['local', 'google', 'cloud', 'lan', 'both'].includes(sync_mode) ? (sync_mode === 'google' ? 'cloud' : sync_mode) : 'local';
 
     const nbName = getNotebookName(finalNotebookId, req.user.id);
     const filePath = getNoteFilePath(finalTitle, nbName);
@@ -158,8 +158,8 @@ router.post('/', async (req, res) => {
     SessionModel.upsert(id, null, contentHash, finalContent.trim().length > 0 ? 'uncheckpointed' : 'clean', req.user.id);
     const sessionInfo = getNoteSessionInfo(newMeta, finalContent, req.user.id);
 
-    // If sync_mode === 'google', attempt Google Drive sync upload
-    if (finalSyncMode === 'google') {
+    // If sync_mode === 'google' or 'cloud' or 'both', attempt Google Drive sync upload
+    if (finalSyncMode === 'google' || finalSyncMode === 'cloud' || finalSyncMode === 'both') {
       try {
         await uploadNoteToGoogleDrive(req.user.id, newMeta, finalContent);
       } catch (gErr) {
@@ -211,7 +211,7 @@ router.put('/:id', async (req, res) => {
     const finalTitle = (typeof title === 'string') ? title : existing.title;
     const finalContent = (typeof content === 'string') ? content : readNoteFile(existing.file_path);
     const finalNotebookId = notebook_id !== undefined ? notebook_id : existing.notebook_id;
-    const finalSyncMode = sync_mode !== undefined ? (['local', 'google', 'cloud', 'lan'].includes(sync_mode) ? (sync_mode === 'google' ? 'cloud' : sync_mode) : existing.sync_mode) : existing.sync_mode;
+    const finalSyncMode = sync_mode !== undefined ? (['local', 'google', 'cloud', 'lan', 'both'].includes(sync_mode) ? (sync_mode === 'google' ? 'cloud' : sync_mode) : existing.sync_mode) : existing.sync_mode;
 
     const latestVersion = VersionModel.getLatestForNote(id, req.user.id);
     const finalVersion = current_version_id !== undefined
@@ -239,8 +239,8 @@ router.put('/:id', async (req, res) => {
     SessionModel.upsert(id, finalVersion, newHash, 'clean', req.user.id);
     const sessionInfo = getNoteSessionInfo(updatedMeta, finalContent, req.user.id);
 
-    // If note is or became cloud mode, sync upload to Google Drive
-    if (finalSyncMode === 'cloud' || finalSyncMode === 'google') {
+    // If note is or became cloud or both mode, sync upload to Google Drive
+    if (finalSyncMode === 'cloud' || finalSyncMode === 'google' || finalSyncMode === 'both') {
       try {
         await uploadNoteToGoogleDrive(req.user.id, updatedMeta, finalContent);
       } catch (gErr) {

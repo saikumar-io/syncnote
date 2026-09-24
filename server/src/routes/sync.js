@@ -122,7 +122,8 @@ router.get('/status', optionalAuth, async (req, res) => {
     const breakdown = {
       local: allNotes.filter(n => n.sync_mode === 'local').length,
       google: allNotes.filter(n => n.sync_mode === 'google' || n.sync_mode === 'cloud').length,
-      lan: allNotes.filter(n => n.sync_mode === 'lan').length
+      lan: allNotes.filter(n => n.sync_mode === 'lan').length,
+      both: allNotes.filter(n => n.sync_mode === 'both').length
     };
 
     return res.json({
@@ -222,8 +223,8 @@ router.post('/push', requireAuth, async (req, res) => {
               if (note) {
                 writeNoteFile(note.file_path, payload.content);
 
-                // If note has sync_mode === 'google', push to Google Drive dedicated app folder
-                if (note.sync_mode === 'google') {
+                // If note has sync_mode === 'google' or 'cloud' or 'both', push to Google Drive dedicated app folder
+                if (note.sync_mode === 'google' || note.sync_mode === 'cloud' || note.sync_mode === 'both') {
                   try {
                     await uploadNoteToGoogleDrive(userId, note, payload.content);
                   } catch (gErr) {

@@ -260,7 +260,8 @@ const {
   connectGoogleAccount,
   connectGoogleDrive,
   disconnectGoogleDrive,
-  disconnectGoogleAccount
+  disconnectGoogleAccount,
+  syncUserNotesWithGoogleDrive
 } = require('../utils/googleSyncService');
 
 // 1. GOOGLE LOGIN (IDENTITY ONLY)
@@ -471,6 +472,11 @@ router.get(['/google/drive/callback', '/api/auth/google/drive/callback'], option
     console.log(' - Authenticated email:', req.user?.email || 'N/A');
     console.log(' - Google account email:', driveEmail || connectResult?.email || 'N/A');
     console.log(' - Drive connection record user ID:', userId);
+
+    // Trigger initial cloud pull & push sync in background upon OAuth authorization
+    syncUserNotesWithGoogleDrive(userId).catch(err => {
+      console.warn('[Google Drive OAuth Callback] Initial background cloud sync notice:', err.message);
+    });
 
     return res.redirect(`${FRONTEND_URL}/settings?drive=connected`);
   } catch (err) {

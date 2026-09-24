@@ -115,6 +115,18 @@ export function AppContent() {
     }
   }, [isAuthenticated, loadNotes, loadNotebooks, checkHealth]);
 
+  // Real-time listener for background sync events
+  useEffect(() => {
+    const handleNotesUpdated = () => {
+      if (isAuthenticated) {
+        loadNotes();
+        loadNotebooks();
+      }
+    };
+    window.addEventListener('syncnote:notes-updated', handleNotesUpdated);
+    return () => window.removeEventListener('syncnote:notes-updated', handleNotesUpdated);
+  }, [isAuthenticated, loadNotes, loadNotebooks]);
+
   // Active Note Computation
   const activeNote = notes.find((n) => n.id === activeNoteId) || notes[0] || null;
 

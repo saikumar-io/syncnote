@@ -136,6 +136,14 @@ export default function NoteContextMenu({
             <span>↔ LAN Sync</span>
             {currentMode === 'lan' && <Check size={12} style={{ color: 'var(--accent-emerald)' }} />}
           </div>
+          <div
+            className={`context-menu-item ${currentMode === 'both' ? 'active' : ''}`}
+            onClick={() => handleSelectMode('both')}
+            style={{ fontSize: '0.74rem', padding: '5px 8px', justifyContent: 'space-between' }}
+          >
+            <span>◈ Both (LAN + Cloud)</span>
+            {currentMode === 'both' && <Check size={12} style={{ color: '#06b6d4' }} />}
+          </div>
         </div>
       )}
 
