@@ -270,10 +270,6 @@ async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfi
       }
     }, { envelope }, 2000); // 2-second timeout
 
-    if (res.status === 403 && (res.data?.code === 'UNPAIRED_DEVICE' || res.data?.error?.includes('revoked'))) {
-      return { ok: false, revoked: true, error: 'UNPAIRED_DEVICE' };
-    }
-
     if (res.status !== 200) {
       return { ok: false, error: res.data?.error || `HTTP ${res.status}` };
     }

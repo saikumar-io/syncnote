@@ -1261,17 +1261,6 @@ router.get('/devices/presence', async (req, res) => {
             lastSeen: nowIso,
             latencyMs: hbResult.latencyMs
           };
-        } else if (hbResult && hbResult.revoked) {
-          // Peer informed us that we were unpaired/revoked while offline
-          console.warn(`[LAN Presence] Peer '${d.device_name}' (${d.id}) revoked pairing. Revoking locally.`);
-          LanPairingModel.revokePairing(d.id, userId);
-          return {
-            id: d.id,
-            deviceName: d.device_name,
-            isOnline: false,
-            revoked: true,
-            error: 'UNPAIRED_DEVICE'
-          };
         } else {
           return {
             id: d.id,
@@ -1432,14 +1421,7 @@ router.post('/sync/outbound', async (req, res) => {
         { notes: notesWithContent, notebooks }
       );
     } catch (syncErr) {
-      if (syncErr.message && (
-        syncErr.message.includes('UNPAIRED_DEVICE') ||
-        syncErr.message.includes('not paired') ||
-        syncErr.message.includes('revoked')
-      )) {
-        console.warn(`[LAN Outbound Sync] Peer '${peer.id}' rejected connection as revoked. Revoking locally.`);
-        LanPairingModel.revokePairing(peer.id, currentUserId);
-      }
+      console.warn(`[LAN Outbound Sync] Sync to peer '${peer.id}' failed: ${syncErr.message}`);
       throw syncErr;
     }
 

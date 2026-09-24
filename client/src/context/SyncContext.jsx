@@ -160,13 +160,6 @@ export function SyncProvider({ children }) {
     try {
       const res = await apiClient.get('/api/lan/devices/presence');
       if (res && res.presence) {
-        // If peer informed us that we were unpaired/revoked while offline, reload paired list
-        const hadRevocation = res.presence.some(p => p.revoked);
-        if (hadRevocation) {
-          await fetchPairedDevices();
-          return;
-        }
-
         const presenceMap = new Map();
         for (const p of res.presence) {
           presenceMap.set(p.id, p);

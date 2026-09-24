@@ -319,10 +319,11 @@ const initDatabase = () => {
     try { db.exec(`ALTER TABLE notebooks ADD COLUMN ${col};`); } catch (e) {}
   });
 
-  // Ensure public_key, device_type and device_port exist on lan_paired_devices table
+  // Ensure public_key, device_type, device_port and pairing_generation exist on lan_paired_devices table
   try { db.exec("ALTER TABLE lan_paired_devices ADD COLUMN public_key TEXT;"); } catch (e) {}
   try { db.exec("ALTER TABLE lan_paired_devices ADD COLUMN device_type TEXT DEFAULT 'desktop';"); } catch (e) {}
   try { db.exec("ALTER TABLE lan_paired_devices ADD COLUMN device_port INTEGER DEFAULT 5000;"); } catch (e) {}
+  try { db.exec("ALTER TABLE lan_paired_devices ADD COLUMN pairing_generation INTEGER DEFAULT 1;"); } catch (e) {}
 
   // Ensure default notebook exists
   const nbCount = db.prepare("SELECT COUNT(*) as count FROM notebooks").get();
@@ -967,8 +968,8 @@ const LanPairingModel = {
   createPairing: ({ id, deviceName, deviceIp, devicePort = 5000, pairingToken, publicKey, deviceType = 'desktop', userId, status = 'TRUSTED' }) => {
     const now = new Date().toISOString();
     const stmt = db.prepare(`
-      INSERT INTO lan_paired_devices (id, device_name, device_ip, device_port, pairing_token, public_key, device_type, user_id, status, created_at, last_seen)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO lan_paired_devices (id, device_name, device_ip, device_port, pairing_token, public_key, device_type, user_id, status, pairing_generation, created_at, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         device_name = excluded.device_name,
         device_ip = COALESCE(excluded.device_ip, lan_paired_devices.device_ip),
@@ -977,6 +978,7 @@ const LanPairingModel = {
         public_key = COALESCE(excluded.public_key, lan_paired_devices.public_key),
         device_type = excluded.device_type,
         status = excluded.status,
+        pairing_generation = COALESCE(lan_paired_devices.pairing_generation, 0) + 1,
         last_seen = excluded.last_seen
     `);
     stmt.run(id, deviceName, deviceIp || null, devicePort || 5000, pairingToken, publicKey || null, deviceType, userId || 'usr_local_default', status, now, now);
