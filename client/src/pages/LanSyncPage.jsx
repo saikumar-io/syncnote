@@ -114,9 +114,11 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
 
     try {
       const res = await sync.requestLanPairing(device);
-      if (res && res.alreadyPaired) {
+      if (res && (res.status === 'APPROVED' || res.alreadyPaired)) {
         setDevicePairingState(prev => ({ ...prev, [devId]: 'Paired' }));
         await sync.fetchPairedDevices();
+        if (sync.checkDevicesPresence) sync.checkDevicesPresence();
+        await sync.discoverLanDevices();
         return;
       }
 
@@ -231,8 +233,15 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
   };
 
   // Filter available devices that are NOT yet in paired list
-  const pairedIds = new Set((sync.pairedDevices || []).map(d => d.id));
-  const availableDevices = nearbyDevices.filter(d => !pairedIds.has(d.deviceId));
+  const pairedIds = new Set();
+  (sync.pairedDevices || []).forEach(d => {
+    if (d.id) pairedIds.add(d.id);
+    if (d.deviceId) pairedIds.add(d.deviceId);
+  });
+  const availableDevices = nearbyDevices.filter(d => {
+    const devId = d.deviceId || d.id;
+    return !pairedIds.has(devId) && !d.isPaired && devicePairingState[devId] !== 'Paired';
+  });
 
   return (
     <div className="page-container" style={{ maxWidth: '880px', margin: '0 auto', padding: '24px 16px' }}>
@@ -676,16 +685,22 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
                       )}
                     </div>
 
-                    {/* Pair button */}
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={isDiffAccount || pairState === 'Pairing requested' || pairState === 'Waiting for approval'}
-                      onClick={() => handleInitiatePair(dev)}
-                      style={{ padding: '4px 12px', fontSize: '0.74rem' }}
-                    >
-                      {pairState === 'Waiting for approval' ? 'Waiting...' : pairState === 'Pairing requested' ? 'Sending...' : 'Pair'}
-                    </button>
+                    {/* Action button: Do not show/use Pair if device is already paired */}
+                    {pairState === 'Paired' ? (
+                      <span style={{ fontSize: '0.74rem', color: 'var(--accent-emerald)', fontWeight: 600 }}>
+                        ● Paired in Trusted Devices
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={isDiffAccount || pairState === 'Pairing requested' || pairState === 'Waiting for approval'}
+                        onClick={() => handleInitiatePair(dev)}
+                        style={{ padding: '4px 12px', fontSize: '0.74rem' }}
+                      >
+                        {pairState === 'Waiting for approval' ? 'Waiting...' : pairState === 'Pairing requested' ? 'Sending...' : 'Pair'}
+                      </button>
+                    )}
                   </div>
                 </div>
               );

@@ -24,13 +24,26 @@ const processedSequenceMap = new Map();
 const outgoingSequenceMap = new Map();
 
 /**
- * Get the next strictly increasing sequence number for a recipient device
+ * Get the next strictly increasing sequence number for a recipient device.
+ * Anchored to Date.now() so sequence numbers remain strictly increasing across server restarts,
+ * preventing false peer replay rejections after restarts.
  */
 function getNextOutgoingSequence(recipientDeviceId) {
   const current = outgoingSequenceMap.get(recipientDeviceId) || 0;
-  const next = current + 1;
+  const now = Date.now();
+  const next = Math.max(now, current + 1);
   outgoingSequenceMap.set(recipientDeviceId, next);
   return next;
+}
+
+/**
+ * Reset tracked incoming and outgoing sequence numbers for a device (e.g. upon unpairing or establishing a new pair)
+ */
+function resetDeviceSequence(deviceId) {
+  if (deviceId) {
+    processedSequenceMap.delete(deviceId);
+    outgoingSequenceMap.delete(deviceId);
+  }
 }
 
 
@@ -264,6 +277,7 @@ module.exports = {
   getPublicDeviceProfile,
   deriveSharedSessionKey,
   getNextOutgoingSequence,
+  resetDeviceSequence,
   encryptLanPayload,
   decryptLanPayload,
   signPayload,

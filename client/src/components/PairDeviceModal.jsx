@@ -66,6 +66,11 @@ export default function PairDeviceModal({ isOpen, onClose, onDevicePaired }) {
   };
 
   const handlePairDirect = async (device) => {
+    if (!device.publicKey) {
+      setPairingError('Device has not provided a valid public key.');
+      return;
+    }
+
     setPairingInProgress(true);
     setPairingError('');
     setPairingSuccess('');
@@ -74,7 +79,7 @@ export default function PairDeviceModal({ isOpen, onClose, onDevicePaired }) {
       const res = await apiClient.post('/api/lan/pair/direct', {
         remoteDeviceId: device.deviceId || device.id,
         remoteDeviceName: device.deviceName,
-        remotePublicKey: device.publicKey || 'pub_' + (device.deviceId || device.id),
+        remotePublicKey: device.publicKey,
         remoteDeviceType: device.deviceType || 'desktop',
         remoteUserId: device.userId
       });
@@ -113,12 +118,20 @@ export default function PairDeviceModal({ isOpen, onClose, onDevicePaired }) {
     setPairingSuccess('');
 
     try {
+      const infoRes = await apiClient.get('/api/lan/info');
+      const localDevice = infoRes?.device;
+      if (!localDevice || !localDevice.publicKey) {
+        setPairingInProgress(false);
+        setPairingError('Unable to load local cryptographic device profile.');
+        return;
+      }
+
       const res = await apiClient.post('/api/lan/pair/verify-code', {
         code: pinCode.trim(),
-        remoteDeviceId: 'dev_' + Math.random().toString(36).substring(2, 8),
-        remoteDeviceName: 'Remote Device (' + pinCode.trim() + ')',
-        remotePublicKey: 'pub_pin_' + Date.now(),
-        remoteDeviceType: 'desktop'
+        remoteDeviceId: localDevice.deviceId,
+        remoteDeviceName: localDevice.deviceName,
+        remotePublicKey: localDevice.publicKey,
+        remoteDeviceType: localDevice.deviceType || 'desktop'
       });
 
       setPairingInProgress(false);

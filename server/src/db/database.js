@@ -334,6 +334,15 @@ const initDatabase = () => {
   db.prepare("UPDATE notebooks SET user_id = 'usr_local_default' WHERE user_id IS NULL").run();
   db.prepare("UPDATE notes SET user_id = 'usr_local_default' WHERE user_id IS NULL").run();
 
+  // Safe Cleanup: Remove orphaned pairing records with missing or mock keys, and purge expired pending pairing requests
+  try {
+    db.prepare("DELETE FROM lan_paired_devices WHERE public_key IS NULL OR public_key = '' OR public_key LIKE 'pub_pin_%'").run();
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    db.prepare("DELETE FROM lan_pairing_requests WHERE status = 'PENDING' AND created_at < ?").run(oneHourAgo);
+  } catch (cleanErr) {
+    console.warn('[SQLite DB] Note during pairing table cleanup:', cleanErr.message);
+  }
+
   console.log('[SQLite DB] File-first database schema ready with Auth, Version Control, Sync Queue & LAN Pairing tables.');
 };
 
@@ -1034,6 +1043,11 @@ const LanPairingModel = {
 const LanPairingRequestModel = {
   create: ({ id, requesterDeviceId, requesterDeviceName, requesterDeviceType = 'desktop', requesterDeviceIp, requesterPort = 5000, requesterPublicKey, requesterUserId, targetUserId, pairingToken = null }) => {
     const now = new Date().toISOString();
+    // Supersede any existing pending pairing requests from the same device to prevent stale duplicates
+    try {
+      db.prepare("UPDATE lan_pairing_requests SET status = 'SUPERSEDED', updated_at = ? WHERE requester_device_id = ? AND status = 'PENDING'").run(now, requesterDeviceId);
+    } catch (e) {}
+
     const reqId = id || `pair_req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const stmt = db.prepare(`
       INSERT INTO lan_pairing_requests (id, requester_device_id, requester_device_name, requester_device_type, requester_device_ip, requester_port, requester_public_key, requester_user_id, target_user_id, pairing_token, status, created_at, updated_at)

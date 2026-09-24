@@ -24,6 +24,7 @@ const {
   getPublicDeviceProfile,
   deriveSharedSessionKey,
   getNextOutgoingSequence,
+  resetDeviceSequence,
   encryptLanPayload,
   decryptLanPayload
 } = require('../utils/deviceCrypto');
@@ -326,14 +327,28 @@ router.post('/pair/request', (req, res) => {
 
     const requesterIp = req.ip || req.socket?.remoteAddress;
 
-    // Check if already paired
+    // Check if already paired with TRUSTED status
     const alreadyPaired = LanPairingModel.getById(requesterDeviceId);
     if (alreadyPaired && alreadyPaired.status === 'TRUSTED') {
-      LanPairingModel.updateLastSeen(requesterDeviceId, requesterIp, requesterPort || 5000);
+      // Re-validate and update public key, IP, port in case peer reconnected or renewed keys
+      LanPairingModel.createPairing({
+        id: requesterDeviceId,
+        deviceName: requesterDeviceName || alreadyPaired.device_name,
+        deviceIp: requesterIp,
+        devicePort: requesterPort || alreadyPaired.device_port || 5000,
+        pairingToken: alreadyPaired.pairing_token,
+        publicKey: requesterPublicKey || alreadyPaired.public_key,
+        deviceType: requesterDeviceType || alreadyPaired.device_type || 'desktop',
+        userId: currentUserId,
+        status: 'TRUSTED'
+      });
+      resetDeviceSequence(requesterDeviceId);
       return res.json({
         success: true,
         requestId: `req_already_paired_${Date.now()}`,
         status: 'APPROVED',
+        approved: true,
+        alreadyPaired: true,
         message: 'Device already paired and trusted.',
         localDevice: localProfile,
         pairingToken: alreadyPaired.pairing_token
@@ -343,12 +358,16 @@ router.post('/pair/request', (req, res) => {
     // Persist pending pairing request for explicit local user approval
     const existingReq = LanPairingRequestModel.getByRequesterId(requesterDeviceId, requesterUserId || 'usr_local_default');
     if (existingReq && existingReq.status === 'PENDING') {
-      return res.json({
-        success: true,
-        requestId: existingReq.id,
-        status: 'PENDING',
-        message: 'Pairing request already pending approval.'
-      });
+      const isRecent = (Date.now() - new Date(existingReq.created_at).getTime()) < 60000;
+      const sameKey = existingReq.requester_public_key === requesterPublicKey;
+      if (isRecent && sameKey) {
+        return res.json({
+          success: true,
+          requestId: existingReq.id,
+          status: 'PENDING',
+          message: 'Pairing request already pending approval.'
+        });
+      }
     }
 
     const newReq = LanPairingRequestModel.create({
@@ -591,6 +610,7 @@ router.post('/unpair', (req, res) => {
 
     // 5. Revoke the requesting device locally (idempotent: safe if already revoked)
     LanPairingModel.revokePairing(senderDeviceId, senderDevice.user_id);
+    resetDeviceSequence(senderDeviceId);
     console.log(`[LAN Unpair] Successfully revoked pairing for peer '${senderDevice.device_name}' (${senderDeviceId}) upon remote request.`);
 
     // 6. Return authenticated encrypted acknowledgement (UNPAIR_ACK)
@@ -825,16 +845,11 @@ router.get('/discover', async (req, res) => {
 
     // Format & annotate discovered devices
     const discovered = Array.from(discoveredMap.values()).map(dev => {
-      const isPaired = pairedMap.has(dev.deviceId);
-      // Opportunistic reconciliation: if this node previously revoked dev.deviceId while dev was offline,
-      // notify dev now that it is discovered reachable on LAN
-      const localRecord = LanPairingModel.getById(dev.deviceId);
-      if (localRecord && localRecord.status === 'REVOKED' && dev.ip && dev.port && localRecord.public_key) {
-        sendEncryptedLanUnpair(dev.ip, dev.port, localProfile, localRecord).catch(() => {});
-      }
+      const targetId = dev.deviceId || dev.id;
+      const isPaired = pairedMap.has(targetId);
 
       if (isPaired && dev.ip) {
-        LanPairingModel.updateLastSeen(dev.deviceId, dev.ip, dev.port || 5000);
+        LanPairingModel.updateLastSeen(targetId, dev.ip, dev.port || 5000);
       }
 
       return {
@@ -904,6 +919,8 @@ router.post('/pair/approve', (req, res) => {
       status: 'TRUSTED'
     });
 
+    resetDeviceSequence(pairingReq.requester_device_id);
+
     console.log(`[LAN Pairing Approval] User approved device '${pairingReq.requester_device_name}' (${pairingReq.requester_device_id})`);
 
     return res.json({
@@ -950,6 +967,35 @@ router.post('/pair/send-request', async (req, res) => {
     const targetPort = remotePort || 5000;
     const requestResult = await sendPairingRequest(remoteIp, targetPort, localProfile, currentUserId);
 
+    // If remote peer was already trusted or immediately approved:
+    if (requestResult && (requestResult.status === 'APPROVED' || requestResult.alreadyPaired) && requestResult.localDevice) {
+      const remoteDevId = requestResult.localDevice.deviceId || remoteDeviceId;
+      const pairedDev = LanPairingModel.createPairing({
+        id: remoteDevId,
+        deviceName: requestResult.localDevice.deviceName || 'Remote Device',
+        deviceIp: remoteIp,
+        devicePort: targetPort,
+        pairingToken: requestResult.pairingToken || crypto.randomBytes(32).toString('hex'),
+        publicKey: requestResult.localDevice.publicKey,
+        deviceType: requestResult.localDevice.deviceType || 'desktop',
+        userId: currentUserId,
+        status: 'TRUSTED'
+      });
+      resetDeviceSequence(remoteDevId);
+
+      return res.json({
+        success: true,
+        status: 'APPROVED',
+        approved: true,
+        alreadyPaired: true,
+        pairedDevice: pairedDev,
+        remoteDeviceId: remoteDevId,
+        remoteIp,
+        remotePort: targetPort,
+        ...requestResult
+      });
+    }
+
     return res.json({
       success: true,
       remoteDeviceId,
@@ -990,6 +1036,7 @@ router.post('/pair/check-status', async (req, res) => {
         userId: currentUserId,
         status: 'TRUSTED'
       });
+      resetDeviceSequence(statusData.localDevice?.deviceId || remoteDeviceId);
 
       return res.json({
         success: true,
@@ -1117,6 +1164,8 @@ router.post('/pair/direct', (req, res) => {
     userId: currentUserId,
     status: 'TRUSTED'
   });
+
+  resetDeviceSequence(remoteDeviceId);
 
   return res.json({
     success: true,
@@ -1301,6 +1350,7 @@ router.delete('/devices/:id', async (req, res) => {
 
   // STEP 1: Immediately revoke pairing locally so future sync attempts are blocked
   LanPairingModel.revokePairing(id, userId);
+  resetDeviceSequence(id);
   console.log(`[LAN Revocation] Revoked LAN trust locally for device ${id}`);
 
   // STEP 2: If peer has an IP address and public key, send authenticated UNPAIR_REQUEST
