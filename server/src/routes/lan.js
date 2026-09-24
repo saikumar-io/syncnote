@@ -34,6 +34,7 @@ const {
 } = require('../utils/versionControl');
 const { discoverDevicesUDP } = require('../utils/lanDiscoveryService');
 const {
+  httpRequest,
   checkPeerReachable,
   sendPairingRequest,
   pollPairingStatus,
@@ -1134,6 +1135,226 @@ router.post('/pair/verify-code', (req, res) => {
     localDevice: localProfile,
     pairingToken
   });
+});
+
+/**
+ * POST /api/lan/pair/verify-pin
+ * Inbound peer-to-peer endpoint: called by a remote device submitting a 6-digit PIN.
+ * Verifies PIN against activePairingCodes and creates a pending pairing request.
+ */
+router.post('/pair/verify-pin', (req, res) => {
+  try {
+    const { pin, requesterProfile, requesterUserId } = req.body || {};
+    const cleanCode = (pin || '').replace(/\s+/g, '');
+    const currentUserId = req.user ? req.user.id : 'usr_local_default';
+
+    if (!cleanCode || !requesterProfile || !requesterProfile.deviceId || !requesterProfile.publicKey) {
+      return res.status(400).json({ error: 'Missing required parameters (pin, requesterProfile).' });
+    }
+
+    const localProfile = getPublicDeviceProfile();
+    if (requesterProfile.deviceId === localProfile.deviceId) {
+      return res.status(400).json({ error: 'Cannot pair a device with itself.' });
+    }
+
+    const stored = activePairingCodes.get(cleanCode);
+    if (!stored) {
+      return res.status(404).json({ error: 'Pairing PIN not recognized or expired on this device.' });
+    }
+
+    if (Date.now() > stored.expiresAt) {
+      activePairingCodes.delete(cleanCode);
+      return res.status(404).json({ error: 'Pairing PIN has expired.' });
+    }
+
+    // Account validation
+    if (stored.userId && currentUserId && stored.userId !== 'usr_local_default' && currentUserId !== 'usr_local_default' && stored.userId !== currentUserId) {
+      return res.status(400).json({ error: 'This device belongs to a different SyncNote account.' });
+    }
+
+    // Consume the one-time PIN
+    activePairingCodes.delete(cleanCode);
+
+    const requesterIp = req.ip || req.socket?.remoteAddress;
+
+    // Check if device is already trusted
+    const alreadyPaired = LanPairingModel.getById(requesterProfile.deviceId);
+    if (alreadyPaired && alreadyPaired.status === 'TRUSTED') {
+      LanPairingModel.createPairing({
+        id: requesterProfile.deviceId,
+        deviceName: requesterProfile.deviceName || alreadyPaired.device_name,
+        deviceIp: requesterIp,
+        devicePort: requesterProfile.port || alreadyPaired.device_port || 5000,
+        pairingToken: alreadyPaired.pairing_token,
+        publicKey: requesterProfile.publicKey || alreadyPaired.public_key,
+        deviceType: requesterProfile.deviceType || alreadyPaired.device_type || 'desktop',
+        userId: currentUserId,
+        status: 'TRUSTED'
+      });
+      resetDeviceSequence(requesterProfile.deviceId);
+      return res.json({
+        success: true,
+        matched: true,
+        status: 'APPROVED',
+        approved: true,
+        alreadyPaired: true,
+        localDevice: localProfile,
+        pairingToken: alreadyPaired.pairing_token
+      });
+    }
+
+    // Create pending request for user approval
+    const newReq = LanPairingRequestModel.create({
+      requesterDeviceId: requesterProfile.deviceId,
+      requesterDeviceName: requesterProfile.deviceName || 'SyncNote Device',
+      requesterDeviceType: requesterProfile.deviceType || 'desktop',
+      requesterDeviceIp: requesterIp,
+      requesterPort: requesterProfile.port || 5000,
+      requesterPublicKey: requesterProfile.publicKey,
+      requesterUserId: requesterUserId || 'usr_local_default',
+      targetUserId: currentUserId
+    });
+
+    console.log(`[LAN PIN Pairing] Valid PIN entered for device '${requesterProfile.deviceName}' (${requesterProfile.deviceId}). Waiting for user approval.`);
+
+    return res.json({
+      success: true,
+      matched: true,
+      status: 'PENDING',
+      requestId: newReq.id,
+      localDevice: localProfile
+    });
+  } catch (err) {
+    console.error('Error verifying pairing PIN:', err);
+    return res.status(500).json({ error: 'Failed to verify pairing PIN', details: err.message });
+  }
+});
+
+/**
+ * POST /api/lan/pair/submit-pin
+ * Outbound endpoint called by local device to connect to a peer holding a 6-digit PIN.
+ * Scans candidate LAN devices and submits the pairing request to the matching peer.
+ */
+router.post('/pair/submit-pin', async (req, res) => {
+  try {
+    const { pin, targetIp } = req.body || {};
+    const cleanCode = (pin || '').replace(/\s+/g, '');
+    const currentUserId = req.user ? req.user.id : 'usr_local_default';
+    const localProfile = getPublicDeviceProfile();
+
+    if (!cleanCode || cleanCode.length < 6) {
+      return res.status(400).json({ error: 'Please enter a valid 6-digit PIN code.' });
+    }
+
+    if (activePairingCodes.has(cleanCode)) {
+      return res.status(400).json({ error: 'This is this device\'s own pairing PIN. Please enter the PIN generated on the other device.' });
+    }
+
+    const payload = {
+      pin: cleanCode,
+      requesterProfile: localProfile,
+      requesterUserId: currentUserId
+    };
+
+    // Helper to probe a specific IP:port for the PIN
+    const probePeer = async (ip, port = 5000) => {
+      try {
+        const response = await httpRequest({
+          hostname: ip,
+          port,
+          path: '/api/lan/pair/verify-pin',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        }, payload, 1500);
+
+        if (response && response.status === 200 && response.data && response.data.matched) {
+          return { ip, port, data: response.data };
+        }
+      } catch (e) {}
+      return null;
+    };
+
+    // If targetIp is provided directly, probe it first
+    if (targetIp) {
+      const cleanIp = targetIp.trim();
+      const directMatch = await probePeer(cleanIp);
+      if (directMatch) {
+        return res.json({
+          success: true,
+          ...directMatch.data,
+          remoteIp: directMatch.ip,
+          remotePort: directMatch.port
+        });
+      }
+      return res.status(404).json({ error: `Could not verify PIN with target IP ${cleanIp}. Ensure the PIN is correct and device is reachable.` });
+    }
+
+    // Auto-discover candidate peers on LAN
+    const candidateIps = new Set();
+
+    // 1. Query UDP broadcast
+    try {
+      const udpPeers = await discoverDevicesUDP(800);
+      udpPeers.forEach(p => {
+        if (p.ip) candidateIps.add(p.ip);
+        if (Array.isArray(p.ipAddresses)) p.ipAddresses.forEach(ip => candidateIps.add(ip));
+      });
+    } catch (e) {}
+
+    // 2. Query any known / previously seen devices in database
+    try {
+      const known = LanPairingModel.getAllDevices(currentUserId);
+      known.forEach(k => {
+        if (k.device_ip) candidateIps.add(k.device_ip);
+      });
+    } catch (e) {}
+
+    // 3. Scan candidate IPs
+    for (const ip of candidateIps) {
+      const match = await probePeer(ip);
+      if (match) {
+        return res.json({
+          success: true,
+          ...match.data,
+          remoteIp: match.ip,
+          remotePort: match.port
+        });
+      }
+    }
+
+    // 4. Fallback: Quick subnet scan on primary subnet (batches of 40)
+    const localIps = getLocalIpAddresses();
+    const targetSubnets = localIps.map(ip => ip.substring(0, ip.lastIndexOf('.')));
+    const scanPort = parseInt(process.env.PORT || '5000', 10);
+
+    for (const subnet of targetSubnets) {
+      for (let i = 1; i <= 254; i += 40) {
+        const batchPromises = [];
+        for (let j = i; j < Math.min(i + 40, 255); j++) {
+          const testIp = `${subnet}.${j}`;
+          if (localIps.includes(testIp) || candidateIps.has(testIp)) continue;
+          batchPromises.push(probePeer(testIp, scanPort));
+        }
+        const results = await Promise.all(batchPromises);
+        const found = results.find(r => r !== null);
+        if (found) {
+          return res.json({
+            success: true,
+            ...found.data,
+            remoteIp: found.ip,
+            remotePort: found.port
+          });
+        }
+      }
+    }
+
+    return res.status(404).json({
+      error: 'No SyncNote device with this 6-digit PIN was found on the local network. Make sure both devices are on the same Wi-Fi network and the PIN is active.'
+    });
+  } catch (err) {
+    console.error('Error submitting pairing PIN:', err);
+    return res.status(500).json({ error: 'Failed to submit pairing PIN', details: err.message });
+  }
 });
 
 /**

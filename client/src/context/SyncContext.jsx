@@ -166,38 +166,39 @@ export function SyncProvider({ children }) {
         }
 
         setPairedDevices(prevDevices => {
-          if (!prevDevices || prevDevices.length === 0) return prevDevices;
+          if (!prevDevices || prevDevices.length === 0) return [];
 
-          return prevDevices.map(device => {
-            const p = presenceMap.get(device.id);
-            if (!p) return device;
+          return prevDevices
+            .filter(device => presenceMap.has(device.id))
+            .map(device => {
+              const p = presenceMap.get(device.id);
 
-            if (p.isOnline) {
-              // Successfully received heartbeat response!
-              consecutiveFailuresRef.current[device.id] = 0;
-              return {
-                ...device,
-                isOnline: true,
-                isChecking: false,
-                lastSeen: p.lastSeen || new Date().toISOString()
-              };
-            } else {
-              // Heartbeat failed or timed out
-              const currentFailures = (consecutiveFailuresRef.current[device.id] || 0) + 1;
-              consecutiveFailuresRef.current[device.id] = currentFailures;
+              if (p.isOnline) {
+                // Successfully received heartbeat response!
+                consecutiveFailuresRef.current[device.id] = 0;
+                return {
+                  ...device,
+                  isOnline: true,
+                  isChecking: false,
+                  lastSeen: p.lastSeen || new Date().toISOString()
+                };
+              } else {
+                // Heartbeat failed or timed out
+                const currentFailures = (consecutiveFailuresRef.current[device.id] || 0) + 1;
+                consecutiveFailuresRef.current[device.id] = currentFailures;
 
-              // Require 2 consecutive failures before transitioning ONLINE -> OFFLINE to eliminate jitter
-              const shouldMarkOffline = currentFailures >= 2 || !device.isOnline;
+                // Require 2 consecutive failures before transitioning ONLINE -> OFFLINE to eliminate jitter
+                const shouldMarkOffline = currentFailures >= 2 || !device.isOnline;
 
-              return {
-                ...device,
-                isOnline: shouldMarkOffline ? false : device.isOnline,
-                isChecking: false,
-                // Retain previous lastSeen timestamp! Do not overwrite with null or "never"
-                lastSeen: device.lastSeen || p.lastSeen || device.last_seen
-              };
-            }
-          });
+                return {
+                  ...device,
+                  isOnline: shouldMarkOffline ? false : device.isOnline,
+                  isChecking: false,
+                  // Retain previous lastSeen timestamp! Do not overwrite with null or "never"
+                  lastSeen: device.lastSeen || p.lastSeen || device.last_seen
+                };
+              }
+            });
         });
       }
     } catch (err) {
@@ -276,6 +277,16 @@ export function SyncProvider({ children }) {
       }
     } catch (err) {}
   }, []);
+
+  // Generate 6-Digit PIN for LAN Pairing
+  const generatePairingPin = async () => {
+    return apiClient.post('/api/lan/pair/generate-code', {});
+  };
+
+  // Submit 6-Digit PIN to initiate pairing with a peer on LAN
+  const submitPairingPin = async (pin, targetIp = null) => {
+    return apiClient.post('/api/lan/pair/submit-pin', { pin, targetIp });
+  };
 
   // Request LAN Pairing with a discovered peer
   const requestLanPairing = async (device) => {
@@ -451,6 +462,8 @@ export function SyncProvider({ children }) {
     pollOutgoingPairingStatus,
     approveLanPairing,
     rejectLanPairing,
+    generatePairingPin,
+    submitPairingPin,
     unpairDevice,
     triggerLanSync,
     syncOverLan

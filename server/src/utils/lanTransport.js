@@ -301,6 +301,7 @@ async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfi
 }
 
 module.exports = {
+  httpRequest,
   checkPeerReachable,
   sendPairingRequest,
   pollPairingStatus,
