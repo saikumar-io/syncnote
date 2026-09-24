@@ -101,9 +101,14 @@ const initDatabase = () => {
     );
   `);
 
-  // Add user_id to notebooks if missing from older schema
+  // Add user_id and updated_at to notebooks if missing from older schema
   try {
     db.exec('ALTER TABLE notebooks ADD COLUMN user_id TEXT;');
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec('ALTER TABLE notebooks ADD COLUMN updated_at DATETIME;');
   } catch (e) {
     // Column already exists
   }
@@ -483,19 +488,26 @@ const NotebookModel = {
   },
 
   getById: (id, userId) => {
-    const stmt = db.prepare('SELECT * FROM notebooks WHERE id = ? AND (user_id = ? OR user_id = \'usr_local_default\')');
-    return stmt.get(id, userId);
+    if (userId) {
+      const stmt = db.prepare('SELECT * FROM notebooks WHERE id = ? AND (user_id = ? OR user_id = \'usr_local_default\')');
+      const found = stmt.get(id, userId);
+      if (found) return found;
+    }
+    const stmtGlobal = db.prepare('SELECT * FROM notebooks WHERE id = ?');
+    return stmtGlobal.get(id);
   },
 
   create: (id, name, userId) => {
-    const stmt = db.prepare('INSERT INTO notebooks (id, name, user_id) VALUES (?, ?, ?)');
-    stmt.run(id, name || 'New Notebook', userId || 'usr_local_default');
+    const now = new Date().toISOString();
+    const stmt = db.prepare('INSERT INTO notebooks (id, name, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)');
+    stmt.run(id, name || 'New Notebook', userId || 'usr_local_default', now, now);
     return NotebookModel.getById(id, userId);
   },
 
   rename: (id, name, userId) => {
-    const stmt = db.prepare('UPDATE notebooks SET name = ? WHERE id = ? AND (user_id = ? OR user_id = \'usr_local_default\')');
-    stmt.run(name, id, userId);
+    const now = new Date().toISOString();
+    const stmt = db.prepare('UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ?');
+    stmt.run(name, now, id);
     return NotebookModel.getById(id, userId);
   },
 
@@ -522,7 +534,10 @@ const NoteModel = {
   getById: (id, userId) => {
     const safeUserId = userId || 'usr_local_default';
     const stmt = db.prepare('SELECT * FROM notes WHERE id = ? AND (user_id = ? OR user_id = \'usr_local_default\')');
-    return stmt.get(id, safeUserId);
+    const note = stmt.get(id, safeUserId);
+    if (note) return note;
+    const stmtGlobal = db.prepare('SELECT * FROM notes WHERE id = ?');
+    return stmtGlobal.get(id);
   },
 
   create: (id, title, filePath, notebookId, contentHash, currentVersionId, userId, syncMode = 'local') => {
@@ -555,9 +570,9 @@ const NoteModel = {
     const stmt = db.prepare(`
       UPDATE notes 
       SET title = ?, file_path = ?, notebook_id = ?, content_hash = ?, current_version_id = ?, sync_mode = ?, updated_at = ?
-      WHERE id = ? AND (user_id = ? OR user_id = 'usr_local_default')
+      WHERE id = ?
     `);
-    stmt.run(finalTitle, finalFilePath, finalNotebookId, finalHash, finalVersion, finalSyncMode, now, id, safeUserId);
+    stmt.run(finalTitle, finalFilePath, finalNotebookId, finalHash, finalVersion, finalSyncMode, now, id);
     return NoteModel.getById(id, safeUserId);
   },
 
@@ -739,39 +754,42 @@ const VersionModel = {
 
   createCheckpointTransaction: (versionData, diffData, noteId, userId) => {
     const runInTransaction = () => {
-      const stmtVer = db.prepare(`
-        INSERT INTO versions (id, note_id, version_number, parent_version_id, message, device_id, created_at, content_hash, is_snapshot, is_auto)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      stmtVer.run(
-        versionData.id,
-        versionData.note_id,
-        versionData.version_number,
-        versionData.parent_version_id || null,
-        versionData.message || (versionData.is_auto ? 'Auto checkpoint' : 'Manual checkpoint'),
-        versionData.device_id || 'local_device',
-        versionData.created_at || new Date().toISOString(),
-        versionData.content_hash,
-        versionData.is_snapshot || 0,
-        versionData.is_auto || 0
-      );
+      const existingVer = db.prepare('SELECT id FROM versions WHERE id = ?').get(versionData.id);
+      if (!existingVer) {
+        const stmtVer = db.prepare(`
+          INSERT INTO versions (id, note_id, version_number, parent_version_id, message, device_id, created_at, content_hash, is_snapshot, is_auto)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        stmtVer.run(
+          versionData.id,
+          versionData.note_id,
+          versionData.version_number,
+          versionData.parent_version_id || null,
+          versionData.message || (versionData.is_auto ? 'Auto checkpoint' : 'Manual checkpoint'),
+          versionData.device_id || 'local_device',
+          versionData.created_at || new Date().toISOString(),
+          versionData.content_hash,
+          versionData.is_snapshot || 0,
+          versionData.is_auto || 0
+        );
 
-      const stmtDiff = db.prepare(`
-        INSERT INTO version_diffs (id, version_id, diff_data)
-        VALUES (?, ?, ?)
-      `);
-      stmtDiff.run(
-        `diff_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        versionData.id,
-        JSON.stringify(diffData)
-      );
+        const stmtDiff = db.prepare(`
+          INSERT INTO version_diffs (id, version_id, diff_data)
+          VALUES (?, ?, ?)
+        `);
+        stmtDiff.run(
+          `diff_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          versionData.id,
+          JSON.stringify(diffData)
+        );
+      }
 
       const stmtNote = db.prepare(`
         UPDATE notes 
         SET current_version_id = ?, content_hash = ?, updated_at = ?
-        WHERE id = ? AND (user_id = ? OR user_id = 'usr_local_default')
+        WHERE id = ?
       `);
-      stmtNote.run(versionData.id, versionData.content_hash, new Date().toISOString(), noteId, userId);
+      stmtNote.run(versionData.id, versionData.content_hash, new Date().toISOString(), noteId);
     };
 
     if (typeof db.transaction === 'function') {

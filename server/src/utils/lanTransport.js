@@ -2,11 +2,10 @@ const http = require('http');
 const {
   getPublicDeviceProfile,
   deriveSharedSessionKey,
+  getNextOutgoingSequence,
   encryptLanPayload,
   decryptLanPayload
 } = require('./deviceCrypto');
-
-let outgoingSequence = 1;
 
 /**
  * Perform HTTP request with timeout
@@ -118,7 +117,7 @@ async function sendEncryptedLanSync(remoteIp, remotePort = 5000, localProfile, r
 
   // 1. Derive shared symmetric AES-256 session key via ECDH key agreement
   const sessionKey = deriveSharedSessionKey(remoteDevice.public_key);
-  const seq = outgoingSequence++;
+  const seq = getNextOutgoingSequence(remoteDevice.id);
 
   // 2. Encrypt payload into tamper-evident AES-256-GCM envelope
   const envelope = encryptLanPayload(

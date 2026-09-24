@@ -20,6 +20,19 @@ let cachedIdentity = null;
 
 // Track sequence numbers per session to prevent replay attacks
 const processedSequenceMap = new Map();
+// Monotonically increasing sequence numbers per destination device
+const outgoingSequenceMap = new Map();
+
+/**
+ * Get the next strictly increasing sequence number for a recipient device
+ */
+function getNextOutgoingSequence(recipientDeviceId) {
+  const current = outgoingSequenceMap.get(recipientDeviceId) || 0;
+  const next = current + 1;
+  outgoingSequenceMap.set(recipientDeviceId, next);
+  return next;
+}
+
 
 /**
  * Encrypt string content at rest using machine key
@@ -250,6 +263,7 @@ module.exports = {
   getOrCreateDeviceIdentity,
   getPublicDeviceProfile,
   deriveSharedSessionKey,
+  getNextOutgoingSequence,
   encryptLanPayload,
   decryptLanPayload,
   signPayload,
