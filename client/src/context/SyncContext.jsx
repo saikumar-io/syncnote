@@ -358,6 +358,26 @@ export function SyncProvider({ children }) {
     }
   };
 
+  // Pair an available LAN device
+  const pairDevice = async (device) => {
+    try {
+      const res = await apiClient.post('/api/lan/pair', {
+        targetDeviceId: device.deviceId || device.id,
+        targetIp: device.ip || device.deviceIp,
+        targetPort: device.port || device.devicePort || 5000,
+        targetPublicKey: device.publicKey,
+        targetDeviceName: device.deviceName,
+        targetDeviceType: device.deviceType || 'desktop'
+      });
+      await fetchPairedDevices();
+      await discoverLanDevices();
+      checkDevicesPresence();
+      return res;
+    } catch (err) {
+      throw err;
+    }
+  };
+
   // Unpair / Revoke LAN Device
   const unpairDevice = async (deviceId) => {
     try {
@@ -366,6 +386,7 @@ export function SyncProvider({ children }) {
       delete consecutiveFailuresRef.current[deviceId];
       const res = await apiClient.delete(`/api/lan/devices/${deviceId}`);
       await fetchPairedDevices();
+      await discoverLanDevices();
       return res;
     } catch (err) {
       await fetchPairedDevices();
@@ -468,6 +489,7 @@ export function SyncProvider({ children }) {
     discoverLanDevices,
     fetchPairedDevices,
     checkDevicesPresence,
+    pairDevice,
     fetchPendingPairingRequests,
     requestLanPairing,
     pollOutgoingPairingStatus,

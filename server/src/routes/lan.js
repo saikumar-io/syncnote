@@ -302,8 +302,9 @@ router.get('/info', (req, res) => {
 
 /**
  * POST /api/lan/connect
- * Peer-to-Peer connection: When a peer on the same LAN discovers us,
+ * Inbound peer-to-peer connection: When a peer on the same LAN initiates pairing,
  * it exchanges public cryptographic device profiles to establish mutual trust.
+ * An explicit pair request clears any prior revocation and establishes fresh trust.
  */
 router.post('/connect', (req, res) => {
   try {
@@ -319,29 +320,22 @@ router.post('/connect', (req, res) => {
     }
 
     const peerIp = req.ip || req.socket?.remoteAddress;
-    const existing = LanPairingModel.getById(deviceId);
 
-    // If device was explicitly unpaired / revoked locally:
-    if (existing && existing.status === 'REVOKED') {
-      return res.status(403).json({
-        error: 'Device connection has been revoked.',
-        code: 'UNPAIRED_DEVICE',
-        revoked: true
-      });
-    }
-
-    // Save/update device as TRUSTED
+    // Establish fresh TRUSTED pairing (resets sequence tracking and clears prior revocation)
     const pairedDevice = LanPairingModel.createPairing({
       id: deviceId,
-      deviceName: deviceName || existing?.device_name || 'SyncNote Device',
+      deviceName: deviceName || 'SyncNote Device',
       deviceIp: peerIp,
-      devicePort: port || existing?.device_port || 5000,
-      pairingToken: existing?.pairing_token || crypto.randomBytes(32).toString('hex'),
+      devicePort: port || 5000,
+      pairingToken: crypto.randomBytes(32).toString('hex'),
       publicKey,
-      deviceType: deviceType || existing?.device_type || 'desktop',
+      deviceType: deviceType || 'desktop',
       userId: userId || 'usr_local_default',
       status: 'TRUSTED'
     });
+
+    resetDeviceSequence(deviceId);
+    console.log(`[LAN Connect] Established mutual trust with peer '${pairedDevice.device_name}' (${deviceId})`);
 
     return res.json({
       success: true,
@@ -352,6 +346,70 @@ router.post('/connect', (req, res) => {
   } catch (err) {
     console.error('Error handling LAN connect:', err);
     return res.status(500).json({ error: 'Connection failed', details: err.message });
+  }
+});
+
+/**
+ * POST /api/lan/pair
+ * Local user explicitly clicks [Pair] on an available discovered device.
+ * Handshakes with the peer's /api/lan/connect to establish mutual cryptographic trust.
+ */
+router.post('/pair', async (req, res) => {
+  try {
+    const { targetDeviceId, targetIp, targetPort, targetPublicKey, targetDeviceName, targetDeviceType } = req.body || {};
+    const localProfile = getPublicDeviceProfile();
+    const currentUserId = req.user ? req.user.id : 'usr_local_default';
+
+    if (!targetDeviceId || !targetIp) {
+      return res.status(400).json({ error: 'targetDeviceId and targetIp are required.' });
+    }
+
+    if (targetDeviceId === localProfile.deviceId) {
+      return res.status(400).json({ error: 'Cannot pair a device with itself.' });
+    }
+
+    const peerPort = targetPort || 5000;
+
+    // 1. Send connection handshake to target peer
+    let targetProfile = null;
+    try {
+      const connectRes = await sendLanConnect(targetIp, peerPort, localProfile, currentUserId);
+      if (connectRes && connectRes.status === 200 && connectRes.data) {
+        targetProfile = connectRes.data.localDevice;
+      }
+    } catch (err) {
+      console.warn(`[LAN Pair] Connect handshake error to ${targetIp}:${peerPort}: ${err.message}`);
+    }
+
+    const finalPublicKey = targetPublicKey || targetProfile?.publicKey;
+    if (!finalPublicKey) {
+      return res.status(400).json({ error: 'Could not obtain peer public key for secure pairing.' });
+    }
+
+    // 2. Save target device locally as TRUSTED (clearing any prior revocation)
+    const pairedDev = LanPairingModel.createPairing({
+      id: targetDeviceId,
+      deviceName: targetDeviceName || targetProfile?.deviceName || 'SyncNote Device',
+      deviceIp: targetIp,
+      devicePort: peerPort,
+      pairingToken: crypto.randomBytes(32).toString('hex'),
+      publicKey: finalPublicKey,
+      deviceType: targetDeviceType || targetProfile?.deviceType || 'desktop',
+      userId: currentUserId,
+      status: 'TRUSTED'
+    });
+
+    resetDeviceSequence(targetDeviceId);
+    console.log(`[LAN Pair] Successfully paired with '${pairedDev.device_name}' (${targetDeviceId})`);
+
+    return res.json({
+      success: true,
+      message: 'Device paired successfully',
+      pairedDevice: pairedDev
+    });
+  } catch (err) {
+    console.error('Error during LAN pair:', err);
+    return res.status(500).json({ error: `Pairing failed: ${err.message}` });
   }
 });
 
@@ -701,7 +759,7 @@ router.get('/discover', async (req, res) => {
     const discoveredMap = new Map();
 
     try {
-      const udpDevices = await discoverDevicesUDP(800);
+      const udpDevices = await discoverDevicesUDP(1000);
       for (const dev of udpDevices) {
         if (dev.deviceId && dev.deviceId !== localProfile.deviceId) {
           discoveredMap.set(dev.deviceId, dev);
@@ -715,9 +773,16 @@ router.get('/discover', async (req, res) => {
       const targetId = dev.deviceId || dev.id;
       const isPaired = pairedMap.has(targetId);
       return {
-        ...dev,
-        status: isPaired ? 'Connected' : 'Available',
-        isPaired
+        id: targetId,
+        deviceId: targetId,
+        deviceName: dev.deviceName || 'SyncNote Device',
+        deviceType: dev.deviceType || 'desktop',
+        ip: dev.ip || (Array.isArray(dev.ipAddresses) ? dev.ipAddresses[0] : null),
+        port: dev.port || 5000,
+        publicKey: dev.publicKey,
+        isPaired,
+        isOnline: true,
+        lastSeen: new Date().toISOString()
       };
     });
 
@@ -741,52 +806,16 @@ router.post('/pair/check-status', (req, res) => res.json({ success: true, status
 
 /**
  * GET /api/lan/devices
- * List all trusted LAN devices for the user with reachability status.
- * Automatically discovers active SyncNote instances on the local subnet via UDP broadcast.
- * If a device is detected on LAN and has not been explicitly revoked, it is automatically connected.
+ * List all trusted & paired LAN devices for the user with reachability status.
+ * Uses lightweight encrypted heartbeat to check reachability without altering pairing.
  */
 router.get('/devices', async (req, res) => {
   try {
     const userId = req.user ? req.user.id : 'usr_local_default';
     const localProfile = getPublicDeviceProfile();
-
-    // 1. Run quick background UDP broadcast discovery (800ms) to detect active LAN peers
-    try {
-      const udpPeers = await discoverDevicesUDP(800);
-      for (const peer of udpPeers) {
-        if (!peer.deviceId || peer.deviceId === localProfile.deviceId) continue;
-        const existing = LanPairingModel.getById(peer.deviceId);
-
-        // If device was explicitly unpaired / revoked: NEVER auto-connect!
-        if (existing && existing.status === 'REVOKED') continue;
-
-        const peerIp = peer.ip || (Array.isArray(peer.ipAddresses) ? peer.ipAddresses[0] : null);
-        if (!peerIp || !peer.publicKey) continue;
-
-        // Auto-trust peer with persistent cryptographic profile
-        LanPairingModel.createPairing({
-          id: peer.deviceId,
-          deviceName: peer.deviceName || 'SyncNote Device',
-          deviceIp: peerIp,
-          devicePort: peer.port || 5000,
-          pairingToken: existing?.pairing_token || crypto.randomBytes(32).toString('hex'),
-          publicKey: peer.publicKey,
-          deviceType: peer.deviceType || 'desktop',
-          userId,
-          status: 'TRUSTED'
-        });
-
-        // Notify peer so peer also records mutual trust if not revoked
-        sendLanConnect(peerIp, peer.port || 5000, localProfile, userId).catch(() => {});
-      }
-    } catch (e) {
-      console.warn('[LAN Discovery Warning]:', e.message);
-    }
-
-    // 2. Load all currently trusted devices
     const devices = LanPairingModel.getPairedDevices(userId);
 
-    // 3. Check reachability using lightweight authenticated heartbeat (in parallel, ~2s timeout)
+    // Check reachability using lightweight authenticated heartbeat (in parallel, ~2s timeout)
     const deviceStatuses = await Promise.all(devices.map(async (d) => {
       let isOnline = false;
       if (d.device_ip && d.public_key) {
