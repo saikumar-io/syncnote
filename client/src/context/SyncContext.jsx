@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { apiClient } from '../api/apiClient';
 import OfflineReconnectionModal from '../components/OfflineReconnectionModal';
 
@@ -19,6 +19,10 @@ export function SyncProvider({ children }) {
   const [activeConflicts, setActiveConflicts] = useState([]);
   const [showReconnectionModal, setShowReconnectionModal] = useState(false);
   const [wasOffline, setWasOffline] = useState(false);
+
+  // Presence monitoring refs: track consecutive failures per device and guard concurrent checks
+  const consecutiveFailuresRef = useRef({});
+  const isCheckingPresenceRef = useRef(false);
 
   // Separate Authoritative State for Google Login vs Google Drive Sync
   const [googleAccountStatus, setGoogleAccountStatus] = useState({ connected: false, email: null });
@@ -131,10 +135,84 @@ export function SyncProvider({ children }) {
     try {
       const res = await apiClient.get('/api/lan/devices');
       if (res && res.devices) {
-        setPairedDevices(res.devices);
+        setPairedDevices(prev => {
+          const prevMap = new Map((prev || []).map(d => [d.id, d]));
+          return res.devices.map(dev => {
+            const prevDev = prevMap.get(dev.id);
+            return {
+              ...dev,
+              // If previous presence state existed, retain it while checking
+              isOnline: dev.isOnline !== undefined ? dev.isOnline : (prevDev ? prevDev.isOnline : false),
+              lastSeen: dev.lastSeen || (prevDev ? prevDev.lastSeen : dev.last_seen),
+              isChecking: false
+            };
+          });
+        });
       }
     } catch (err) {}
   }, []);
+
+  // Background presence checking for paired devices via lightweight authenticated heartbeat
+  const checkDevicesPresence = useCallback(async () => {
+    if (isCheckingPresenceRef.current) return;
+    isCheckingPresenceRef.current = true;
+
+    try {
+      const res = await apiClient.get('/api/lan/devices/presence');
+      if (res && res.presence) {
+        // If peer informed us that we were unpaired/revoked while offline, reload paired list
+        const hadRevocation = res.presence.some(p => p.revoked);
+        if (hadRevocation) {
+          await fetchPairedDevices();
+          return;
+        }
+
+        const presenceMap = new Map();
+        for (const p of res.presence) {
+          presenceMap.set(p.id, p);
+        }
+
+        setPairedDevices(prevDevices => {
+          if (!prevDevices || prevDevices.length === 0) return prevDevices;
+
+          return prevDevices.map(device => {
+            const p = presenceMap.get(device.id);
+            if (!p) return device;
+
+            if (p.isOnline) {
+              // Successfully received heartbeat response!
+              consecutiveFailuresRef.current[device.id] = 0;
+              return {
+                ...device,
+                isOnline: true,
+                isChecking: false,
+                lastSeen: p.lastSeen || new Date().toISOString()
+              };
+            } else {
+              // Heartbeat failed or timed out
+              const currentFailures = (consecutiveFailuresRef.current[device.id] || 0) + 1;
+              consecutiveFailuresRef.current[device.id] = currentFailures;
+
+              // Require 2 consecutive failures before transitioning ONLINE -> OFFLINE to eliminate jitter
+              const shouldMarkOffline = currentFailures >= 2 || !device.isOnline;
+
+              return {
+                ...device,
+                isOnline: shouldMarkOffline ? false : device.isOnline,
+                isChecking: false,
+                // Retain previous lastSeen timestamp! Do not overwrite with null or "never"
+                lastSeen: device.lastSeen || p.lastSeen || device.last_seen
+              };
+            }
+          });
+        });
+      }
+    } catch (err) {
+      // Local network error
+    } finally {
+      isCheckingPresenceRef.current = false;
+    }
+  }, [fetchPairedDevices]);
 
   // Trigger manual Google Drive / Cloud push sync
   const triggerSync = useCallback(async () => {
@@ -233,6 +311,7 @@ export function SyncProvider({ children }) {
       });
       if (res && res.status === 'APPROVED') {
         await fetchPairedDevices();
+        checkDevicesPresence();
       }
       return res;
     } catch (err) {
@@ -246,6 +325,7 @@ export function SyncProvider({ children }) {
       const res = await apiClient.post('/api/lan/pair/approve', { requestId });
       await fetchPairedDevices();
       await fetchPendingPairingRequests();
+      checkDevicesPresence();
       return res;
     } catch (err) {
       throw err;
@@ -266,10 +346,14 @@ export function SyncProvider({ children }) {
   // Unpair / Revoke LAN Device
   const unpairDevice = async (deviceId) => {
     try {
+      // Optimistically remove immediately from local state
+      setPairedDevices(prev => (prev || []).filter(d => d.id !== deviceId));
+      delete consecutiveFailuresRef.current[deviceId];
       const res = await apiClient.delete(`/api/lan/devices/${deviceId}`);
       await fetchPairedDevices();
       return res;
     } catch (err) {
+      await fetchPairedDevices();
       throw err;
     }
   };
@@ -304,19 +388,46 @@ export function SyncProvider({ children }) {
     return triggerLanSync(pairedDevice.id || pairedDevice.deviceId);
   };
 
-  // Initial load and status polling
+  // Single Presence-Monitoring Scheduler & Lifecycle Manager
   useEffect(() => {
+    let isMounted = true;
+
+    // 1. Initial load
     refreshSyncStatus();
-    fetchPairedDevices();
     fetchPendingPairingRequests();
 
-    const interval = setInterval(() => {
-      refreshSyncStatus();
-      fetchPendingPairingRequests();
+    // 2. Load paired devices on startup and immediately probe presence
+    const startupSequence = async () => {
+      try {
+        await fetchPairedDevices();
+        if (isMounted) {
+          await checkDevicesPresence();
+        }
+      } catch (e) {}
+    };
+    startupSequence();
+
+    // 3. Exactly ONE presence-monitoring scheduler: check every 5 seconds
+    const presenceInterval = setInterval(() => {
+      if (isMounted) {
+        checkDevicesPresence();
+      }
+    }, 5000);
+
+    // 4. Background refresh interval for cloud sync & pairing requests (10s)
+    const backgroundSyncInterval = setInterval(() => {
+      if (isMounted) {
+        refreshSyncStatus();
+        fetchPendingPairingRequests();
+      }
     }, 10000);
 
-    return () => clearInterval(interval);
-  }, [refreshSyncStatus, fetchPairedDevices, fetchPendingPairingRequests]);
+    return () => {
+      isMounted = false;
+      clearInterval(presenceInterval);
+      clearInterval(backgroundSyncInterval);
+    };
+  }, [refreshSyncStatus, fetchPairedDevices, fetchPendingPairingRequests, checkDevicesPresence]);
 
   const value = {
     syncStatus,
@@ -341,6 +452,7 @@ export function SyncProvider({ children }) {
     refreshSyncStatus,
     discoverLanDevices,
     fetchPairedDevices,
+    checkDevicesPresence,
     fetchPendingPairingRequests,
     requestLanPairing,
     pollOutgoingPairingStatus,

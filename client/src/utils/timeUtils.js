@@ -33,3 +33,25 @@ export function formatRelativeTime(dateString, fallback = 'Unknown date') {
   
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
+
+export function formatPresenceLastSeen(dateString, fallback = 'Never') {
+  if (!dateString) return fallback;
+  const date = new Date(dateString);
+  if (isNaN(date.getTime())) return fallback;
+
+  const now = new Date();
+  const diffInSeconds = Math.max(0, Math.floor((now - date) / 1000));
+
+  if (diffInSeconds < 5) return 'Just now';
+  if (diffInSeconds < 60) return `${diffInSeconds} seconds ago`;
+  const diffInMinutes = Math.floor(diffInSeconds / 60);
+  if (diffInMinutes === 1) return '1 minute ago';
+  if (diffInMinutes < 60) return `${diffInMinutes} minutes ago`;
+  const diffInHours = Math.floor(diffInMinutes / 60);
+  if (diffInHours === 1) return '1 hour ago';
+  if (diffInHours < 24) return `${diffInHours} hours ago`;
+  const diffInDays = Math.floor(diffInHours / 24);
+  if (diffInDays === 1) return 'Yesterday';
+  return `${diffInDays} days ago`;
+}
+

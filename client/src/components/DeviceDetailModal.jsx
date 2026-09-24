@@ -55,20 +55,12 @@ export default function DeviceDetailModal({ isOpen, device, onClose, onDeviceUpd
 
   const handleUnpair = async () => {
     if (!device) return;
-    if (!window.confirm('Unpair this device? This will remove the trusted connection on both devices.')) return;
+    if (!window.confirm(`Unpair ${device.deviceName || device.device_name || 'this device'}? This will remove the trusted connection.`)) return;
 
-    setStatusMsg({ type: '', text: 'Unpairing...' });
     try {
-      const res = await apiClient.delete(`/api/lan/devices/${device.id}`);
-      if (res && res.remoteNotified) {
-        setStatusMsg({ type: 'success', text: 'Device unpaired' });
-      } else {
-        setStatusMsg({ type: 'info', text: 'Device removed locally. Remote revocation will be enforced when the device reconnects.' });
-      }
+      await apiClient.delete(`/api/lan/devices/${device.id}`);
       if (onDeviceUnpaired) onDeviceUnpaired(device.id);
-      setTimeout(() => {
-        onClose();
-      }, 1400);
+      onClose();
     } catch (err) {
       setStatusMsg({ type: 'error', text: 'Failed to unpair device: ' + err.message });
     }

@@ -81,11 +81,8 @@ export default function PairDeviceModal({ isOpen, onClose, onDevicePaired }) {
 
       setPairingInProgress(false);
       if (res && res.success) {
-        setPairingSuccess(`Successfully paired with ${device.deviceName}!`);
         if (onDevicePaired) onDevicePaired(res.pairedDevice);
-        setTimeout(() => {
-          onClose();
-        }, 1200);
+        onClose();
       } else {
         setPairingError(res?.error || 'Failed to pair device.');
       }
@@ -126,11 +123,8 @@ export default function PairDeviceModal({ isOpen, onClose, onDevicePaired }) {
 
       setPairingInProgress(false);
       if (res && res.success) {
-        setPairingSuccess('Pairing verified and trusted relationship established!');
         if (onDevicePaired) onDevicePaired(res.pairedDevice);
-        setTimeout(() => {
-          onClose();
-        }, 1200);
+        onClose();
       } else {
         setPairingError(res?.error || 'Invalid pairing PIN code.');
       }

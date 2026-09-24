@@ -37,7 +37,8 @@ const {
   sendPairingRequest,
   pollPairingStatus,
   sendEncryptedLanSync,
-  sendEncryptedLanUnpair
+  sendEncryptedLanUnpair,
+  sendEncryptedLanHeartbeat
 } = require('../utils/lanTransport');
 
 // In-memory store for active pairing PIN codes (5 min expiration)
@@ -621,6 +622,82 @@ router.post('/unpair', (req, res) => {
   }
 });
 
+/**
+ * POST /api/lan/heartbeat
+ * Authenticated & Encrypted Inbound P2P LAN Heartbeat endpoint (AES-256-GCM with replay protection)
+ * Responds to lightweight presence checks without transferring any notes or version data.
+ */
+router.post('/heartbeat', (req, res) => {
+  try {
+    const { envelope } = req.body || {};
+    const localProfile = getPublicDeviceProfile();
+
+    if (!envelope || !envelope.senderDeviceId) {
+      return res.status(400).json({ error: 'Missing envelope or senderDeviceId.' });
+    }
+
+    const { senderDeviceId } = envelope;
+
+    // 1. Verify sender exists in paired devices table and is TRUSTED
+    const senderDevice = LanPairingModel.getById(senderDeviceId);
+    if (!senderDevice || senderDevice.status !== 'TRUSTED') {
+      return res.status(403).json({
+        error: 'SECURITY REJECTED: Sender device is not paired or has been revoked.',
+        code: 'UNPAIRED_DEVICE'
+      });
+    }
+
+    if (!senderDevice.public_key) {
+      return res.status(403).json({ error: 'SECURITY REJECTED: Missing sender public key.' });
+    }
+
+    // 2. Derive Shared AES-256 session key
+    const sessionKey = deriveSharedSessionKey(senderDevice.public_key);
+
+    // 3. Decrypt payload & verify sequence number, authTag, signature, and timestamp
+    let decryptedPayload;
+    try {
+      decryptedPayload = decryptLanPayload(envelope, sessionKey, senderDeviceId, senderDevice.public_key);
+    } catch (cryptoErr) {
+      return res.status(401).json({
+        error: `SECURITY REJECTED: Cryptographic verification failed (${cryptoErr.message})`,
+        code: 'CRYPTO_FAILURE'
+      });
+    }
+
+    if (!decryptedPayload || decryptedPayload.type !== 'HEARTBEAT') {
+      return res.status(400).json({ error: 'Invalid control message type. Expected HEARTBEAT.' });
+    }
+
+    // 4. Update last seen timestamp & IP for this sender device
+    const peerIp = req.ip || req.socket?.remoteAddress;
+    LanPairingModel.updateLastSeen(senderDevice.id, peerIp, senderDevice.device_port);
+
+    // 5. Generate lightweight encrypted HEARTBEAT_ACK
+    const ackSeq = getNextOutgoingSequence(senderDevice.id);
+    const ackPayload = {
+      type: 'HEARTBEAT_ACK',
+      ackDeviceId: localProfile.deviceId,
+      timestamp: Date.now()
+    };
+
+    const encryptedAck = encryptLanPayload(
+      ackPayload,
+      sessionKey,
+      ackSeq,
+      localProfile.deviceId,
+      senderDevice.id
+    );
+
+    return res.json({
+      success: true,
+      encryptedEnvelope: encryptedAck
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Heartbeat failed', details: err.message });
+  }
+});
+
 /* ==========================================================================
    AUTHENTICATED CLIENT UI ENDPOINTS (User must be logged in locally)
    ========================================================================== */
@@ -754,6 +831,10 @@ router.get('/discover', async (req, res) => {
       const localRecord = LanPairingModel.getById(dev.deviceId);
       if (localRecord && localRecord.status === 'REVOKED' && dev.ip && dev.port && localRecord.public_key) {
         sendEncryptedLanUnpair(dev.ip, dev.port, localProfile, localRecord).catch(() => {});
+      }
+
+      if (isPaired && dev.ip) {
+        LanPairingModel.updateLastSeen(dev.deviceId, dev.ip, dev.port || 5000);
       }
 
       return {
@@ -1054,11 +1135,19 @@ router.get('/devices', async (req, res) => {
     const devices = LanPairingModel.getPairedDevices(userId);
     const localProfile = getPublicDeviceProfile();
 
-    // Check reachability for devices
+    // Check reachability for devices using lightweight authenticated heartbeat
     const deviceStatuses = await Promise.all(devices.map(async (d) => {
       let isOnline = false;
-      if (d.device_ip) {
-        isOnline = await checkPeerReachable(d.device_ip, d.device_port || 5000, 500);
+      if (d.device_ip && d.public_key) {
+        try {
+          const hb = await sendEncryptedLanHeartbeat(d.device_ip, d.device_port || 5000, localProfile, d);
+          if (hb && hb.ok) {
+            isOnline = true;
+            LanPairingModel.updateLastSeen(d.id, d.device_ip, d.device_port || 5000);
+          }
+        } catch (e) {
+          isOnline = false;
+        }
       }
       return {
         id: d.id,
@@ -1068,7 +1157,7 @@ router.get('/devices', async (req, res) => {
         devicePort: d.device_port || 5000,
         status: d.status,
         pairedAt: d.created_at,
-        lastSeen: d.last_seen,
+        lastSeen: isOnline ? new Date().toISOString() : d.last_seen,
         isOnline,
         publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
         selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
@@ -1082,6 +1171,84 @@ router.get('/devices', async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to list paired devices', details: err.message });
+  }
+});
+
+/**
+ * GET /api/lan/devices/presence
+ * Automatic background presence checking for every paired device.
+ * Runs lightweight authenticated encrypted heartbeat in parallel (~2s timeout).
+ * Updates last_seen timestamp in database for online peers.
+ * Never transfers notes, notebooks, or versions.
+ */
+router.get('/devices/presence', async (req, res) => {
+  try {
+    const userId = req.user ? req.user.id : 'usr_local_default';
+    const devices = LanPairingModel.getPairedDevices(userId);
+    const localProfile = getPublicDeviceProfile();
+
+    const presenceList = await Promise.all(devices.map(async (d) => {
+      if (!d.device_ip || !d.public_key) {
+        return {
+          id: d.id,
+          deviceName: d.device_name,
+          isOnline: false,
+          lastSeen: d.last_seen,
+          error: 'Missing IP or public key'
+        };
+      }
+
+      try {
+        const peerPort = d.device_port || 5000;
+        const hbResult = await sendEncryptedLanHeartbeat(d.device_ip, peerPort, localProfile, d);
+
+        if (hbResult && hbResult.ok) {
+          const nowIso = new Date().toISOString();
+          LanPairingModel.updateLastSeen(d.id, d.device_ip, peerPort);
+          return {
+            id: d.id,
+            deviceName: d.device_name,
+            isOnline: true,
+            lastSeen: nowIso,
+            latencyMs: hbResult.latencyMs
+          };
+        } else if (hbResult && hbResult.revoked) {
+          // Peer informed us that we were unpaired/revoked while offline
+          console.warn(`[LAN Presence] Peer '${d.device_name}' (${d.id}) revoked pairing. Revoking locally.`);
+          LanPairingModel.revokePairing(d.id, userId);
+          return {
+            id: d.id,
+            deviceName: d.device_name,
+            isOnline: false,
+            revoked: true,
+            error: 'UNPAIRED_DEVICE'
+          };
+        } else {
+          return {
+            id: d.id,
+            deviceName: d.device_name,
+            isOnline: false,
+            lastSeen: d.last_seen,
+            error: hbResult?.error || 'Unreachable'
+          };
+        }
+      } catch (err) {
+        return {
+          id: d.id,
+          deviceName: d.device_name,
+          isOnline: false,
+          lastSeen: d.last_seen,
+          error: err.message
+        };
+      }
+    }));
+
+    return res.json({
+      success: true,
+      presence: presenceList
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Presence check failed', details: err.message });
   }
 });
 

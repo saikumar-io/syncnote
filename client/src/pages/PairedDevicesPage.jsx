@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useSync } from '../context/SyncContext';
 import { useNavigate } from '../utils/router';
 import { apiClient } from '../api/apiClient';
-import { formatRelativeTime } from '../utils/timeUtils';
+import { formatRelativeTime, formatPresenceLastSeen } from '../utils/timeUtils';
 import { 
   Laptop, 
   ShieldCheck, 
@@ -59,19 +59,13 @@ export default function PairedDevicesPage() {
   };
 
   const handleForgetDevice = async (deviceId, deviceName) => {
-    if (!window.confirm('Unpair this device? This will remove the trusted connection on both devices.')) {
+    if (!window.confirm(`Unpair ${deviceName || 'this device'}? This will remove the trusted connection.`)) {
       return;
     }
 
-    setActionMsg({ type: '', text: 'Unpairing...' });
     try {
-      const res = await apiClient.delete(`/api/lan/devices/${deviceId}`);
-      if (res && res.remoteNotified) {
-        setActionMsg({ type: 'success', text: 'Device unpaired' });
-      } else {
-        setActionMsg({ type: 'info', text: 'Device removed locally. Remote revocation will be enforced when the device reconnects.' });
-      }
-      sync.fetchPairedDevices();
+      await sync.unpairDevice(deviceId);
+      setActionMsg({ type: '', text: '' });
     } catch (err) {
       setActionMsg({ type: 'error', text: err.message || 'Failed to remove device.' });
     }
@@ -225,12 +219,21 @@ export default function PairedDevicesPage() {
                     </div>
                   )}
 
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                    <span style={{ color: 'var(--accent-emerald)', fontWeight: 600 }}>● Trusted</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                    <span style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      color: dev.isOnline ? 'var(--accent-emerald)' : 'var(--text-muted)',
+                      fontWeight: 600
+                    }}>
+                      <span>{dev.isOnline ? '🟢' : '⚪'}</span>
+                      <span>{dev.isChecking ? 'Checking...' : dev.isOnline ? 'Online' : 'Offline'}</span>
+                    </span>
                     <span>•</span>
                     <span>{dev.deviceType || 'Desktop'}</span>
                     <span>•</span>
-                    <span>Last seen: {dev.lastSeen ? formatRelativeTime(dev.lastSeen) : 'Recently'}</span>
+                    <span>Last seen: <strong style={{ color: 'var(--text-primary)' }}>{dev.isChecking ? 'Checking...' : formatPresenceLastSeen(dev.lastSeen)}</strong></span>
                   </div>
                 </div>
               </div>

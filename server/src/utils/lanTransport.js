@@ -230,10 +230,85 @@ async function sendEncryptedLanUnpair(remoteIp, remotePort = 5000, localProfile,
   return res.data;
 }
 
+/**
+ * Send lightweight authenticated encrypted heartbeat/presence ping to a remote paired device.
+ * Heartbeat timeout: 2000ms.
+ * Does NOT sync notes, versions, notebooks, or touch database.
+ */
+async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfile, remoteDevice) {
+  if (!remoteDevice.public_key) {
+    return { ok: false, error: 'Missing public key' };
+  }
+
+  const startTime = Date.now();
+  try {
+    const sessionKey = deriveSharedSessionKey(remoteDevice.public_key);
+    const seq = getNextOutgoingSequence(remoteDevice.id);
+
+    const heartbeatMessage = {
+      type: 'HEARTBEAT',
+      senderDeviceId: localProfile.deviceId,
+      targetDeviceId: remoteDevice.id,
+      timestamp: startTime
+    };
+
+    const envelope = encryptLanPayload(
+      heartbeatMessage,
+      sessionKey,
+      seq,
+      localProfile.deviceId,
+      remoteDevice.id
+    );
+
+    const res = await httpRequest({
+      hostname: remoteIp,
+      port: remotePort,
+      path: '/api/lan/heartbeat',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    }, { envelope }, 2000); // 2-second timeout
+
+    if (res.status === 403 && (res.data?.code === 'UNPAIRED_DEVICE' || res.data?.error?.includes('revoked'))) {
+      return { ok: false, revoked: true, error: 'UNPAIRED_DEVICE' };
+    }
+
+    if (res.status !== 200) {
+      return { ok: false, error: res.data?.error || `HTTP ${res.status}` };
+    }
+
+    if (res.data && res.data.encryptedEnvelope) {
+      try {
+        const decrypted = decryptLanPayload(
+          res.data.encryptedEnvelope,
+          sessionKey,
+          remoteDevice.id,
+          remoteDevice.public_key
+        );
+        if (decrypted && decrypted.type === 'HEARTBEAT_ACK') {
+          return {
+            ok: true,
+            latencyMs: Date.now() - startTime,
+            timestamp: decrypted.timestamp || Date.now()
+          };
+        }
+      } catch (cryptoErr) {
+        return { ok: false, error: `Crypto decrypt failed: ${cryptoErr.message}` };
+      }
+    }
+
+    return { ok: true, latencyMs: Date.now() - startTime };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   checkPeerReachable,
   sendPairingRequest,
   pollPairingStatus,
   sendEncryptedLanSync,
-  sendEncryptedLanUnpair
+  sendEncryptedLanUnpair,
+  sendEncryptedLanHeartbeat
 };

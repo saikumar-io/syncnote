@@ -3,7 +3,7 @@ import { useSync } from '../context/SyncContext';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from '../utils/router';
 import PairDeviceModal from '../components/PairDeviceModal';
-import { formatRelativeTime } from '../utils/timeUtils';
+import { formatRelativeTime, formatPresenceLastSeen } from '../utils/timeUtils';
 import { 
   Wifi, 
   Search, 
@@ -140,6 +140,7 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
               delete activePairPollers.current[devId];
               setDevicePairingState(prev => ({ ...prev, [devId]: 'Paired' }));
               await sync.fetchPairedDevices();
+              if (sync.checkDevicesPresence) sync.checkDevicesPresence();
               await sync.discoverLanDevices();
             } else if (statusRes && statusRes.status === 'REJECTED') {
               clearInterval(activePairPollers.current[devId]);
@@ -176,7 +177,7 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
   // Handle Unpair
   const handleUnpair = async (dev) => {
     const devId = dev.id;
-    if (!window.confirm('Unpair this device? This will remove the trusted connection on both devices.')) {
+    if (!window.confirm(`Unpair ${dev.deviceName || dev.device_name || 'this device'}? This will remove the trusted connection.`)) {
       return;
     }
 
@@ -184,14 +185,9 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
     setDeviceSyncMessage(prev => ({ ...prev, [devId]: 'Unpairing...' }));
 
     try {
-      const res = await sync.unpairDevice(devId);
+      await sync.unpairDevice(devId);
       await sync.discoverLanDevices();
-
-      if (res && res.remoteNotified) {
-        alert('Device unpaired');
-      } else {
-        alert('Device removed locally. Remote revocation will be enforced when the device reconnects.');
-      }
+      // UI state updates immediately without success popup alerts
     } catch (err) {
       alert(`Failed to unpair: ${err.message}`);
     } finally {
@@ -388,17 +384,174 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
       )}
 
       {/* ========================================================
-          SECTION 1: AVAILABLE ON LAN
+          SECTION 1: PAIRED DEVICES (MAIN UI)
           ======================================================== */}
-      <div style={{ marginBottom: '32px' }}>
+      <div style={{ marginBottom: '36px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+          <div>
+            <h2 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <ShieldCheck size={18} style={{ color: 'var(--accent-emerald)' }} />
+              <span>Paired Devices ({sync.pairedDevices ? sync.pairedDevices.length : 0})</span>
+            </h2>
+            <p style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+              Cryptographically authenticated devices. Presence is checked automatically every 5 seconds.
+            </p>
+          </div>
+        </div>
+
+        {(!sync.pairedDevices || sync.pairedDevices.length === 0) ? (
+          <div style={{
+            background: 'var(--bg-app)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-md)',
+            padding: '28px',
+            textAlign: 'center',
+            color: 'var(--text-muted)',
+            fontSize: '0.8rem'
+          }}>
+            <Laptop size={28} style={{ margin: '0 auto 8px auto', display: 'block', opacity: 0.3 }} />
+            <div style={{ color: 'var(--text-primary)', fontWeight: 600, marginBottom: '4px' }}>No Paired Devices Yet</div>
+            <span>Pair with a nearby device from the "Available on LAN" section below to begin synchronizing.</span>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {sync.pairedDevices.map(dev => {
+              const devId = dev.id;
+              const syncState = deviceSyncState[devId];
+              const syncMsg = deviceSyncMessage[devId];
+
+              return (
+                <div
+                  key={devId}
+                  style={{
+                    background: 'var(--bg-app)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 'var(--radius-md)',
+                    padding: '16px 20px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '14px',
+                    flexWrap: 'wrap'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                    <div style={{
+                      width: '42px',
+                      height: '42px',
+                      borderRadius: 'var(--radius-sm)',
+                      background: dev.isOnline ? 'rgba(16, 185, 129, 0.12)' : 'rgba(156, 163, 175, 0.1)',
+                      color: dev.isOnline ? 'var(--accent-emerald)' : 'var(--text-muted)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0
+                    }}>
+                      {dev.deviceType === 'mobile' ? <Smartphone size={22} /> : dev.deviceType === 'desktop' ? <Monitor size={22} /> : <Laptop size={22} />}
+                    </div>
+
+                    <div>
+                      <div style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>{dev.deviceName || dev.device_name}</span>
+                      </div>
+
+                      {/* Online / Offline status badge and last seen */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px', fontSize: '0.78rem' }}>
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '5px',
+                          fontWeight: 600,
+                          color: dev.isOnline ? 'var(--accent-emerald)' : 'var(--text-muted)'
+                        }}>
+                          <span style={{ fontSize: '0.82rem', lineHeight: 1 }}>
+                            {dev.isOnline ? '🟢' : '⚪'}
+                          </span>
+                          <span>{dev.isChecking ? 'Checking...' : dev.isOnline ? 'Online' : 'Offline'}</span>
+                        </span>
+
+                        <span style={{ color: 'var(--text-muted)' }}>•</span>
+
+                        <span style={{ color: 'var(--text-secondary)' }}>
+                          Last seen: <strong style={{ color: 'var(--text-primary)' }}>{dev.isChecking ? 'Checking...' : formatPresenceLastSeen(dev.lastSeen)}</strong>
+                        </span>
+
+                        {dev.deviceIp && (
+                          <>
+                            <span style={{ color: 'var(--text-muted)' }}>•</span>
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
+                              IP: {dev.deviceIp}:{dev.devicePort || 5000}
+                            </span>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Active state message if syncing/synced/failed */}
+                      {syncState && (
+                        <div style={{
+                          fontSize: '0.72rem',
+                          marginTop: '5px',
+                          fontWeight: 600,
+                          color: syncState === 'Synced' ? 'var(--accent-emerald)' : syncState === 'Failed' ? 'var(--accent-danger)' : 'var(--accent-primary)'
+                        }}>
+                          {syncState === 'Connecting' && 'Connecting to peer...'}
+                          {syncState === 'Syncing' && 'Syncing notes over encrypted channel...'}
+                          {syncState === 'Synced' && (syncMsg || 'Successfully synchronized')}
+                          {syncState === 'Failed' && (syncMsg || 'Synchronization failed')}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    {/* Manual Sync button (Heartbeat != Sync) */}
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={syncState === 'Connecting' || syncState === 'Syncing'}
+                      onClick={() => handleSyncWithDevice(dev)}
+                      style={{ padding: '6px 14px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      <RefreshCw size={12} className={(syncState === 'Connecting' || syncState === 'Syncing') ? 'spin' : ''} />
+                      <span>
+                        {syncState === 'Connecting' ? 'Connecting...' : syncState === 'Syncing' ? 'Syncing...' : 'Sync'}
+                      </span>
+                    </button>
+
+                    {/* Unpair button */}
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => handleUnpair(dev)}
+                      disabled={unpairingDeviceId === dev.id}
+                      title="Unpair and revoke trust"
+                      style={{ padding: '6px 12px', fontSize: '0.78rem', color: 'var(--accent-danger)', display: 'flex', alignItems: 'center', gap: '4px' }}
+                    >
+                      <Unlink size={13} className={unpairingDeviceId === dev.id ? 'spin' : ''} />
+                      <span>{unpairingDeviceId === dev.id ? 'Unpairing...' : 'Unpair'}</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ========================================================
+          SECTION 2: AVAILABLE ON LAN (NEARBY DEVICES)
+          ======================================================== */}
+      <div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-          <h2 style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Radio size={16} style={{ color: 'var(--accent-primary)' }} />
-            <span>Available on LAN ({availableDevices.length})</span>
-          </h2>
-          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-            Nearby SyncNote instances detected via safe broadcast
-          </span>
+          <div>
+            <h2 style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Radio size={16} style={{ color: 'var(--accent-primary)' }} />
+              <span>Available on LAN ({availableDevices.length})</span>
+            </h2>
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+              Nearby SyncNote instances detected via safe broadcast
+            </span>
+          </div>
         </div>
 
         {availableDevices.length === 0 ? (
@@ -541,158 +694,13 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
         )}
       </div>
 
-      {/* ========================================================
-          SECTION 2: PAIRED DEVICES
-          ======================================================== */}
-      <div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-          <h2 style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <ShieldCheck size={16} style={{ color: 'var(--accent-emerald)' }} />
-            <span>Paired Devices ({sync.pairedDevices ? sync.pairedDevices.length : 0})</span>
-          </h2>
-          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-            Cryptographically authenticated devices trusted for direct note exchange
-          </span>
-        </div>
-
-        {(!sync.pairedDevices || sync.pairedDevices.length === 0) ? (
-          <div style={{
-            background: 'var(--bg-app)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: 'var(--radius-md)',
-            padding: '28px',
-            textAlign: 'center',
-            color: 'var(--text-muted)',
-            fontSize: '0.8rem'
-          }}>
-            <Laptop size={28} style={{ margin: '0 auto 8px auto', display: 'block', opacity: 0.3 }} />
-            <div style={{ color: 'var(--text-primary)', fontWeight: 600, marginBottom: '4px' }}>No Paired Devices Yet</div>
-            <span>Pair with a nearby device from the "Available on LAN" section above to begin synchronizing.</span>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {sync.pairedDevices.map(dev => {
-              const devId = dev.id;
-              const syncState = deviceSyncState[devId];
-              const syncMsg = deviceSyncMessage[devId];
-
-              return (
-                <div
-                  key={devId}
-                  style={{
-                    background: 'var(--bg-app)',
-                    border: '1px solid var(--border-subtle)',
-                    borderRadius: 'var(--radius-md)',
-                    padding: '14px 18px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '14px',
-                    flexWrap: 'wrap'
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    <div style={{
-                      width: '38px',
-                      height: '38px',
-                      borderRadius: 'var(--radius-sm)',
-                      background: 'rgba(16, 185, 129, 0.1)',
-                      color: 'var(--accent-emerald)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      flexShrink: 0
-                    }}>
-                      {dev.deviceType === 'mobile' ? <Smartphone size={20} /> : dev.deviceType === 'desktop' ? <Monitor size={20} /> : <Laptop size={20} />}
-                    </div>
-
-                    <div>
-                      <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span>{dev.deviceName || dev.device_name}</span>
-                        {/* Online / Offline badge */}
-                        <span style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                          fontSize: '0.68rem',
-                          fontWeight: 600,
-                          padding: '1px 6px',
-                          borderRadius: '4px',
-                          background: dev.isOnline ? 'rgba(16, 185, 129, 0.12)' : 'rgba(156, 163, 175, 0.12)',
-                          color: dev.isOnline ? 'var(--accent-emerald)' : 'var(--text-muted)'
-                        }}>
-                          <span style={{
-                            width: '6px',
-                            height: '6px',
-                            borderRadius: '50%',
-                            background: dev.isOnline ? 'var(--accent-emerald)' : 'var(--text-muted)'
-                          }} />
-                          {dev.isOnline ? 'Online' : 'Offline'}
-                        </span>
-                      </div>
-
-                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                        Last seen: <strong>{dev.lastSeen ? formatRelativeTime(dev.lastSeen) : 'Never'}</strong> • IP: {dev.deviceIp || dev.device_ip || 'Unknown'}
-                      </div>
-
-                      {/* Active state message if syncing/synced/failed */}
-                      {syncState && (
-                        <div style={{
-                          fontSize: '0.7rem',
-                          marginTop: '4px',
-                          fontWeight: 600,
-                          color: syncState === 'Synced' ? 'var(--accent-emerald)' : syncState === 'Failed' ? 'var(--accent-danger)' : 'var(--accent-primary)'
-                        }}>
-                          {syncState === 'Connecting' && 'Connecting to peer...'}
-                          {syncState === 'Syncing' && 'Syncing notes over encrypted channel...'}
-                          {syncState === 'Synced' && (syncMsg || 'Successfully synchronized')}
-                          {syncState === 'Failed' && (syncMsg || 'Synchronization failed')}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    {/* Sync button */}
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={syncState === 'Connecting' || syncState === 'Syncing'}
-                      onClick={() => handleSyncWithDevice(dev)}
-                      style={{ padding: '6px 14px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: '6px' }}
-                    >
-                      <RefreshCw size={12} className={(syncState === 'Connecting' || syncState === 'Syncing') ? 'spin' : ''} />
-                      <span>
-                        {syncState === 'Connecting' ? 'Connecting...' : syncState === 'Syncing' ? 'Syncing...' : 'Sync'}
-                      </span>
-                    </button>
-
-                    {/* Unpair button */}
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() => handleUnpair(dev)}
-                      disabled={unpairingDeviceId === dev.id}
-                      title="Unpair and revoke trust"
-                      style={{ padding: '6px 12px', fontSize: '0.76rem', color: 'var(--accent-danger)', display: 'flex', alignItems: 'center', gap: '4px' }}
-                    >
-                      <Unlink size={13} className={unpairingDeviceId === dev.id ? 'spin' : ''} />
-                      <span>{unpairingDeviceId === dev.id ? 'Unpairing...' : 'Unpair'}</span>
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
       {/* 6-Digit PIN Pairing Modal */}
       <PairDeviceModal
         isOpen={isPairModalOpen}
         onClose={() => setIsPairModalOpen(false)}
-        onDevicePaired={() => {
-          sync.fetchPairedDevices();
+        onDevicePaired={async () => {
+          await sync.fetchPairedDevices();
+          if (sync.checkDevicesPresence) sync.checkDevicesPresence();
           sync.discoverLanDevices();
         }}
       />
