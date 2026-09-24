@@ -75,6 +75,51 @@ async function runAuthSettingsTests() {
     assert.ok(authRouter);
   });
 
+  // 5. Test OAuth user hasPassword detection & password setting
+  await asyncTest('OAuth user password setting & dual auth method persistence', async () => {
+    const { hashPassword, comparePassword } = require('../src/utils/auth');
+    const googleId = `oauth_${Date.now()}`;
+    const email = `oauth_user_${Date.now()}@syncnote.io`;
+    const name = 'OAuth Password Test User';
+
+    // Step A: Create OAuth user
+    const oauthUser = await PgUserModel.findOrCreateGoogleUser({ googleId, email, name });
+    assert.ok(oauthUser.id);
+
+    // Step B: Verify initial hasPassword is false
+    const fetchedBefore = await PgUserModel.findById(oauthUser.id);
+    assert.strictEqual(fetchedBefore.has_password, false, 'Initial OAuth user must have has_password: false');
+    assert.strictEqual(fetchedBefore.hasPassword, false, 'Initial OAuth user must have hasPassword: false');
+
+    // Step C: Set password for the OAuth user
+    const newPassword = 'SecureSyncPassword123!';
+    const passwordHash = await hashPassword(newPassword);
+    await PgUserModel.updatePassword(oauthUser.id, passwordHash);
+
+    // Step D: Verify hasPassword is now true
+    const fetchedAfter = await PgUserModel.findById(oauthUser.id);
+    assert.strictEqual(fetchedAfter.has_password, true, 'OAuth user with set password must have has_password: true');
+    assert.strictEqual(fetchedAfter.hasPassword, true, 'OAuth user with set password must have hasPassword: true');
+
+    // Step E: Verify password can be used for email/password authentication
+    const userForAuth = await PgUserModel.findByEmail(email);
+    assert.strictEqual(userForAuth.id, oauthUser.id);
+    const passwordValid = await comparePassword(newPassword, userForAuth.password_hash);
+    assert.strictEqual(passwordValid, true, 'Password comparison must succeed for new password');
+
+    const wrongPasswordValid = await comparePassword('WrongPassword', userForAuth.password_hash);
+    assert.strictEqual(wrongPasswordValid, false, 'Wrong password comparison must fail');
+
+    // Step F: Verify logging in with Google again preserves the account and password
+    const googleLoginUser = await PgUserModel.findOrCreateGoogleUser({ googleId, email, name });
+    assert.strictEqual(googleLoginUser.id, oauthUser.id, 'Google login must preserve identical user ID');
+
+    const fetchedAfterGoogle = await PgUserModel.findByEmail(email);
+    assert.ok(fetchedAfterGoogle.password_hash, 'Google login must not erase user password hash');
+    const passwordStillValid = await comparePassword(newPassword, fetchedAfterGoogle.password_hash);
+    assert.strictEqual(passwordStillValid, true, 'Password must remain valid after subsequent Google login');
+  });
+
   console.log('\n==================================================');
   console.log(` SUMMARY: ${passed} PASSED / ${failed} FAILED`);
   console.log('==================================================');

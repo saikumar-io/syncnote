@@ -159,9 +159,17 @@ const PgUserModel = {
   async findById(id) {
     if (isPostgresConnected && pool) {
       try {
-        const res = await query('SELECT id, username, email, avatar_url, created_at, updated_at FROM users WHERE id = $1', [id]);
+        const res = await query(
+          "SELECT id, username, email, avatar_url, auth_provider, (password_hash IS NOT NULL AND password_hash != '') AS has_password, created_at, updated_at FROM users WHERE id = $1",
+          [id]
+        );
         if (res.rows.length > 0) {
-          return res.rows[0];
+          const row = res.rows[0];
+          return {
+            ...row,
+            has_password: Boolean(row.has_password),
+            hasPassword: Boolean(row.has_password)
+          };
         }
         return null;
       } catch (err) {
@@ -255,7 +263,7 @@ const PgUserModel = {
       try {
         // 1. Check by auth_provider = 'google' AND provider_user_id = googleId
         const resByProvider = await query(
-          'SELECT id, username, email, avatar_url, created_at, auth_provider FROM users WHERE auth_provider = $1 AND provider_user_id = $2',
+          "SELECT id, username, email, avatar_url, created_at, auth_provider, (password_hash IS NOT NULL AND password_hash != '') AS has_password FROM users WHERE auth_provider = $1 AND provider_user_id = $2",
           ['google', String(googleId)]
         );
         if (resByProvider.rows.length > 0) {
@@ -266,11 +274,15 @@ const PgUserModel = {
           }
           const { UserModel } = require('./database');
           try { UserModel.findOrCreateGoogleUser({ googleId, email: u.email, name: u.username, avatarUrl: u.avatar_url, id: u.id }); } catch (e) {}
-          return u;
+          return {
+            ...u,
+            has_password: Boolean(u.has_password),
+            hasPassword: Boolean(u.has_password)
+          };
         }
 
         // 2. Check by email
-        const resByEmail = await query('SELECT id, username, email, avatar_url, created_at FROM users WHERE email = $1', [cleanEmail]);
+        const resByEmail = await query("SELECT id, username, email, avatar_url, created_at, (password_hash IS NOT NULL AND password_hash != '') AS has_password FROM users WHERE email = $1", [cleanEmail]);
         if (resByEmail.rows.length > 0) {
           const u = resByEmail.rows[0];
           await query(
@@ -280,7 +292,16 @@ const PgUserModel = {
           const updatedAvatar = avatarUrl || u.avatar_url;
           const { UserModel } = require('./database');
           try { UserModel.findOrCreateGoogleUser({ googleId, email: u.email, name: u.username, avatarUrl: updatedAvatar, id: u.id }); } catch (e) {}
-          return { id: u.id, email: u.email, username: u.username, avatar_url: updatedAvatar, created_at: u.created_at, auth_provider: 'google' };
+          return { 
+            id: u.id, 
+            email: u.email, 
+            username: u.username, 
+            avatar_url: updatedAvatar, 
+            created_at: u.created_at, 
+            auth_provider: 'google',
+            has_password: Boolean(u.has_password),
+            hasPassword: Boolean(u.has_password)
+          };
         }
 
         // 3. Create new OAuth user
@@ -305,7 +326,11 @@ const PgUserModel = {
         const u = inserted.rows[0];
         const { UserModel } = require('./database');
         try { UserModel.findOrCreateGoogleUser({ googleId, email: u.email, name: u.username, avatarUrl: u.avatar_url, id: u.id }); } catch (e) {}
-        return u;
+        return {
+          ...u,
+          has_password: false,
+          hasPassword: false
+        };
       } catch (err) {
         console.warn('[PgUserModel.findOrCreateGoogleUser error]:', err.message);
       }

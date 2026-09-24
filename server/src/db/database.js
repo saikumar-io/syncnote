@@ -347,8 +347,14 @@ const UserModel = {
   },
 
   findById: (id) => {
-    const stmt = db.prepare('SELECT id, email, username, avatar_url, created_at, updated_at FROM users WHERE id = ?');
-    return stmt.get(id);
+    const stmt = db.prepare("SELECT id, email, username, avatar_url, auth_provider, (password_hash IS NOT NULL AND password_hash != '') AS has_password, created_at, updated_at FROM users WHERE id = ?");
+    const row = stmt.get(id);
+    if (!row) return null;
+    return {
+      ...row,
+      has_password: Boolean(row.has_password),
+      hasPassword: Boolean(row.has_password)
+    };
   },
 
   findByEmail: (email) => {

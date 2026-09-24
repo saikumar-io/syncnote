@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate, Link } from '../utils/router';
 import SyncNoteLogo from '../components/SyncNoteLogo';
-import { Eye, EyeOff, Lock, Mail, ArrowRight, AlertCircle, Loader2, WifiOff } from 'lucide-react';
+import { authApi } from '../api/authApi';
+import { Eye, EyeOff, Lock, Mail, ArrowRight, AlertCircle, CheckCircle2, Loader2, WifiOff, ArrowLeft, KeyRound } from 'lucide-react';
 
 export default function LoginPage() {
   const { login, isOffline } = useAuth();
@@ -14,6 +15,15 @@ export default function LoginPage() {
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
+
+  // Password Recovery state
+  const [isForgotMode, setIsForgotMode] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [recoveryToken, setRecoveryToken] = useState('');
+  const [resetNewPassword, setResetNewPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  const [forgotStep, setForgotStep] = useState(1);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -24,6 +34,7 @@ export default function LoginPage() {
 
     setIsSubmitting(true);
     setErrorMsg('');
+    setSuccessMsg('');
 
     try {
       await login({ identifier: identifier.trim(), password });
@@ -34,6 +45,64 @@ export default function LoginPage() {
       } else {
         setErrorMsg(err.message || 'Invalid credentials. Please try again.');
       }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleRequestRecovery = async (e) => {
+    e.preventDefault();
+    if (!forgotEmail.trim()) {
+      setErrorMsg('Please enter your account email.');
+      return;
+    }
+    setIsSubmitting(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+    try {
+      const res = await authApi.forgotPassword({ email: forgotEmail.trim() });
+      if (res && res.recoveryToken) {
+        setRecoveryToken(res.recoveryToken);
+      }
+      setSuccessMsg(res.message || 'Recovery token generated.');
+      setForgotStep(2);
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to request recovery.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleResetPassword = async (e) => {
+    e.preventDefault();
+    if (!recoveryToken.trim() || !resetNewPassword) {
+      setErrorMsg('Please enter your recovery token and new password.');
+      return;
+    }
+    if (resetNewPassword.length < 6) {
+      setErrorMsg('New password must be at least 6 characters long.');
+      return;
+    }
+    if (resetNewPassword !== resetConfirmPassword) {
+      setErrorMsg('Passwords do not match.');
+      return;
+    }
+    setIsSubmitting(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+    try {
+      const res = await authApi.resetPassword({
+        recoveryToken: recoveryToken.trim(),
+        newPassword: resetNewPassword,
+        confirmPassword: resetConfirmPassword
+      });
+      setSuccessMsg(res.message || 'Password reset successfully! You can now log in.');
+      setIsForgotMode(false);
+      setForgotStep(1);
+      setIdentifier(forgotEmail);
+      setPassword('');
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to reset password.');
     } finally {
       setIsSubmitting(false);
     }
@@ -85,71 +154,195 @@ export default function LoginPage() {
           </div>
         )}
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="auth-form">
-          <div className="form-group">
-            <label className="input-label" htmlFor="login-identifier">
-              Email or Username
-            </label>
-            <div className="input-with-icon">
-              <Mail size={15} className="input-icon" />
-              <input
-                id="login-identifier"
-                type="text"
-                className="auth-input"
-                placeholder="user@syncnote.io or username"
-                value={identifier}
-                onChange={(e) => setIdentifier(e.target.value)}
-                required
-                autoFocus
-              />
-            </div>
+        {/* Success Alert */}
+        {successMsg && (
+          <div className="auth-error-banner success">
+            <CheckCircle2 size={15} />
+            <span>{successMsg}</span>
           </div>
+        )}
 
-          <div className="form-group">
-            <label className="input-label" htmlFor="login-password">
-              Password
-            </label>
-            <div className="input-with-icon">
-              <Lock size={15} className="input-icon" />
-              <input
-                id="login-password"
-                type={showPassword ? 'text' : 'password'}
-                className="auth-input pr-10"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
+        {isForgotMode ? (
+          <div className="auth-form">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
               <button
                 type="button"
-                className="password-toggle-btn"
-                onClick={() => setShowPassword(!showPassword)}
-                title={showPassword ? 'Hide password' : 'Show password'}
+                className="btn-secondary input-compact"
+                style={{ padding: '4px 8px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+                onClick={() => { setIsForgotMode(false); setErrorMsg(''); setSuccessMsg(''); }}
               >
-                {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                <ArrowLeft size={13} />
+                <span>Back to Sign In</span>
               </button>
+              <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>Reset Password</span>
             </div>
-          </div>
 
-          <button
-            type="submit"
-            className="btn-primary auth-submit-btn"
-            disabled={isSubmitting || isOffline}
-          >
-            {isSubmitting ? (
-              <>
-                <Loader2 size={16} className="spin-icon" />
-                <span>Signing in...</span>
-              </>
+            {forgotStep === 1 ? (
+              <form onSubmit={handleRequestRecovery}>
+                <div className="form-group" style={{ marginBottom: '14px' }}>
+                  <label className="input-label" htmlFor="forgot-email">Account Email</label>
+                  <div className="input-with-icon">
+                    <Mail size={15} className="input-icon" />
+                    <input
+                      id="forgot-email"
+                      type="email"
+                      className="auth-input"
+                      placeholder="Enter your registered email"
+                      value={forgotEmail}
+                      onChange={(e) => setForgotEmail(e.target.value)}
+                      required
+                      autoFocus
+                    />
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  className="btn-primary auth-submit-btn"
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? 'Generating Recovery Token...' : 'Continue to Reset Password'}
+                </button>
+              </form>
             ) : (
-              <>
-                <span>Sign in</span>
-                <ArrowRight size={15} />
-              </>
+              <form onSubmit={handleResetPassword}>
+                <div className="form-group" style={{ marginBottom: '10px' }}>
+                  <label className="input-label" htmlFor="recovery-token">Recovery Token</label>
+                  <div className="input-with-icon">
+                    <KeyRound size={15} className="input-icon" />
+                    <input
+                      id="recovery-token"
+                      type="text"
+                      className="auth-input"
+                      placeholder="Paste recovery token"
+                      value={recoveryToken}
+                      onChange={(e) => setRecoveryToken(e.target.value)}
+                      required
+                    />
+                  </div>
+                </div>
+                <div className="form-group" style={{ marginBottom: '10px' }}>
+                  <label className="input-label" htmlFor="reset-new-password">New Password</label>
+                  <div className="input-with-icon">
+                    <Lock size={15} className="input-icon" />
+                    <input
+                      id="reset-new-password"
+                      type="password"
+                      className="auth-input"
+                      placeholder="Min 6 characters"
+                      value={resetNewPassword}
+                      onChange={(e) => setResetNewPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                </div>
+                <div className="form-group" style={{ marginBottom: '14px' }}>
+                  <label className="input-label" htmlFor="reset-confirm-password">Confirm Password</label>
+                  <div className="input-with-icon">
+                    <Lock size={15} className="input-icon" />
+                    <input
+                      id="reset-confirm-password"
+                      type="password"
+                      className="auth-input"
+                      placeholder="Re-enter new password"
+                      value={resetConfirmPassword}
+                      onChange={(e) => setResetConfirmPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  className="btn-primary auth-submit-btn"
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? 'Resetting Password...' : 'Save New Password & Sign In'}
+                </button>
+              </form>
             )}
-          </button>
-        </form>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="auth-form">
+            <div className="form-group">
+              <label className="input-label" htmlFor="login-identifier">
+                Email or Username
+              </label>
+              <div className="input-with-icon">
+                <Mail size={15} className="input-icon" />
+                <input
+                  id="login-identifier"
+                  type="text"
+                  className="auth-input"
+                  placeholder="user@syncnote.io or username"
+                  value={identifier}
+                  onChange={(e) => setIdentifier(e.target.value)}
+                  required
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            <div className="form-group">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label className="input-label" htmlFor="login-password" style={{ margin: 0 }}>
+                  Password
+                </label>
+                <button
+                  type="button"
+                  onClick={() => { setIsForgotMode(true); setErrorMsg(''); setSuccessMsg(''); }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: 0,
+                    fontSize: '0.74rem',
+                    color: 'var(--accent-primary, #3b82f6)',
+                    cursor: 'pointer',
+                    textDecoration: 'none'
+                  }}
+                >
+                  Forgot password?
+                </button>
+              </div>
+              <div className="input-with-icon" style={{ marginTop: '4px' }}>
+                <Lock size={15} className="input-icon" />
+                <input
+                  id="login-password"
+                  type={showPassword ? 'text' : 'password'}
+                  className="auth-input pr-10"
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+                <button
+                  type="button"
+                  className="password-toggle-btn"
+                  onClick={() => setShowPassword(!showPassword)}
+                  title={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              className="btn-primary auth-submit-btn"
+              disabled={isSubmitting || isOffline}
+            >
+              {isSubmitting ? (
+                <>
+                  <Loader2 size={16} className="spin-icon" />
+                  <span>Signing in...</span>
+                </>
+              ) : (
+                <>
+                  <span>Sign in</span>
+                  <ArrowRight size={15} />
+                </>
+              )}
+            </button>
+          </form>
+        )}
 
         {/* Divider */}
         <div style={{ display: 'flex', alignItems: 'center', margin: '16px 0', color: 'var(--text-muted)', fontSize: '0.74rem' }}>

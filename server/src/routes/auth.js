@@ -70,6 +70,8 @@ router.post('/register', async (req, res) => {
         id: newUser.id,
         email: newUser.email,
         username: newUser.username,
+        hasPassword: true,
+        has_password: true,
         created_at: newUser.created_at
       },
       device,
@@ -126,6 +128,8 @@ router.post('/login', async (req, res) => {
         id: user.id,
         email: user.email,
         username: user.username,
+        hasPassword: true,
+        has_password: true,
         created_at: user.created_at
       },
       device,
@@ -176,8 +180,8 @@ router.post('/change-password', requireAuth, async (req, res) => {
   try {
     const { currentPassword, newPassword, confirmPassword } = req.body;
 
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: 'Please enter current and new passwords.' });
+    if (!newPassword) {
+      return res.status(400).json({ error: 'Please enter a new password.' });
     }
 
     if (newPassword.length < 6) {
@@ -193,22 +197,162 @@ router.post('/change-password', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    const isMatch = await comparePassword(currentPassword, dbUser.password_hash);
-    if (!isMatch) {
-      return res.status(400).json({ error: 'Incorrect current password.' });
+    const hasExistingPassword = Boolean(dbUser.password_hash);
+    if (hasExistingPassword) {
+      if (!currentPassword) {
+        return res.status(400).json({ error: 'Please enter your current password.' });
+      }
+      const isMatch = await comparePassword(currentPassword, dbUser.password_hash);
+      if (!isMatch) {
+        return res.status(400).json({ error: 'Incorrect current password.' });
+      }
     }
 
     const newHash = await hashPassword(newPassword);
     await PgUserModel.updatePassword(req.user.id, newHash);
 
+    const updatedUser = await PgUserModel.findById(req.user.id);
+
     // Re-issue fresh token
     const token = generateToken({ id: dbUser.id, email: dbUser.email, username: dbUser.username });
     res.cookie('syncnote_token', token, COOKIE_OPTIONS);
 
-    return res.json({ success: true, message: 'Password updated successfully.' });
+    return res.json({ 
+      success: true, 
+      message: hasExistingPassword ? 'Password updated successfully.' : 'Password set successfully.',
+      user: updatedUser
+    });
   } catch (err) {
     console.error('Change Password Error:', err);
     return res.status(500).json({ error: 'Failed to update password.' });
+  }
+});
+
+/**
+ * POST /api/auth/set-password
+ * Allows an authenticated OAuth user (with no existing password) to set a password credential.
+ */
+router.post('/set-password', requireAuth, async (req, res) => {
+  try {
+    const { newPassword, confirmPassword } = req.body;
+
+    if (!newPassword) {
+      return res.status(400).json({ error: 'Please enter a new password.' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters long.' });
+    }
+
+    if (!confirmPassword || newPassword !== confirmPassword) {
+      return res.status(400).json({ error: 'New passwords do not match.' });
+    }
+
+    const dbUser = await PgUserModel.findByEmail(req.user.email);
+    if (!dbUser) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    // If account already has a password, reject
+    if (dbUser.password_hash) {
+      return res.status(400).json({ 
+        error: 'A password is already configured for this account. Please use Change Password.' 
+      });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await PgUserModel.updatePassword(req.user.id, newHash);
+
+    const updatedUser = await PgUserModel.findById(req.user.id);
+
+    // Re-issue fresh token
+    const token = generateToken({ id: dbUser.id, email: dbUser.email, username: dbUser.username });
+    res.cookie('syncnote_token', token, COOKIE_OPTIONS);
+
+    return res.json({ 
+      success: true, 
+      message: 'Password set successfully! You can now log in using your email and password.',
+      user: updatedUser
+    });
+  } catch (err) {
+    console.error('Set Password Error:', err);
+    return res.status(500).json({ error: 'Failed to set password.' });
+  }
+});
+
+/**
+ * POST /api/auth/forgot-password
+ */
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await PgUserModel.findByEmail(cleanEmail);
+
+    if (!user) {
+      return res.json({
+        success: true,
+        message: 'If an account exists with this email address, password reset instructions have been generated.'
+      });
+    }
+
+    const recoveryToken = generateToken({
+      id: user.id,
+      email: user.email,
+      type: 'password_recovery'
+    });
+
+    console.log(`[Password Recovery] Generated reset token for ${cleanEmail}`);
+
+    return res.json({
+      success: true,
+      message: 'Password reset instructions have been generated.',
+      recoveryToken
+    });
+  } catch (err) {
+    console.error('Forgot Password Error:', err);
+    return res.status(500).json({ error: 'Failed to process password recovery request.' });
+  }
+});
+
+/**
+ * POST /api/auth/reset-password
+ */
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { recoveryToken, newPassword, confirmPassword } = req.body || {};
+
+    if (!recoveryToken) {
+      return res.status(400).json({ error: 'Recovery token is required.' });
+    }
+
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters long.' });
+    }
+
+    if (confirmPassword && newPassword !== confirmPassword) {
+      return res.status(400).json({ error: 'New passwords do not match.' });
+    }
+
+    const decoded = verifyToken(recoveryToken);
+    if (!decoded || decoded.type !== 'password_recovery' || !decoded.id) {
+      return res.status(400).json({ error: 'Invalid or expired recovery token. Please request a new one.' });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await PgUserModel.updatePassword(decoded.id, newHash);
+
+    return res.json({
+      success: true,
+      message: 'Password has been reset successfully! You can now log in with your new password.'
+    });
+  } catch (err) {
+    console.error('Reset Password Error:', err);
+    return res.status(500).json({ error: 'Failed to reset password.' });
   }
 });
 

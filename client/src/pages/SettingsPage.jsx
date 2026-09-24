@@ -76,9 +76,18 @@ export default function SettingsPage({ theme, setTheme }) {
     setExpandedSection((prev) => (prev === sectionId ? null : sectionId));
   };
 
+  const hasPassword = Boolean(user?.hasPassword ?? user?.has_password);
+
   const handlePasswordChange = async (e) => {
     e.preventDefault();
-    if (!currentPassword || !newPassword) return;
+    if (hasPassword && !currentPassword) {
+      setPwdMsg({ type: 'error', text: 'Please enter your current password.' });
+      return;
+    }
+    if (!newPassword) {
+      setPwdMsg({ type: 'error', text: 'Please enter a new password.' });
+      return;
+    }
     if (newPassword.length < 6) {
       setPwdMsg({ type: 'error', text: 'New password must be at least 6 characters long.' });
       return;
@@ -92,13 +101,19 @@ export default function SettingsPage({ theme, setTheme }) {
     setPwdMsg({ type: '', text: '' });
 
     try {
-      await authApi.changePassword({ currentPassword, newPassword, confirmPassword });
-      setPwdMsg({ type: 'success', text: 'Password updated successfully!' });
+      if (hasPassword) {
+        await authApi.changePassword({ currentPassword, newPassword, confirmPassword });
+        setPwdMsg({ type: 'success', text: 'Password updated successfully!' });
+      } else {
+        await authApi.setPassword({ newPassword, confirmPassword });
+        setPwdMsg({ type: 'success', text: 'Password configured successfully! You can now sign in with email and password or Google.' });
+      }
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
+      await refreshUser();
     } catch (err) {
-      setPwdMsg({ type: 'error', text: err.message || 'Failed to update password.' });
+      setPwdMsg({ type: 'error', text: err.message || (hasPassword ? 'Failed to update password.' : 'Failed to set password.') });
     } finally {
       setPwdSubmitting(false);
     }
@@ -224,13 +239,30 @@ export default function SettingsPage({ theme, setTheme }) {
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <ShieldCheck size={16} className="accordion-icon" />
-              <span className="accordion-title">Security</span>
+              <span className="accordion-title">
+                {hasPassword ? 'Security · Change Password' : 'Security · Set Password'}
+              </span>
             </div>
             {expandedSection === 'security' ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
           </button>
 
           {expandedSection === 'security' && (
             <div className="settings-accordion-body">
+              {!hasPassword && (
+                <div style={{
+                  padding: '10px 14px',
+                  marginBottom: '16px',
+                  borderRadius: 'var(--radius-sm)',
+                  backgroundColor: 'rgba(59, 130, 246, 0.08)',
+                  border: '1px solid rgba(59, 130, 246, 0.25)',
+                  color: 'var(--text-primary)',
+                  fontSize: '0.82rem',
+                  lineHeight: '1.4'
+                }}>
+                  <strong>Google Account Linked:</strong> You signed in using Google OAuth and do not currently have a password. Set a password below to enable signing in with your email address alongside Google.
+                </div>
+              )}
+
               <form onSubmit={handlePasswordChange} className="settings-form-block">
                 {pwdMsg.text && (
                   <div className={`auth-error-banner ${pwdMsg.type === 'success' ? 'success' : ''}`}>
@@ -239,17 +271,19 @@ export default function SettingsPage({ theme, setTheme }) {
                   </div>
                 )}
 
-                <div className="form-group" style={{ marginBottom: '12px' }}>
-                  <label className="input-label">Current Password</label>
-                  <input
-                    type="password"
-                    className="auth-input input-compact"
-                    placeholder="Enter current password"
-                    value={currentPassword}
-                    onChange={(e) => setCurrentPassword(e.target.value)}
-                    required
-                  />
-                </div>
+                {hasPassword && (
+                  <div className="form-group" style={{ marginBottom: '12px' }}>
+                    <label className="input-label">Current Password</label>
+                    <input
+                      type="password"
+                      className="auth-input input-compact"
+                      placeholder="Enter current password"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                )}
 
                 <div className="form-group" style={{ marginBottom: '12px' }}>
                   <label className="input-label">New Password</label>
@@ -281,7 +315,9 @@ export default function SettingsPage({ theme, setTheme }) {
                     className="btn-primary"
                     disabled={pwdSubmitting}
                   >
-                    {pwdSubmitting ? 'Updating...' : 'Change Password'}
+                    {pwdSubmitting
+                      ? (hasPassword ? 'Updating...' : 'Setting Password...')
+                      : (hasPassword ? 'Change Password' : 'Set Password')}
                   </button>
                 </div>
               </form>

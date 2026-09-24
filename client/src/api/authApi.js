@@ -47,6 +47,18 @@ export const authApi = {
     return apiClient.post(`${API_BASE}/change-password`, data);
   },
 
+  async setPassword(data) {
+    return apiClient.post(`${API_BASE}/set-password`, data);
+  },
+
+  async forgotPassword(data) {
+    return apiClient.post(`${API_BASE}/forgot-password`, data);
+  },
+
+  async resetPassword(data) {
+    return apiClient.post(`${API_BASE}/reset-password`, data);
+  },
+
   async updateProfile(data) {
     const payload = {
       ...data,
