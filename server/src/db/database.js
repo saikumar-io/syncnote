@@ -984,8 +984,18 @@ const LanPairingModel = {
   },
 
   revokePairing: (id, userId) => {
-    const stmt = db.prepare('UPDATE lan_paired_devices SET status = \'REVOKED\' WHERE id = ? AND (user_id = ? OR user_id = \'usr_local_default\')');
-    const res = stmt.run(id, userId || 'usr_local_default');
+    let res;
+    if (userId) {
+      const stmt = db.prepare('UPDATE lan_paired_devices SET status = \'REVOKED\' WHERE id = ? AND (user_id = ? OR user_id = \'usr_local_default\')');
+      res = stmt.run(id, userId);
+    }
+    if (!res || res.changes === 0) {
+      const stmt = db.prepare('UPDATE lan_paired_devices SET status = \'REVOKED\' WHERE id = ?');
+      res = stmt.run(id);
+    }
+    try {
+      db.prepare('DELETE FROM device_selected_notes WHERE device_id = ?').run(id);
+    } catch (e) {}
     return res.changes > 0;
   },
 

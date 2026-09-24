@@ -169,9 +169,71 @@ async function sendEncryptedLanSync(remoteIp, remotePort = 5000, localProfile, r
   return res.data;
 }
 
+/**
+ * Send an authenticated encrypted unpair control message to a remote paired device
+ */
+async function sendEncryptedLanUnpair(remoteIp, remotePort = 5000, localProfile, remoteDevice, unpairPayload = {}) {
+  if (!remoteDevice.public_key) {
+    throw new Error(`Cannot send secure unpair: Missing public key for device '${remoteDevice.deviceName || remoteDevice.id}'`);
+  }
+
+  const sessionKey = deriveSharedSessionKey(remoteDevice.public_key);
+  const seq = getNextOutgoingSequence(remoteDevice.id);
+  const requestId = unpairPayload.requestId || `unpair_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+  const controlMessage = {
+    type: 'UNPAIR_REQUEST',
+    requestId,
+    requestingDeviceId: localProfile.deviceId,
+    targetDeviceId: remoteDevice.id,
+    protocolVersion: '1.0.0',
+    timestamp: Date.now()
+  };
+
+  const envelope = encryptLanPayload(
+    controlMessage,
+    sessionKey,
+    seq,
+    localProfile.deviceId,
+    remoteDevice.id
+  );
+
+  const res = await httpRequest({
+    hostname: remoteIp,
+    port: remotePort,
+    path: '/api/lan/unpair',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    }
+  }, { envelope }, 2500); // 2.5s timeout for fast offline handling
+
+  if (res.status !== 200) {
+    throw new Error(res.data?.error || `Remote unpair failed with HTTP ${res.status}`);
+  }
+
+  if (res.data && res.data.encryptedEnvelope) {
+    try {
+      const decrypted = decryptLanPayload(
+        res.data.encryptedEnvelope,
+        sessionKey,
+        remoteDevice.id,
+        remoteDevice.public_key
+      );
+      return decrypted;
+    } catch (cryptoErr) {
+      console.warn(`[LAN Unpair Transport] Note: Decrypting peer ack failed: ${cryptoErr.message}`);
+      return res.data;
+    }
+  }
+
+  return res.data;
+}
+
 module.exports = {
   checkPeerReachable,
   sendPairingRequest,
   pollPairingStatus,
-  sendEncryptedLanSync
+  sendEncryptedLanSync,
+  sendEncryptedLanUnpair
 };

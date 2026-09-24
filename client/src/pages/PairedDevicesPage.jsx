@@ -59,13 +59,18 @@ export default function PairedDevicesPage() {
   };
 
   const handleForgetDevice = async (deviceId, deviceName) => {
-    if (!window.confirm(`Are you sure you want to forget '${deviceName}'? It will no longer be able to sync notes until paired again.`)) {
+    if (!window.confirm('Unpair this device? This will remove the trusted connection on both devices.')) {
       return;
     }
 
+    setActionMsg({ type: '', text: 'Unpairing...' });
     try {
-      await apiClient.delete(`/api/lan/devices/${deviceId}`);
-      setActionMsg({ type: 'success', text: `Device '${deviceName}' removed.` });
+      const res = await apiClient.delete(`/api/lan/devices/${deviceId}`);
+      if (res && res.remoteNotified) {
+        setActionMsg({ type: 'success', text: 'Device unpaired' });
+      } else {
+        setActionMsg({ type: 'info', text: 'Device removed locally. Remote revocation will be enforced when the device reconnects.' });
+      }
       sync.fetchPairedDevices();
     } catch (err) {
       setActionMsg({ type: 'error', text: err.message || 'Failed to remove device.' });

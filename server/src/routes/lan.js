@@ -36,7 +36,8 @@ const {
   checkPeerReachable,
   sendPairingRequest,
   pollPairingStatus,
-  sendEncryptedLanSync
+  sendEncryptedLanSync,
+  sendEncryptedLanUnpair
 } = require('../utils/lanTransport');
 
 // In-memory store for active pairing PIN codes (5 min expiration)
@@ -533,6 +534,93 @@ router.post('/sync', (req, res) => {
   }
 });
 
+/**
+ * POST /api/lan/unpair
+ * Authenticated & Encrypted Inbound P2P LAN Unpair control endpoint (AES-256-GCM with replay protection)
+ * Receives remote unpair control request, verifies authentication, revokes pairing locally, and returns UNPAIR_ACK
+ */
+router.post('/unpair', (req, res) => {
+  try {
+    const { envelope } = req.body || {};
+    const localProfile = getPublicDeviceProfile();
+
+    if (!envelope || !envelope.senderDeviceId) {
+      return res.status(400).json({ error: 'Missing envelope or senderDeviceId.' });
+    }
+
+    const { senderDeviceId } = envelope;
+
+    // 1. Check if sender exists in paired devices table
+    const senderDevice = LanPairingModel.getById(senderDeviceId);
+    if (!senderDevice) {
+      console.warn(`[LAN Unpair Security Reject] Unrecognized sender device '${senderDeviceId}' attempted unpair.`);
+      return res.status(403).json({
+        error: 'SECURITY REJECTED: Sender device is not recognized.',
+        code: 'UNRECOGNIZED_DEVICE'
+      });
+    }
+
+    if (!senderDevice.public_key) {
+      return res.status(403).json({ error: 'SECURITY REJECTED: Missing sender public key.' });
+    }
+
+    // 2. Derive Shared AES-256 session key using sender public key
+    const sessionKey = deriveSharedSessionKey(senderDevice.public_key);
+
+    // 3. Decrypt payload & verify sequence number / authTag / signature
+    let decryptedPayload;
+    try {
+      decryptedPayload = decryptLanPayload(envelope, sessionKey, senderDeviceId, senderDevice.public_key);
+    } catch (cryptoErr) {
+      console.error(`[LAN Unpair Security Reject] Cryptographic verification failed: ${cryptoErr.message}`);
+      return res.status(401).json({
+        error: `SECURITY REJECTED: Cryptographic verification failed (${cryptoErr.message})`,
+        code: 'CRYPTO_FAILURE'
+      });
+    }
+
+    // 4. Validate control message payload
+    if (!decryptedPayload || decryptedPayload.type !== 'UNPAIR_REQUEST') {
+      return res.status(400).json({ error: 'Invalid control message type. Expected UNPAIR_REQUEST.' });
+    }
+
+    if (decryptedPayload.targetDeviceId && decryptedPayload.targetDeviceId !== localProfile.deviceId) {
+      return res.status(400).json({ error: 'targetDeviceId mismatch.' });
+    }
+
+    // 5. Revoke the requesting device locally (idempotent: safe if already revoked)
+    LanPairingModel.revokePairing(senderDeviceId, senderDevice.user_id);
+    console.log(`[LAN Unpair] Successfully revoked pairing for peer '${senderDevice.device_name}' (${senderDeviceId}) upon remote request.`);
+
+    // 6. Return authenticated encrypted acknowledgement (UNPAIR_ACK)
+    const ackSeq = getNextOutgoingSequence(senderDevice.id);
+    const ackPayload = {
+      type: 'UNPAIR_ACK',
+      status: 'REVOKED',
+      ackDeviceId: localProfile.deviceId,
+      requestId: decryptedPayload.requestId || null,
+      timestamp: Date.now()
+    };
+
+    const encryptedAck = encryptLanPayload(
+      ackPayload,
+      sessionKey,
+      ackSeq,
+      localProfile.deviceId,
+      senderDevice.id
+    );
+
+    return res.json({
+      success: true,
+      encryptedEnvelope: encryptedAck,
+      message: `Device '${senderDevice.device_name}' revoked successfully.`
+    });
+  } catch (err) {
+    console.error('Error during LAN unpair:', err);
+    return res.status(500).json({ error: 'LAN unpair failed', details: err.message });
+  }
+});
+
 /* ==========================================================================
    AUTHENTICATED CLIENT UI ENDPOINTS (User must be logged in locally)
    ========================================================================== */
@@ -661,6 +749,13 @@ router.get('/discover', async (req, res) => {
     // Format & annotate discovered devices
     const discovered = Array.from(discoveredMap.values()).map(dev => {
       const isPaired = pairedMap.has(dev.deviceId);
+      // Opportunistic reconciliation: if this node previously revoked dev.deviceId while dev was offline,
+      // notify dev now that it is discovered reachable on LAN
+      const localRecord = LanPairingModel.getById(dev.deviceId);
+      if (localRecord && localRecord.status === 'REVOKED' && dev.ip && dev.port && localRecord.public_key) {
+        sendEncryptedLanUnpair(dev.ip, dev.port, localProfile, localRecord).catch(() => {});
+      }
+
       return {
         ...dev,
         status: isPaired ? 'Connected' : 'Not paired',
@@ -1027,23 +1122,47 @@ router.patch('/devices/:id', (req, res) => {
  * DELETE /api/lan/devices/:id
  * Revoke/Unpair a LAN device (Immediate rejection of future LAN sync requests)
  */
-router.delete('/devices/:id', (req, res) => {
+router.delete('/devices/:id', async (req, res) => {
   const { id } = req.params;
   const userId = req.user ? req.user.id : 'usr_local_default';
+  const localProfile = getPublicDeviceProfile();
 
   const existing = LanPairingModel.getById(id);
   if (!existing) {
     return res.status(404).json({ error: 'Device not found.' });
   }
 
-  // Revoke pairing status so any future sync attempts are blocked with 403
+  // STEP 1: Immediately revoke pairing locally so future sync attempts are blocked
   LanPairingModel.revokePairing(id, userId);
-  console.log(`[LAN Revocation] Revoked LAN trust for device ${id}`);
+  console.log(`[LAN Revocation] Revoked LAN trust locally for device ${id}`);
+
+  // STEP 2: If peer has an IP address and public key, send authenticated UNPAIR_REQUEST
+  let remoteNotified = false;
+  let remoteMessage = '';
+
+  if (existing.device_ip && existing.public_key) {
+    try {
+      const peerPort = existing.device_port || 5000;
+      await sendEncryptedLanUnpair(existing.device_ip, peerPort, localProfile, existing);
+      remoteNotified = true;
+      remoteMessage = 'Device unpaired';
+      console.log(`[LAN Revocation] Remote device '${existing.device_name}' (${id}) acknowledged unpair.`);
+    } catch (err) {
+      console.warn(`[LAN Revocation] Remote device '${existing.device_name}' was offline or unreachable: ${err.message}`);
+      remoteNotified = false;
+      remoteMessage = 'Device removed locally. Remote revocation will be enforced when the device reconnects.';
+    }
+  } else {
+    remoteNotified = false;
+    remoteMessage = 'Device removed locally. Remote revocation will be enforced when the device reconnects.';
+  }
 
   return res.json({
     success: true,
-    message: `Device '${existing.device_name}' revoked successfully. Future LAN sync requests will be rejected.`,
-    deviceId: id
+    deviceId: id,
+    deviceName: existing.device_name,
+    remoteNotified,
+    message: remoteMessage
   });
 });
 
@@ -1086,13 +1205,26 @@ router.post('/sync/outbound', async (req, res) => {
 
     // 2. Transmit encrypted payload over LAN transport
     const peerPort = peer.device_port || 5000;
-    const remoteData = await sendEncryptedLanSync(
-      peer.device_ip,
-      peerPort,
-      localProfile,
-      peer,
-      { notes: notesWithContent, notebooks }
-    );
+    let remoteData;
+    try {
+      remoteData = await sendEncryptedLanSync(
+        peer.device_ip,
+        peerPort,
+        localProfile,
+        peer,
+        { notes: notesWithContent, notebooks }
+      );
+    } catch (syncErr) {
+      if (syncErr.message && (
+        syncErr.message.includes('UNPAIRED_DEVICE') ||
+        syncErr.message.includes('not paired') ||
+        syncErr.message.includes('revoked')
+      )) {
+        console.warn(`[LAN Outbound Sync] Peer '${peer.id}' rejected connection as revoked. Revoking locally.`);
+        LanPairingModel.revokePairing(peer.id, currentUserId);
+      }
+      throw syncErr;
+    }
 
     // 3. Ingest received peer changes through existing note and version control engine
     const { appliedNotes, conflicts } = applyIncomingNotesAndNotebooks(

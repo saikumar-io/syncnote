@@ -44,6 +44,7 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
   // Per-device sync state: { [deviceId]: 'Connecting' | 'Syncing' | 'Synced' | 'Failed' }
   const [deviceSyncState, setDeviceSyncState] = useState({});
   const [deviceSyncMessage, setDeviceSyncMessage] = useState({});
+  const [unpairingDeviceId, setUnpairingDeviceId] = useState(null);
 
   const scanTimerRef = useRef(null);
   const pollIntervalRef = useRef(null);
@@ -174,15 +175,27 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
 
   // Handle Unpair
   const handleUnpair = async (dev) => {
-    if (!window.confirm(`Are you sure you want to unpair '${dev.deviceName || dev.device_name}'? It will no longer be able to sync notes.`)) {
+    const devId = dev.id;
+    if (!window.confirm('Unpair this device? This will remove the trusted connection on both devices.')) {
       return;
     }
 
+    setUnpairingDeviceId(devId);
+    setDeviceSyncMessage(prev => ({ ...prev, [devId]: 'Unpairing...' }));
+
     try {
-      await sync.unpairDevice(dev.id);
+      const res = await sync.unpairDevice(devId);
       await sync.discoverLanDevices();
+
+      if (res && res.remoteNotified) {
+        alert('Device unpaired');
+      } else {
+        alert('Device removed locally. Remote revocation will be enforced when the device reconnects.');
+      }
     } catch (err) {
       alert(`Failed to unpair: ${err.message}`);
+    } finally {
+      setUnpairingDeviceId(null);
     }
   };
 
@@ -659,11 +672,12 @@ export default function LanSyncPage({ notes = [], notebooks = [] }) {
                       type="button"
                       className="btn-secondary"
                       onClick={() => handleUnpair(dev)}
+                      disabled={unpairingDeviceId === dev.id}
                       title="Unpair and revoke trust"
                       style={{ padding: '6px 12px', fontSize: '0.76rem', color: 'var(--accent-danger)', display: 'flex', alignItems: 'center', gap: '4px' }}
                     >
-                      <Unlink size={13} />
-                      <span>Unpair</span>
+                      <Unlink size={13} className={unpairingDeviceId === dev.id ? 'spin' : ''} />
+                      <span>{unpairingDeviceId === dev.id ? 'Unpairing...' : 'Unpair'}</span>
                     </button>
                   </div>
                 </div>
