@@ -58,6 +58,103 @@ function getLocalIpAddresses() {
 }
 
 /**
+ * Generate a lightweight metadata manifest of local notes and notebooks
+ * for synchronization comparison without transmitting note markdown file contents.
+ */
+function getLocalSyncManifest(userId, peerDeviceId = null) {
+  const currentUserId = userId || 'usr_local_default';
+  const selectedNoteIds = peerDeviceId ? LanPairingModel.getDeviceSelectedNotes(peerDeviceId) : [];
+  let eligibleNotes = NoteModel.getAll(currentUserId).filter(n => n.sync_mode === 'lan' || n.sync_mode === 'both');
+
+  if (selectedNoteIds && selectedNoteIds.length > 0) {
+    eligibleNotes = eligibleNotes.filter(n => selectedNoteIds.includes(n.id));
+  }
+
+  const notebooks = NotebookModel.getAll(currentUserId);
+
+  return {
+    notes: eligibleNotes.map(n => ({
+      id: n.id,
+      title: n.title || 'Untitled Note',
+      content_hash: n.content_hash || '',
+      current_version_id: n.current_version_id || null,
+      notebook_id: n.notebook_id || null,
+      updated_at: n.updated_at || null,
+      sync_mode: n.sync_mode
+    })),
+    notebooks: notebooks.map(nb => ({
+      id: nb.id,
+      name: (nb.name || '').trim(),
+      updated_at: nb.updated_at || null
+    }))
+  };
+}
+
+/**
+ * Compare local and remote sync manifests using the exact same version/content comparison criteria
+ * as applyIncomingNotesAndNotebooks, without downloading file contents.
+ */
+function compareSyncManifests(localManifest, remoteManifest) {
+  const localNotes = localManifest?.notes || [];
+  const localNotebooks = localManifest?.notebooks || [];
+  const remoteNotes = remoteManifest?.notes || [];
+  const remoteNotebooks = remoteManifest?.notebooks || [];
+
+  const localNotesMap = new Map(localNotes.map(n => [n.id, n]));
+  const remoteNotesMap = new Map(remoteNotes.map(n => [n.id, n]));
+  const allNoteIds = new Set([...localNotesMap.keys(), ...remoteNotesMap.keys()]);
+
+  let notesToSync = 0;
+  for (const id of allNoteIds) {
+    const local = localNotesMap.get(id);
+    const remote = remoteNotesMap.get(id);
+
+    if (!local || !remote) {
+      // Exists on one device but not the other -> needs sync
+      notesToSync++;
+      continue;
+    }
+
+    // Both devices have the note: check if content hash, title, or notebook differs
+    const hashDiffers = (local.content_hash || '') !== (remote.content_hash || '');
+    const titleDiffers = (local.title || '') !== (remote.title || '');
+    const notebookDiffers = (local.notebook_id || null) !== (remote.notebook_id || null);
+
+    if (hashDiffers || titleDiffers || notebookDiffers) {
+      notesToSync++;
+    }
+  }
+
+  const localNbMap = new Map(localNotebooks.map(nb => [nb.id, nb]));
+  const remoteNbMap = new Map(remoteNotebooks.map(nb => [nb.id, nb]));
+  const allNbIds = new Set([...localNbMap.keys(), ...remoteNbMap.keys()]);
+
+  let notebooksToSync = 0;
+  for (const id of allNbIds) {
+    const local = localNbMap.get(id);
+    const remote = remoteNbMap.get(id);
+
+    if (!local || !remote) {
+      // Exists on one device but not the other -> needs sync
+      notebooksToSync++;
+      continue;
+    }
+
+    // Both have notebook: check if name differs
+    const nameDiffers = (local.name || '').trim() !== (remote.name || '').trim();
+    if (nameDiffers) {
+      notebooksToSync++;
+    }
+  }
+
+  return {
+    notesToSync,
+    notebooksToSync,
+    isUpToDate: notesToSync === 0 && notebooksToSync === 0
+  };
+}
+
+/**
  * Ingest incoming notes and notebooks from a paired peer,
  * passing through the existing note storage and version control engine.
  * Ensures complete idempotency and zero duplicate versions.
@@ -795,12 +892,25 @@ router.post('/heartbeat', (req, res) => {
     const peerIp = req.ip || req.socket?.remoteAddress;
     LanPairingModel.updateLastSeen(senderDevice.id, peerIp, senderDevice.device_port);
 
+    // Compute lightweight sync comparison using existing metadata criteria
+    const currentUserId = senderDevice.user_id || 'usr_local_default';
+    const localManifest = getLocalSyncManifest(currentUserId, senderDevice.id);
+    const remoteManifest = {
+      notes: decryptedPayload.notes || [],
+      notebooks: decryptedPayload.notebooks || []
+    };
+    const syncComparison = compareSyncManifests(localManifest, remoteManifest);
+
     // 5. Generate lightweight encrypted HEARTBEAT_ACK
     const ackSeq = getNextOutgoingSequence(senderDevice.id);
     const ackPayload = {
       type: 'HEARTBEAT_ACK',
       ackDeviceId: localProfile.deviceId,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      notes: localManifest.notes,
+      notebooks: localManifest.notebooks,
+      notesToSync: syncComparison.notesToSync,
+      notebooksToSync: syncComparison.notebooksToSync
     };
 
     const encryptedAck = encryptLanPayload(
@@ -1055,20 +1165,33 @@ router.get('/devices', async (req, res) => {
     const localProfile = getPublicDeviceProfile();
     const devices = LanPairingModel.getPairedDevices(userId);
 
-    // Check reachability using lightweight authenticated heartbeat (in parallel, ~2s timeout)
+    // Check reachability and lightweight sync comparison using authenticated heartbeat (~2s timeout)
     const deviceStatuses = await Promise.all(devices.map(async (d) => {
       let isOnline = false;
+      let notesToSync = 0;
+      let notebooksToSync = 0;
+
       if (d.device_ip && d.public_key) {
         try {
-          const hb = await sendEncryptedLanHeartbeat(d.device_ip, d.device_port || 5000, localProfile, d);
+          const localManifest = getLocalSyncManifest(userId, d.id);
+          const hb = await sendEncryptedLanHeartbeat(d.device_ip, d.device_port || 5000, localProfile, d, localManifest);
           if (hb && hb.ok) {
             isOnline = true;
             LanPairingModel.updateLastSeen(d.id, d.device_ip, d.device_port || 5000);
+            if (hb.remoteNotes || hb.remoteNotebooks) {
+              const comp = compareSyncManifests(localManifest, { notes: hb.remoteNotes || [], notebooks: hb.remoteNotebooks || [] });
+              notesToSync = comp.notesToSync;
+              notebooksToSync = comp.notebooksToSync;
+            } else {
+              notesToSync = hb.notesToSync ?? 0;
+              notebooksToSync = hb.notebooksToSync ?? 0;
+            }
           }
         } catch (e) {
           isOnline = false;
         }
       }
+
       return {
         id: d.id,
         deviceName: d.device_name,
@@ -1079,6 +1202,9 @@ router.get('/devices', async (req, res) => {
         pairedAt: d.created_at,
         lastSeen: isOnline ? new Date().toISOString() : d.last_seen,
         isOnline,
+        notesToSync: isOnline ? notesToSync : null,
+        notebooksToSync: isOnline ? notebooksToSync : null,
+        isUpToDate: isOnline ? (notesToSync === 0 && notebooksToSync === 0) : false,
         publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
         selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
       };
@@ -1099,7 +1225,7 @@ router.get('/devices', async (req, res) => {
  * Automatic background presence checking for every paired device.
  * Runs lightweight authenticated encrypted heartbeat in parallel (~2s timeout).
  * Updates last_seen timestamp in database for online peers.
- * Never transfers notes, notebooks, or versions.
+ * Calculates pending sync count (notesToSync, notebooksToSync) without downloading note contents.
  */
 router.get('/devices/presence', async (req, res) => {
   try {
@@ -1114,23 +1240,39 @@ router.get('/devices/presence', async (req, res) => {
           deviceName: d.device_name,
           isOnline: false,
           lastSeen: d.last_seen,
-          error: 'Missing IP or public key'
+          error: 'Missing IP or public key',
+          notesToSync: null,
+          notebooksToSync: null,
+          isUpToDate: false
         };
       }
 
       try {
         const peerPort = d.device_port || 5000;
-        const hbResult = await sendEncryptedLanHeartbeat(d.device_ip, peerPort, localProfile, d);
+        const localManifest = getLocalSyncManifest(userId, d.id);
+        const hbResult = await sendEncryptedLanHeartbeat(d.device_ip, peerPort, localProfile, d, localManifest);
 
         if (hbResult && hbResult.ok) {
           const nowIso = new Date().toISOString();
           LanPairingModel.updateLastSeen(d.id, d.device_ip, peerPort);
+          let notesToSync = hbResult.notesToSync ?? 0;
+          let notebooksToSync = hbResult.notebooksToSync ?? 0;
+
+          if (hbResult.remoteNotes || hbResult.remoteNotebooks) {
+            const comp = compareSyncManifests(localManifest, { notes: hbResult.remoteNotes || [], notebooks: hbResult.remoteNotebooks || [] });
+            notesToSync = comp.notesToSync;
+            notebooksToSync = comp.notebooksToSync;
+          }
+
           return {
             id: d.id,
             deviceName: d.device_name,
             isOnline: true,
             lastSeen: nowIso,
-            latencyMs: hbResult.latencyMs
+            latencyMs: hbResult.latencyMs,
+            notesToSync,
+            notebooksToSync,
+            isUpToDate: notesToSync === 0 && notebooksToSync === 0
           };
         } else {
           return {
@@ -1138,7 +1280,10 @@ router.get('/devices/presence', async (req, res) => {
             deviceName: d.device_name,
             isOnline: false,
             lastSeen: d.last_seen,
-            error: hbResult?.error || 'Unreachable'
+            error: hbResult?.error || 'Unreachable',
+            notesToSync: null,
+            notebooksToSync: null,
+            isUpToDate: false
           };
         }
       } catch (err) {
@@ -1147,7 +1292,10 @@ router.get('/devices/presence', async (req, res) => {
           deviceName: d.device_name,
           isOnline: false,
           lastSeen: d.last_seen,
-          error: err.message
+          error: err.message,
+          notesToSync: null,
+          notebooksToSync: null,
+          isUpToDate: false
         };
       }
     }));
@@ -1158,6 +1306,68 @@ router.get('/devices/presence', async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: 'Presence check failed', details: err.message });
+  }
+});
+
+/**
+ * GET /api/lan/devices/:id/sync-status
+ * On-demand check for pending sync changes with a specific paired device
+ */
+router.get('/devices/:id/sync-status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user ? req.user.id : 'usr_local_default';
+    const localProfile = getPublicDeviceProfile();
+    const peer = LanPairingModel.getById(id);
+
+    if (!peer || peer.status !== 'TRUSTED') {
+      return res.status(404).json({ error: 'Device not found or not paired.' });
+    }
+
+    if (!peer.device_ip || !peer.public_key) {
+      return res.json({
+        success: true,
+        deviceId: id,
+        isOnline: false,
+        notesToSync: null,
+        notebooksToSync: null,
+        isUpToDate: false
+      });
+    }
+
+    const localManifest = getLocalSyncManifest(userId, id);
+    const peerPort = peer.device_port || 5000;
+    const hb = await sendEncryptedLanHeartbeat(peer.device_ip, peerPort, localProfile, peer, localManifest);
+
+    if (hb && hb.ok) {
+      LanPairingModel.updateLastSeen(peer.id, peer.device_ip, peerPort);
+      let notesToSync = hb.notesToSync ?? 0;
+      let notebooksToSync = hb.notebooksToSync ?? 0;
+      if (hb.remoteNotes || hb.remoteNotebooks) {
+        const comp = compareSyncManifests(localManifest, { notes: hb.remoteNotes || [], notebooks: hb.remoteNotebooks || [] });
+        notesToSync = comp.notesToSync;
+        notebooksToSync = comp.notebooksToSync;
+      }
+      return res.json({
+        success: true,
+        deviceId: id,
+        isOnline: true,
+        notesToSync,
+        notebooksToSync,
+        isUpToDate: notesToSync === 0 && notebooksToSync === 0
+      });
+    } else {
+      return res.json({
+        success: true,
+        deviceId: id,
+        isOnline: false,
+        notesToSync: null,
+        notebooksToSync: null,
+        isUpToDate: false
+      });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to check device sync status', details: err.message });
   }
 });
 

@@ -150,6 +150,14 @@ export default function LanSyncPage() {
         : 'Synced just now';
       setDeviceMessages(prev => ({ ...prev, [devId]: { type: 'success', text: msg } }));
 
+      // Immediately refresh presence and sync status to reflect '✓ Up to date'
+      if (sync.checkDevicesPresence) {
+        await sync.checkDevicesPresence();
+      }
+      if (sync.fetchPairedDevices) {
+        await sync.fetchPairedDevices();
+      }
+
       setTimeout(() => {
         setDeviceMessages(prev => {
           const next = { ...prev };
@@ -591,6 +599,35 @@ export default function LanSyncPage() {
                               {dev.deviceIp}:{dev.devicePort || 5000}
                             </span>
                           </>
+                        )}
+                      </div>
+
+                      {/* Sync status / pending count row */}
+                      <div style={{ marginTop: '5px', fontSize: '0.78rem' }}>
+                        {!dev.isOnline ? (
+                          <span style={{ color: 'var(--text-muted)' }}>
+                            Sync status unavailable while offline
+                          </span>
+                        ) : (dev.notesToSync === 0 && dev.notebooksToSync === 0) || dev.isUpToDate ? (
+                          <span style={{ color: 'var(--accent-emerald)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <CheckCircle2 size={13} />
+                            <span>Up to date</span>
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--accent-primary)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <RefreshCw size={12} />
+                            <span>
+                              {dev.notesToSync > 0 && dev.notebooksToSync > 0 ? (
+                                `${dev.notesToSync} ${dev.notesToSync === 1 ? 'note' : 'notes'} • ${dev.notebooksToSync} ${dev.notebooksToSync === 1 ? 'notebook' : 'notebooks'} to sync`
+                              ) : dev.notesToSync > 0 ? (
+                                `${dev.notesToSync} ${dev.notesToSync === 1 ? 'note' : 'notes'} to sync`
+                              ) : dev.notebooksToSync > 0 ? (
+                                `${dev.notebooksToSync} ${dev.notebooksToSync === 1 ? 'notebook' : 'notebooks'} to sync`
+                              ) : (
+                                'Up to date'
+                              )}
+                            </span>
+                          </span>
                         )}
                       </div>
 

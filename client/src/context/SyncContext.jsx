@@ -191,7 +191,10 @@ export function SyncProvider({ children }) {
                   ...device,
                   isOnline: true,
                   isChecking: false,
-                  lastSeen: p.lastSeen || new Date().toISOString()
+                  lastSeen: p.lastSeen || new Date().toISOString(),
+                  notesToSync: p.notesToSync !== undefined ? p.notesToSync : (device.notesToSync ?? 0),
+                  notebooksToSync: p.notebooksToSync !== undefined ? p.notebooksToSync : (device.notebooksToSync ?? 0),
+                  isUpToDate: p.isUpToDate !== undefined ? p.isUpToDate : (device.isUpToDate ?? false)
                 };
               } else {
                 // Heartbeat failed or timed out
@@ -206,7 +209,10 @@ export function SyncProvider({ children }) {
                   isOnline: shouldMarkOffline ? false : device.isOnline,
                   isChecking: false,
                   // Retain previous lastSeen timestamp! Do not overwrite with null or "never"
-                  lastSeen: device.lastSeen || p.lastSeen || device.last_seen
+                  lastSeen: device.lastSeen || p.lastSeen || device.last_seen,
+                  notesToSync: shouldMarkOffline ? null : device.notesToSync,
+                  notebooksToSync: shouldMarkOffline ? null : device.notebooksToSync,
+                  isUpToDate: shouldMarkOffline ? false : device.isUpToDate
                 };
               }
             });
@@ -504,10 +510,20 @@ export function SyncProvider({ children }) {
       }
     }, 10000);
 
+    // 5. Update sync counts immediately when local notes are created, edited, or saved
+    const handleNotesUpdated = () => {
+      if (isMounted) {
+        refreshSyncStatus();
+        checkDevicesPresence();
+      }
+    };
+    window.addEventListener('syncnote:notes-updated', handleNotesUpdated);
+
     return () => {
       isMounted = false;
       clearInterval(presenceInterval);
       clearInterval(backgroundSyncInterval);
+      window.removeEventListener('syncnote:notes-updated', handleNotesUpdated);
     };
   }, [refreshSyncStatus, fetchPairedDevices, fetchPendingPairingRequests, checkDevicesPresence]);
 

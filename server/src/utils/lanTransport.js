@@ -261,7 +261,7 @@ async function sendEncryptedLanUnpair(remoteIp, remotePort = 5000, localProfile,
  * Heartbeat timeout: 2000ms.
  * Does NOT sync notes, versions, notebooks, or touch database.
  */
-async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfile, remoteDevice) {
+async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfile, remoteDevice, localMetadata = {}) {
   if (!remoteDevice.public_key) {
     return { ok: false, error: 'Missing public key' };
   }
@@ -275,7 +275,9 @@ async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfi
       type: 'HEARTBEAT',
       senderDeviceId: localProfile.deviceId,
       targetDeviceId: remoteDevice.id,
-      timestamp: startTime
+      timestamp: startTime,
+      notes: localMetadata.notes || [],
+      notebooks: localMetadata.notebooks || []
     };
 
     const envelope = encryptLanPayload(
@@ -312,7 +314,11 @@ async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfi
           return {
             ok: true,
             latencyMs: Date.now() - startTime,
-            timestamp: decrypted.timestamp || Date.now()
+            timestamp: decrypted.timestamp || Date.now(),
+            notesToSync: typeof decrypted.notesToSync === 'number' ? decrypted.notesToSync : 0,
+            notebooksToSync: typeof decrypted.notebooksToSync === 'number' ? decrypted.notebooksToSync : 0,
+            remoteNotes: decrypted.notes || [],
+            remoteNotebooks: decrypted.notebooks || []
           };
         }
       } catch (cryptoErr) {
@@ -320,7 +326,7 @@ async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfi
       }
     }
 
-    return { ok: true, latencyMs: Date.now() - startTime };
+    return { ok: true, latencyMs: Date.now() - startTime, notesToSync: 0, notebooksToSync: 0 };
   } catch (err) {
     return { ok: false, error: err.message };
   }
