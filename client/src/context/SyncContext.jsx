@@ -89,17 +89,20 @@ export function SyncProvider({ children }) {
             const newCount = newConflicts.length;
             if (newCount > 0) {
               setSyncStatus('CONFLICT');
-            } else if (prevCount > 0 && newCount === 0) {
+            } else if (prevCount > 0 || newCount === 0) {
               // Conflicts were cleared externally (e.g., peer broadcast resolution)
-              setSyncStatus('SYNCED');
-              // Close any open conflict modal automatically
+              setSyncStatus(prevStatus => prevStatus === 'CONFLICT' ? 'SYNCED' : prevStatus);
               setActiveConflictModal(null);
-              // Force notes reload so UI reflects the resolved content
-              window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
+              if (prevCount > 0) {
+                window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
+              }
             }
             return newConflicts;
           });
           setActiveConflicts(newConflicts);
+          if (newConflicts.length === 0) {
+            setActiveConflictModal(null);
+          }
         }
       } catch (cErr) {}
 

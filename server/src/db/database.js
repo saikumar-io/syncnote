@@ -373,6 +373,12 @@ const initDatabase = () => {
         ai_changes TEXT,
         ai_suggested_merge TEXT,
         ai_reasoning TEXT,
+        ai_semantic_analysis TEXT,
+        ai_common_info TEXT,
+        ai_local_unique TEXT,
+        ai_remote_unique TEXT,
+        ai_contradictions TEXT,
+        ai_confidence TEXT,
         ai_error TEXT,
         ai_latency_ms INTEGER,
         resolution_method TEXT,
@@ -411,6 +417,18 @@ const initDatabase = () => {
       CREATE INDEX IF NOT EXISTS idx_conflicts_user_status ON conflicts(user_id, status);
       CREATE INDEX IF NOT EXISTS idx_conflict_metrics_conflict ON conflict_metrics(conflict_id);
     `);
+
+    // Conflict Structured Semantic Analysis Columns migration for existing databases
+    [
+      'ai_semantic_analysis TEXT',
+      'ai_common_info TEXT',
+      'ai_local_unique TEXT',
+      'ai_remote_unique TEXT',
+      'ai_contradictions TEXT',
+      'ai_confidence TEXT'
+    ].forEach(col => {
+      try { db.exec(`ALTER TABLE conflicts ADD COLUMN ${col};`); } catch (e) {}
+    });
 
     console.log('[SQLite DB] File-first database schema ready with Auth, Version Control, Sync Queue, LAN Pairing & AI Conflicts tables.');
   };
@@ -1310,6 +1328,49 @@ const ConflictModel = {
     return ConflictModel.getById(conflictId, userId);
   },
 
+  formatConflictRow: (row) => {
+    if (!row) return null;
+    const parseJsonSafe = (val, fallback) => {
+      if (!val) return fallback;
+      if (typeof val !== 'string') return val;
+      try { return JSON.parse(val); } catch (e) { return fallback; }
+    };
+
+    const aiChanges = parseJsonSafe(row.ai_changes, []);
+    const aiCommonInfo = parseJsonSafe(row.ai_common_info, []);
+    const aiLocalUnique = parseJsonSafe(row.ai_local_unique, []);
+    const aiRemoteUnique = parseJsonSafe(row.ai_remote_unique, []);
+    const aiContradictions = parseJsonSafe(row.ai_contradictions, []);
+    const aiSemanticAnalysis = row.ai_semantic_analysis || row.ai_reasoning || row.ai_summary || '';
+    const aiConfidence = row.ai_confidence || 'high';
+
+    return {
+      ...row,
+      ai_changes: aiChanges,
+      aiChanges,
+      ai_common_info: aiCommonInfo,
+      aiCommonInfo,
+      ai_local_unique: aiLocalUnique,
+      aiLocalUnique,
+      ai_remote_unique: aiRemoteUnique,
+      aiRemoteUnique,
+      ai_contradictions: aiContradictions,
+      aiContradictions,
+      ai_semantic_analysis: aiSemanticAnalysis,
+      aiSemanticAnalysis,
+      ai_confidence: aiConfidence,
+      aiConfidence,
+      aiSummary: row.ai_summary || aiSemanticAnalysis,
+      aiReasoning: row.ai_reasoning || aiSemanticAnalysis,
+      aiSuggestedMerge: row.ai_suggested_merge,
+      aiStatus: row.ai_status,
+      localContent: row.local_content,
+      remoteContent: row.remote_content,
+      ancestorContent: row.ancestor_content,
+      remoteDeviceName: row.remote_device_name
+    };
+  },
+
   getById: (id, userId) => {
     if (userId) {
       const stmt = db.prepare(`
@@ -1319,12 +1380,7 @@ const ConflictModel = {
         WHERE c.id = ? AND (c.user_id = ? OR c.user_id = 'usr_local_default')
       `);
       const row = stmt.get(id, userId);
-      if (row) {
-        return {
-          ...row,
-          ai_changes: row.ai_changes ? (typeof row.ai_changes === 'string' ? JSON.parse(row.ai_changes) : row.ai_changes) : []
-        };
-      }
+      return ConflictModel.formatConflictRow(row);
     }
     const stmtGlobal = db.prepare(`
       SELECT c.*, n.title as note_title, n.file_path as note_file_path
@@ -1333,11 +1389,7 @@ const ConflictModel = {
       WHERE c.id = ?
     `);
     const rowGlobal = stmtGlobal.get(id);
-    if (!rowGlobal) return null;
-    return {
-      ...rowGlobal,
-      ai_changes: rowGlobal.ai_changes ? (typeof rowGlobal.ai_changes === 'string' ? JSON.parse(rowGlobal.ai_changes) : rowGlobal.ai_changes) : []
-    };
+    return ConflictModel.formatConflictRow(rowGlobal);
   },
 
   getByNoteId: (noteId, userId, unresolvedOnly = true) => {
@@ -1357,10 +1409,7 @@ const ConflictModel = {
     }
     sql += ` ORDER BY c.created_at DESC`;
     const rows = db.prepare(sql).all(...params);
-    return rows.map(row => ({
-      ...row,
-      ai_changes: row.ai_changes ? (typeof row.ai_changes === 'string' ? JSON.parse(row.ai_changes) : row.ai_changes) : []
-    }));
+    return rows.map(ConflictModel.formatConflictRow);
   },
 
   getUnresolved: (userId) => {
@@ -1377,10 +1426,7 @@ const ConflictModel = {
     }
     sql += ` ORDER BY c.created_at DESC`;
     const rows = db.prepare(sql).all(...params);
-    return rows.map(row => ({
-      ...row,
-      ai_changes: row.ai_changes ? (typeof row.ai_changes === 'string' ? JSON.parse(row.ai_changes) : row.ai_changes) : []
-    }));
+    return rows.map(ConflictModel.formatConflictRow);
   },
 
   updateAiStatus: (id, {
@@ -1389,11 +1435,22 @@ const ConflictModel = {
     aiChanges = null,
     aiSuggestedMerge = null,
     aiReasoning = null,
+    aiSemanticAnalysis = null,
+    aiCommonInfo = null,
+    aiLocalUnique = null,
+    aiRemoteUnique = null,
+    aiContradictions = null,
+    aiConfidence = null,
     aiError = null,
     aiLatencyMs = null
   }, userId = null) => {
     const now = new Date().toISOString();
     const changesStr = Array.isArray(aiChanges) ? JSON.stringify(aiChanges) : (aiChanges || null);
+    const commonInfoStr = Array.isArray(aiCommonInfo) ? JSON.stringify(aiCommonInfo) : (aiCommonInfo || null);
+    const localUniqueStr = Array.isArray(aiLocalUnique) ? JSON.stringify(aiLocalUnique) : (aiLocalUnique || null);
+    const remoteUniqueStr = Array.isArray(aiRemoteUnique) ? JSON.stringify(aiRemoteUnique) : (aiRemoteUnique || null);
+    const contradictionsStr = Array.isArray(aiContradictions) ? JSON.stringify(aiContradictions) : (aiContradictions || null);
+
     const stmt = db.prepare(`
       UPDATE conflicts
       SET ai_status = ?,
@@ -1401,12 +1458,34 @@ const ConflictModel = {
           ai_changes = COALESCE(?, ai_changes),
           ai_suggested_merge = COALESCE(?, ai_suggested_merge),
           ai_reasoning = COALESCE(?, ai_reasoning),
+          ai_semantic_analysis = COALESCE(?, ai_semantic_analysis),
+          ai_common_info = COALESCE(?, ai_common_info),
+          ai_local_unique = COALESCE(?, ai_local_unique),
+          ai_remote_unique = COALESCE(?, ai_remote_unique),
+          ai_contradictions = COALESCE(?, ai_contradictions),
+          ai_confidence = COALESCE(?, ai_confidence),
           ai_error = ?,
           ai_latency_ms = COALESCE(?, ai_latency_ms),
           updated_at = ?
       WHERE id = ?
     `);
-    stmt.run(aiStatus, aiSummary, changesStr, aiSuggestedMerge, aiReasoning, aiError, aiLatencyMs, now, id);
+    stmt.run(
+      aiStatus,
+      aiSummary || aiSemanticAnalysis,
+      changesStr,
+      aiSuggestedMerge,
+      aiReasoning || aiSemanticAnalysis,
+      aiSemanticAnalysis || aiReasoning || aiSummary,
+      commonInfoStr,
+      localUniqueStr,
+      remoteUniqueStr,
+      contradictionsStr,
+      aiConfidence,
+      aiError,
+      aiLatencyMs,
+      now,
+      id
+    );
     return ConflictModel.getById(id, userId);
   },
 

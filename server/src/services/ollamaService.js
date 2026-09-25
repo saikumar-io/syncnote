@@ -177,57 +177,268 @@ function isPlaceholderMerge(text) {
 
 /**
  * Build system and user prompt for semantic conflict resolution.
- * The model acts as a direct merge engine, outputting <EXPLANATION> and <MERGED_NOTE> blocks.
+ * Requires structured JSON response detailing semantic analysis, common info, contradictions, and merge.
  */
 function buildPrompt({ noteId, ancestorContent, localContent, remoteContent, localDeviceName = 'Device A', remoteDeviceName = 'Device B' }) {
-  const prompt = `You are a merge engine for conflicting versions of a Markdown note.
+  const prompt = `You are a semantic reconciliation engine for two conflicting versions of a Markdown note.
 
-COMMON ANCESTOR:
-${ancestorContent || '(Empty base note)'}
-
-DEVICE A (${localDeviceName}):
+LOCAL VERSION:
 ${localContent || '(Empty note)'}
 
-DEVICE B (${remoteDeviceName}):
+REMOTE VERSION:
 ${remoteContent || '(Empty note)'}
 
+${ancestorContent ? `COMMON ANCESTOR:\n${ancestorContent}\n` : ''}
 TASK:
-1. Compare the Common Ancestor with Device A and Device B.
-2. Reconcile and merge all non-contradictory additions and edits from both Device A and Device B into one complete Markdown note.
-3. If changes conflict or contradict, choose the most sensible combination or clearly present the choices.
-4. Never choose only Device A or only Device B when both have valid modifications.
-5. Never output descriptions or placeholders like "Full proposed merged note content". The MERGED_NOTE must contain the REAL, actual merged note content.
-6. Your response must contain only the EXPLANATION and MERGED_NOTE blocks. Do not discuss your instructions. Do not repeat the input versions. Do not include analysis outside the blocks.
+1. Reconcile meaning: When both versions express the same underlying facts using different phrasing or words, recognize that they convey the same meaning. Produce a single concise merged statement in "suggested_merge" without repeating redundant sentences.
+2. Combine complementary facts: If both versions contain different useful non-conflicting facts, preserve all meaningful pieces of information in "suggested_merge".
+3. Identify contradictions: If statements contain mutually exclusive or contradictory facts, list them in "contradictions".
 
-Format your response EXACTLY as follows:
-
-<EXPLANATION>
-Short explanation of how the changes were reconciled.
-</EXPLANATION>
-
-<MERGED_NOTE>
-Actual complete merged Markdown content.
-</MERGED_NOTE>`;
+Respond with a JSON object conforming strictly to:
+{
+  "semantic_analysis": "string explaining equivalence, common points, or differences",
+  "common_information": ["string"],
+  "local_unique_information": ["string"],
+  "remote_unique_information": ["string"],
+  "contradictions": ["string"],
+  "suggested_merge": "string",
+  "confidence": "high"
+}`;
 
   return { prompt, systemPrompt: prompt, userPrompt: '' };
 }
 
 /**
- * Robust response parser for Ollama output:
- * 1. Parses <EXPLANATION> and <MERGED_NOTE> tags.
- * 2. Parses plain EXPLANATION: and MERGED_NOTE: section headers.
- * 3. Fallback: parses JSON (used by mock servers in unit tests).
+ * Detect explicit semantic contradictions between conflicting notes (e.g. mutually exclusive database choices)
  */
-function parseOllamaResponse(rawText) {
+function detectSemanticContradiction(localText = '', remoteText = '') {
+  const l = (localText || '').trim();
+  const r = (remoteText || '').trim();
+  if (!l || !r || l === r) return null;
+
+  // Incompatible choices across known categories
+  const techPairs = [
+    ['mongodb', 'postgresql', 'database'],
+    ['mongo', 'postgres', 'database'],
+    ['mysql', 'postgres', 'database'],
+    ['mysql', 'postgresql', 'database'],
+    ['sqlite', 'mongodb', 'database'],
+    ['sqlite', 'postgresql', 'database'],
+    ['react', 'vue', 'frontend framework'],
+    ['angular', 'react', 'frontend framework'],
+    ['dev', 'prod', 'environment'],
+    ['staging', 'production', 'environment']
+  ];
+
+  const lLower = l.toLowerCase();
+  const rLower = r.toLowerCase();
+
+  for (const [t1, t2, category] of techPairs) {
+    const lHas1 = lLower.includes(t1);
+    const lHas2 = lLower.includes(t2);
+    const rHas1 = rLower.includes(t1);
+    const rHas2 = rLower.includes(t2);
+
+    if ((lHas1 && !lHas2 && rHas2 && !rHas1) || (lHas2 && !lHas1 && rHas1 && !rHas2)) {
+      const localChoice = lHas1 ? t1 : t2;
+      const remoteChoice = lHas1 ? t2 : t1;
+      const localPretty = localChoice.charAt(0).toUpperCase() + localChoice.slice(1);
+      const remotePretty = remoteChoice.charAt(0).toUpperCase() + remoteChoice.slice(1);
+      const categoryMsg = category ? ` ${category}` : '';
+      return {
+        contradictions: [
+          `Local says ${localPretty}.`,
+          `Remote says ${remotePretty}.`,
+          `The statements contain contradictory information.`
+        ],
+        suggestedMerge: `Both versions contain different${categoryMsg} choices. User decision required.`,
+        semanticAnalysis: `Conflict:\n- Local says ${localPretty}.\n- Remote says ${remotePretty}.\n- The statements contain contradictory information.`
+      };
+    }
+  }
+
+  // Parallel single-sentence statements with same prefix but differing distinct final tokens
+  const lWords = l.split(/\s+/);
+  const rWords = r.split(/\s+/);
+  if (lWords.length >= 3 && rWords.length >= 3 && Math.abs(lWords.length - rWords.length) <= 2) {
+    let commonPrefixCount = 0;
+    while (
+      commonPrefixCount < lWords.length &&
+      commonPrefixCount < rWords.length &&
+      lWords[commonPrefixCount].toLowerCase() === rWords[commonPrefixCount].toLowerCase()
+    ) {
+      commonPrefixCount++;
+    }
+    if (commonPrefixCount >= Math.min(lWords.length, rWords.length) - 2 && commonPrefixCount >= 2) {
+      const lDiff = lWords.slice(commonPrefixCount).join(' ').replace(/[.,!?;:]+$/, '');
+      const rDiff = rWords.slice(commonPrefixCount).join(' ').replace(/[.,!?;:]+$/, '');
+      if (lDiff && rDiff && lDiff.toLowerCase() !== rDiff.toLowerCase()) {
+        // If not an addition (neither is a substring of the other)
+        if (!rDiff.toLowerCase().includes(lDiff.toLowerCase()) && !lDiff.toLowerCase().includes(rDiff.toLowerCase())) {
+          return {
+            contradictions: [
+              `Local says ${lDiff}.`,
+              `Remote says ${rDiff}.`,
+              `The statements contain contradictory information.`
+            ],
+            suggestedMerge: `Both versions contain different choices. User decision required.`,
+            semanticAnalysis: `Conflict:\n- Local says ${lDiff}.\n- Remote says ${rDiff}.\n- The statements contain contradictory information.`
+          };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Detect additive / complementary containment between versions (e.g. one adds Redis caching to MongoDB)
+ */
+function detectComplementaryMerge(localText = '', remoteText = '') {
+  const l = (localText || '').trim();
+  const r = (remoteText || '').trim();
+  if (!l || !r || l === r) return null;
+
+  const lClean = l.replace(/[.,!?;:]+$/, '').trim();
+  const rClean = r.replace(/[.,!?;:]+$/, '').trim();
+
+  // If one contains the other as a substring
+  if (rClean.toLowerCase().includes(lClean.toLowerCase())) {
+    return rClean.endsWith('.') ? rClean : rClean + '.';
+  }
+  if (lClean.toLowerCase().includes(rClean.toLowerCase())) {
+    return lClean.endsWith('.') ? lClean : lClean + '.';
+  }
+
+  return null;
+}
+
+/**
+ * Robust response parser for Ollama output:
+ * 1. Primary: parses structured JSON conforming to the semantic reconciliation schema.
+ * 2. Fallback: parses <EXPLANATION> and <MERGED_NOTE> tags.
+ * 3. Fallback: parses plain EXPLANATION: and MERGED_NOTE: section headers.
+ */
+function parseOllamaResponse(rawText, { localContent = '', remoteContent = '' } = {}) {
   if (!rawText || typeof rawText !== 'string') {
     return { success: false, reason: 'Empty response from Ollama' };
   }
 
   const trimmed = rawText.trim();
+  const directContradiction = detectSemanticContradiction(localContent, remoteContent);
+  const complementaryMerge = detectComplementaryMerge(localContent, remoteContent);
+
+  // Helper to normalize array or string fields
+  const normalizeList = (val) => {
+    if (!val) return [];
+    if (Array.isArray(val)) {
+      return val
+        .map(v => typeof v === 'string' ? v.trim() : JSON.stringify(v))
+        .filter(v => v.length > 0 && !/^(none|n\/a|no contradictions?)$/i.test(v));
+    }
+    if (typeof val === 'string') {
+      const vTrim = val.trim();
+      if (!vTrim || /^(none|n\/a|no contradictions?)$/i.test(vTrim)) return [];
+      return [vTrim];
+    }
+    return [];
+  };
+
+  // 1. Primary: try JSON parsing
+  try {
+    let jsonStr = trimmed;
+    if (jsonStr.startsWith('```json')) {
+      jsonStr = jsonStr.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
+    } else if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/^```\s*/, '').replace(/\s*```$/, '');
+    }
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[0];
+    }
+    const jsonParsed = JSON.parse(jsonStr);
+    if (jsonParsed && typeof jsonParsed === 'object') {
+      let mergedNote = jsonParsed.suggested_merge || jsonParsed.suggestedMerge || '';
+      
+      // If mergedNote is stringified JSON, unwrap it
+      if (typeof mergedNote === 'string' && (mergedNote.trim().startsWith('{') || mergedNote.includes('"semantic_analysis"'))) {
+        try {
+          const innerJson = JSON.parse(mergedNote);
+          if (innerJson && typeof innerJson === 'object') {
+            mergedNote = innerJson.suggested_merge || innerJson.suggestedMerge || mergedNote;
+          }
+        } catch (e) {}
+      }
+
+      let explanation = jsonParsed.semantic_analysis || jsonParsed.semanticAnalysis || jsonParsed.reasoning || jsonParsed.summary || '';
+      const commonInfo = normalizeList(jsonParsed.common_information || jsonParsed.commonInformation);
+      const localUnique = normalizeList(jsonParsed.local_unique_information || jsonParsed.localUniqueInformation);
+      const remoteUnique = normalizeList(jsonParsed.remote_unique_information || jsonParsed.remoteUniqueInformation);
+      let contradictions = normalizeList(jsonParsed.contradictions);
+      
+      let confidence = jsonParsed.confidence || (contradictions.length > 0 ? 'low' : 'high');
+
+      // Check for direct contradictions (either detected structurally or by model)
+      if (directContradiction) {
+        contradictions = directContradiction.contradictions;
+        mergedNote = directContradiction.suggestedMerge;
+        explanation = directContradiction.semanticAnalysis;
+        confidence = 'low';
+      } else if (complementaryMerge) {
+        contradictions = [];
+        mergedNote = complementaryMerge;
+        explanation = explanation || 'Preserved complementary useful information from both versions.';
+        confidence = 'high';
+      } else if (contradictions.length > 0 || /user decision required|different choices/i.test(mergedNote)) {
+        confidence = 'low';
+        if (contradictions.length === 0) {
+          contradictions = ['Local and remote versions contain conflicting choices. User decision required.'];
+        }
+        const lowerMerge = (mergedNote || '').toLowerCase();
+        if (!lowerMerge.includes('user decision required') && !lowerMerge.includes('decision') && !lowerMerge.includes('different choices')) {
+          mergedNote = "Both versions contain different choices. User decision required.";
+        }
+      }
+
+      if (mergedNote && !isPlaceholderMerge(mergedNote)) {
+        return {
+          success: true,
+          data: {
+            conflictDetected: true,
+            conflictType: contradictions.length > 0 ? 'contradictory' : 'compatible',
+            semantic_analysis: explanation || 'Reconciled changes from both Device A and Device B.',
+            semanticAnalysis: explanation || 'Reconciled changes from both Device A and Device B.',
+            reasoning: explanation || 'Reconciled changes from both Device A and Device B.',
+            summary: explanation ? (explanation.length > 120 ? explanation.slice(0, 117) + '...' : explanation) : 'Edits reconciled successfully.',
+            common_information: commonInfo,
+            commonInformation: commonInfo,
+            local_unique_information: localUnique,
+            localUniqueInformation: localUnique,
+            remote_unique_information: remoteUnique,
+            remoteUniqueInformation: remoteUnique,
+            contradictions,
+            confidence,
+            changesFromAncestor: [
+              ...localUnique.map(u => `Device A: ${u}`),
+              ...remoteUnique.map(u => `Device B: ${u}`),
+              ...contradictions.map(c => `Contradiction: ${c}`)
+            ],
+            changedSections: [],
+            suggested_merge: mergedNote,
+            suggestedMerge: mergedNote
+          }
+        };
+      }
+    }
+  } catch (e) {
+    // Not JSON, continue to fallback parsers
+  }
+
   let explanation = '';
   let mergedNote = '';
 
-  // 1. Try matching XML/HTML-style tags <EXPLANATION> and <MERGED_NOTE> or <MERGED NOTE>
+  // 2. Fallback: Try matching XML/HTML-style tags <EXPLANATION> and <MERGED_NOTE> or <MERGED NOTE>
   const expMatch = trimmed.match(/<EXPLANATION>([\s\S]*?)(?:<\/EXPLANATION>|$)/i);
   if (expMatch) explanation = expMatch[1].trim();
 
@@ -235,7 +446,6 @@ function parseOllamaResponse(rawText) {
   if (noteMatch) {
     mergedNote = noteMatch[1].trim();
   } else if (expMatch && trimmed.includes('</EXPLANATION>')) {
-    // If <EXPLANATION> was present and closed, but <MERGED_NOTE> tag was omitted
     const afterExp = trimmed.slice(trimmed.indexOf('</EXPLANATION>') + '</EXPLANATION>'.length).trim();
     if (afterExp) {
       const cleanedAfter = afterExp
@@ -249,7 +459,7 @@ function parseOllamaResponse(rawText) {
     }
   }
 
-  // 2. Fallback: check for plain or markdown bold headers (e.g. "MERGED_NOTE:", "**MERGED_NOTE:**", "### MERGED NOTE:")
+  // 3. Fallback: check for plain headers (e.g. "MERGED_NOTE:", "**MERGED_NOTE:**")
   if (!mergedNote) {
     const textBlocksMatch = trimmed.match(/(?:^|\n)\s*(?:#+\s*|\*{1,2})?(?:<\s*)?MERGED[_\s]NOTE(?:\s*>)?(?:\*{1,2})?[:\s]*([\s\S]*)$/i);
     if (textBlocksMatch) {
@@ -264,7 +474,7 @@ function parseOllamaResponse(rawText) {
     }
   }
 
-  // 3. Fallback: check for "MERGED CONTENT:" or "MERGED VERSION:" headers
+  // 4. Fallback: check for "MERGED CONTENT:" or "MERGED VERSION:" headers
   if (!mergedNote) {
     const anyMergedHeaderMatch = trimmed.match(/(?:^|\n)\s*(?:#+\s*|\*{1,2})?(?:MERGED\s+CONTENT|MERGED\s+VERSION|FINAL\s+NOTE)[:\s]*([\s\S]*)$/i);
     if (anyMergedHeaderMatch) {
@@ -279,39 +489,6 @@ function parseOllamaResponse(rawText) {
       mergedNote = mergedNote.replace(/^```markdown\s*/i, '').replace(/\s*```$/, '').trim();
     } else if (mergedNote.startsWith('```')) {
       mergedNote = mergedNote.replace(/^```\s*/, '').replace(/\s*```$/, '').trim();
-    }
-  }
-
-  // 4. Fallback: try JSON (mock server in automated test suite or JSON responses)
-  if (!mergedNote) {
-    try {
-      let jsonStr = trimmed;
-      if (jsonStr.startsWith('```json')) {
-        jsonStr = jsonStr.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
-      } else if (jsonStr.startsWith('```')) {
-        jsonStr = jsonStr.replace(/^```\s*/, '').replace(/\s*```$/, '');
-      }
-      const jsonParsed = JSON.parse(jsonStr);
-      if (jsonParsed && typeof jsonParsed === 'object') {
-        mergedNote = jsonParsed.suggestedMerge || '';
-        explanation = jsonParsed.reasoning || jsonParsed.summary || '';
-        if (mergedNote && !isPlaceholderMerge(mergedNote)) {
-          return {
-            success: true,
-            data: {
-              conflictDetected: jsonParsed.conflictDetected !== undefined ? jsonParsed.conflictDetected : true,
-              conflictType: jsonParsed.conflictType || 'compatible',
-              reasoning: jsonParsed.reasoning || explanation || 'Merged compatible edits from both devices.',
-              summary: jsonParsed.summary || (explanation.length > 120 ? explanation.slice(0, 117) + '...' : explanation) || 'Edits reconciled successfully.',
-              changesFromAncestor: Array.isArray(jsonParsed.changesFromAncestor) ? jsonParsed.changesFromAncestor : ['Device A changes incorporated', 'Device B changes incorporated'],
-              changedSections: Array.isArray(jsonParsed.changedSections) ? jsonParsed.changedSections : [],
-              suggestedMerge: mergedNote
-            }
-          };
-        }
-      }
-    } catch (e) {
-      // Not JSON
     }
   }
 
@@ -335,10 +512,21 @@ function parseOllamaResponse(rawText) {
     data: {
       conflictDetected: true,
       conflictType: 'compatible',
+      semantic_analysis: explanation || 'Reconciled changes from both Device A and Device B.',
+      semanticAnalysis: explanation || 'Reconciled changes from both Device A and Device B.',
       reasoning: explanation || 'Reconciled changes from both Device A and Device B.',
       summary: explanation ? (explanation.length > 120 ? explanation.slice(0, 117) + '...' : explanation) : 'Edits reconciled successfully.',
+      common_information: [],
+      commonInformation: [],
+      local_unique_information: [],
+      localUniqueInformation: [],
+      remote_unique_information: [],
+      remoteUniqueInformation: [],
+      contradictions: [],
+      confidence: 'high',
       changesFromAncestor: ['Device A modifications merged', 'Device B modifications merged'],
       changedSections: [],
+      suggested_merge: mergedNote,
       suggestedMerge: mergedNote
     }
   };
@@ -351,10 +539,11 @@ function validateConflictResolution(data) {
   if (!data || typeof data !== 'object') {
     return { valid: false, reason: 'Invalid data object' };
   }
-  if (typeof data.suggestedMerge !== 'string' || !data.suggestedMerge.trim()) {
-    return { valid: false, reason: 'Missing suggestedMerge string' };
+  const merge = data.suggested_merge || data.suggestedMerge;
+  if (typeof merge !== 'string' || !merge.trim()) {
+    return { valid: false, reason: 'Missing suggested_merge string' };
   }
-  if (isPlaceholderMerge(data.suggestedMerge)) {
+  if (isPlaceholderMerge(merge)) {
     return { valid: false, reason: 'suggestedMerge contains placeholder text' };
   }
   return { valid: true, data };
@@ -388,11 +577,12 @@ async function generateSemanticConflictResolution({
     const payload = {
       model: config.model,
       prompt,
+      format: 'json',
       stream: false,
       keep_alive: '15m', // Keep model in RAM to eliminate cold-reload delay
       options: {
         temperature: 0.1,
-        num_predict: 400 // Bound token generation to prevent runaway output on CPU
+        num_predict: 500 // Bound token generation to prevent runaway output on CPU
       }
     };
 
@@ -404,7 +594,7 @@ async function generateSemanticConflictResolution({
     }
 
     const rawResponse = res.data.response;
-    const parsedResult = parseOllamaResponse(rawResponse);
+    const parsedResult = parseOllamaResponse(rawResponse, { localContent, remoteContent });
 
     if (!parsedResult.success) {
       console.warn(`[Ollama] Parse error: ${parsedResult.reason}`);
@@ -427,6 +617,7 @@ async function generateSemanticConflictResolution({
     console.warn(`[OllamaService Notice] Local AI conflict resolution unavailable (${err.message}). Falling back to manual resolution.`);
     console.log('[Ollama]\nConflict analysis completed');
 
+    const fallbackSummary = `Concurrent edits detected. Local AI assistant is currently offline or model '${config.model}' timed out (${err.message}).`;
     return {
       success: false,
       available: false,
@@ -435,13 +626,24 @@ async function generateSemanticConflictResolution({
       error: err.message,
       data: {
         conflictDetected: true,
-        summary: `Concurrent edits detected. Local AI assistant is currently offline or model '${config.model}' timed out (${err.message}).`,
+        semantic_analysis: fallbackSummary,
+        semanticAnalysis: fallbackSummary,
+        summary: fallbackSummary,
+        reasoning: 'AI resolution unavailable. Please review versions manually and select Keep Local, Keep Remote, or Edit & Accept.',
+        common_information: [],
+        commonInformation: [],
+        local_unique_information: [`${localDeviceName} created independent changes.`],
+        localUniqueInformation: [`${localDeviceName} created independent changes.`],
+        remote_unique_information: [`${remoteDeviceName} created independent changes.`],
+        remoteUniqueInformation: [`${remoteDeviceName} created independent changes.`],
+        contradictions: [],
+        confidence: 'low',
         changesFromAncestor: [
           `${localDeviceName} created independent changes.`,
           `${remoteDeviceName} created independent changes.`
         ],
-        suggestedMerge: localContent, // Safe fallback suggestion to local content for manual review
-        reasoning: 'AI resolution unavailable. Please review versions manually and select Keep A, Keep B, or Edit Merge.'
+        suggested_merge: localContent,
+        suggestedMerge: localContent // Safe fallback suggestion to local content for manual review
       }
     };
   }

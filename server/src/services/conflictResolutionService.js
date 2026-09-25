@@ -94,10 +94,16 @@ async function createOrRecordConflict({
       // 5. Update conflict record with AI response
       const updatedConflict = ConflictModel.updateAiStatus(conflictRecord.id, {
         aiStatus: aiResult.available ? 'AVAILABLE' : 'UNAVAILABLE',
-        aiSummary: aiResult.data.summary,
+        aiSummary: aiResult.data.summary || aiResult.data.semantic_analysis,
         aiChanges: aiResult.data.changesFromAncestor,
-        aiSuggestedMerge: aiResult.data.suggestedMerge,
-        aiReasoning: aiResult.data.reasoning,
+        aiSuggestedMerge: aiResult.data.suggested_merge || aiResult.data.suggestedMerge,
+        aiReasoning: aiResult.data.reasoning || aiResult.data.semantic_analysis,
+        aiSemanticAnalysis: aiResult.data.semantic_analysis || aiResult.data.reasoning || aiResult.data.summary,
+        aiCommonInfo: aiResult.data.common_information || [],
+        aiLocalUnique: aiResult.data.local_unique_information || [],
+        aiRemoteUnique: aiResult.data.remote_unique_information || [],
+        aiContradictions: aiResult.data.contradictions || [],
+        aiConfidence: aiResult.data.confidence || 'high',
         aiError: aiResult.error || null,
         aiLatencyMs: aiResult.latencyMs
       }, currentUserId);
@@ -141,10 +147,16 @@ async function retryAiAnalysis(conflictId, userId) {
 
       return ConflictModel.updateAiStatus(conflictId, {
         aiStatus: aiResult.available ? 'AVAILABLE' : 'UNAVAILABLE',
-        aiSummary: aiResult.data.summary,
+        aiSummary: aiResult.data.summary || aiResult.data.semantic_analysis,
         aiChanges: aiResult.data.changesFromAncestor,
-        aiSuggestedMerge: aiResult.data.suggestedMerge,
-        aiReasoning: aiResult.data.reasoning,
+        aiSuggestedMerge: aiResult.data.suggested_merge || aiResult.data.suggestedMerge,
+        aiReasoning: aiResult.data.reasoning || aiResult.data.semantic_analysis,
+        aiSemanticAnalysis: aiResult.data.semantic_analysis || aiResult.data.reasoning || aiResult.data.summary,
+        aiCommonInfo: aiResult.data.common_information || [],
+        aiLocalUnique: aiResult.data.local_unique_information || [],
+        aiRemoteUnique: aiResult.data.remote_unique_information || [],
+        aiContradictions: aiResult.data.contradictions || [],
+        aiConfidence: aiResult.data.confidence || 'high',
         aiError: aiResult.error || null,
         aiLatencyMs: aiResult.latencyMs
       }, userId);
@@ -390,6 +402,7 @@ async function resolveConflict({
 
   return {
     success: true,
+    resolvedVersionId: newVerId,
     newVersionId: newVerId,
     versionId: newVerId,
     message: `Conflict resolved successfully as Version V${nextVerNum}`,

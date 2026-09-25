@@ -211,7 +211,8 @@ function buildNotesWithResolutionMetadata(eligibleNotes, currentUserId) {
  * Integrates with AI-Assisted Semantic Conflict Resolution.
  * Ensures complete idempotency and zero duplicate versions.
  */
-async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebooks = [], senderDevice, currentUserId) {
+async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebooks = [], senderDevice, currentUserId, options = {}) {
+  const isInboundSync = Boolean(options.isInboundSync);
   const appliedNotes = [];
   const conflicts = [];
 
@@ -283,60 +284,6 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
       const localContent = readNoteFile(existing.file_path);
       const localHash = calculateHash(localContent);
 
-      // IDEMPOTENCY CHECK (Case 1 & Case 5): Identical content -> SKIP completely! No duplicate version.
-      if (localHash === remoteHash || localContent === remoteContent) {
-        // Content is identical: nothing to sync for content, but do NOT auto-resolve any active conflicts.
-        // Conflicts require explicit user resolution — content identity alone does not resolve them.
-        // A conflict could have been recorded between two DIFFERENT versions and still be unresolved
-        // even if the remote happens to send the same content now.
-
-        // Ensure local version checkpoint exists in versions table and current_version_id is set
-        const localVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
-        const resolvedVersionId = existing.current_version_id || remoteNote.current_version_id || (localVersion ? localVersion.id : null);
-        if (!localVersion || !existing.current_version_id) {
-          const vId = resolvedVersionId || generateVersionId();
-          const diffHunks = computeLineDiffHunks('', localContent);
-          VersionModel.createCheckpointTransaction({
-            id: vId,
-            note_id: existing.id,
-            version_number: 1,
-            parent_version_id: null,
-            message: 'Baseline checkpoint',
-            device_id: 'local_device',
-            created_at: existing.created_at || new Date().toISOString(),
-            content_hash: localHash,
-            is_snapshot: 1,
-            is_auto: 0
-          }, diffHunks, existing.id, currentUserId);
-        }
-
-        if ((remoteNote.title && remoteNote.title !== existing.title) || 
-            (remoteNote.notebook_id && remoteNote.notebook_id !== existing.notebook_id) ||
-            !existing.current_version_id) {
-          NoteModel.update(
-            existing.id,
-            remoteNote.title || existing.title,
-            existing.file_path,
-            remoteNote.notebook_id || existing.notebook_id,
-            existing.content_hash,
-            resolvedVersionId,
-            currentUserId,
-            remoteNote.sync_mode || existing.sync_mode
-          );
-        }
-        const activeConflictsCheck = ConflictModel.getByNoteId(existing.id, currentUserId, true);
-        if (activeConflictsCheck.length === 0) {
-          NoteModel.updateSyncMetadata(existing.id, currentUserId, {
-            lastSyncedHash: localHash,
-            lastSyncedAt: new Date().toISOString(),
-            syncState: 'SYNCED',
-            syncError: null
-          });
-        }
-        appliedNotes.push({ id: existing.id, action: 'UNCHANGED' });
-        continue;
-      }
-
       // Check if incoming note is an authoritative conflict resolution from peer.
       // A version is ONLY a resolution when it explicitly carries resolution metadata.
       // NEVER use version_message string matching — it is too fragile and creates false positives.
@@ -349,17 +296,11 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
 
       // Verify whether incoming resolution can be safely applied without overwriting newer local edits
       let canApplyResolution = isResolution;
-      if (isResolution) {
-        if (activeConflicts.length > 0) {
-          const activeC = activeConflicts[0];
-          // If local note was modified since active conflict was recorded, do not silently overwrite
-          if (activeC.local_content && localContent !== activeC.local_content) {
-            console.log(`[LAN Resolution Sync] Local note ${existing.id} was edited since conflict; refusing silent resolution overwrite.`);
-            canApplyResolution = false;
-          }
-        } else if (existing.last_synced_hash && localHash !== existing.last_synced_hash && localHash !== remoteHash) {
-          // Local note was modified independently while not in conflict
-          console.log(`[LAN Resolution Sync] Local note ${existing.id} has uncommitted independent edits; refusing silent resolution overwrite.`);
+      if (isResolution && activeConflicts.length > 0) {
+        const activeC = activeConflicts[0];
+        // If local note was modified since active conflict was recorded, do not silently overwrite
+        if (activeC.local_content && localContent !== activeC.local_content) {
+          console.log(`[LAN Resolution Sync] Local note ${existing.id} was edited since conflict; refusing silent resolution overwrite.`);
           canApplyResolution = false;
         }
       }
@@ -367,8 +308,10 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
       if (canApplyResolution) {
         console.log(`[LAN Resolution Sync] Received resolved version ${remoteNote.current_version_id}`);
 
-        // Write resolved content to disk
-        writeNoteFile(existing.file_path, remoteContent);
+        // Write resolved content to disk if changed
+        if (localContent !== remoteContent) {
+          writeNoteFile(existing.file_path, remoteContent);
+        }
 
         const existingVer = VersionModel.getById(remoteNote.current_version_id, currentUserId);
         const latestLocalVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
@@ -424,6 +367,60 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
 
         console.log(`[LAN Resolution Sync] Applied resolved version to note ${existing.id}`);
         appliedNotes.push({ id: existing.id, action: 'RESOLVED_FROM_PEER', versionId: remoteNote.current_version_id });
+        continue;
+      }
+
+      // IDEMPOTENCY CHECK (Case 1 & Case 5): Identical content -> SKIP completely! No duplicate version.
+      if (localHash === remoteHash || localContent === remoteContent) {
+        // Content is identical: nothing to sync for content, but do NOT auto-resolve any active conflicts.
+        // Conflicts require explicit user resolution — content identity alone does not resolve them.
+        // A conflict could have been recorded between two DIFFERENT versions and still be unresolved
+        // even if the remote happens to send the same content now.
+
+        // Ensure local version checkpoint exists in versions table and current_version_id is set
+        const localVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
+        const resolvedVersionId = existing.current_version_id || remoteNote.current_version_id || (localVersion ? localVersion.id : null);
+        if (!localVersion || !existing.current_version_id) {
+          const vId = resolvedVersionId || generateVersionId();
+          const diffHunks = computeLineDiffHunks('', localContent);
+          VersionModel.createCheckpointTransaction({
+            id: vId,
+            note_id: existing.id,
+            version_number: 1,
+            parent_version_id: null,
+            message: 'Baseline checkpoint',
+            device_id: 'local_device',
+            created_at: existing.created_at || new Date().toISOString(),
+            content_hash: localHash,
+            is_snapshot: 1,
+            is_auto: 0
+          }, diffHunks, existing.id, currentUserId);
+        }
+
+        if ((remoteNote.title && remoteNote.title !== existing.title) || 
+            (remoteNote.notebook_id && remoteNote.notebook_id !== existing.notebook_id) ||
+            !existing.current_version_id) {
+          NoteModel.update(
+            existing.id,
+            remoteNote.title || existing.title,
+            existing.file_path,
+            remoteNote.notebook_id || existing.notebook_id,
+            existing.content_hash,
+            resolvedVersionId,
+            currentUserId,
+            remoteNote.sync_mode || existing.sync_mode
+          );
+        }
+        const activeConflictsCheck = ConflictModel.getByNoteId(existing.id, currentUserId, true);
+        if (activeConflictsCheck.length === 0) {
+          NoteModel.updateSyncMetadata(existing.id, currentUserId, {
+            lastSyncedHash: localHash,
+            lastSyncedAt: new Date().toISOString(),
+            syncState: 'SYNCED',
+            syncError: null
+          });
+        }
+        appliedNotes.push({ id: existing.id, action: 'UNCHANGED' });
         continue;
       }
 
@@ -526,6 +523,20 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
       console.log(`Concurrent divergence: ${Boolean(concurrentDivergence)}`);
 
       if (concurrentDivergence) {
+        if (isInboundSync) {
+          console.log(`[Conflict Check]`);
+          console.log(`Concurrent divergence detected for note ${existing.id} on receiving peer.`);
+          console.log(`Deferring conflict resolution UI to initiating device. Leaving local note untouched.`);
+          appliedNotes.push({ 
+            id: existing.id, 
+            action: 'CONFLICT_PENDING_INITIATOR', 
+            noteId: existing.id,
+            localContent,
+            remoteContent
+          });
+          continue;
+        }
+
         console.log(`[Conflict Check]`);
         console.log(`CONFLICT DETECTED - blocking automatic remote application`);
 
@@ -570,11 +581,23 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
           ai_changes: conflictRecord.ai_changes,
           ai_suggested_merge: conflictRecord.ai_suggested_merge,
           ai_reasoning: conflictRecord.ai_reasoning,
+          ai_semantic_analysis: conflictRecord.ai_semantic_analysis || conflictRecord.ai_reasoning || conflictRecord.ai_summary,
+          ai_common_info: conflictRecord.ai_common_info || [],
+          ai_local_unique: conflictRecord.ai_local_unique || [],
+          ai_remote_unique: conflictRecord.ai_remote_unique || [],
+          ai_contradictions: conflictRecord.ai_contradictions || [],
+          ai_confidence: conflictRecord.ai_confidence || 'high',
           aiStatus: conflictRecord.ai_status,
           aiSummary: conflictRecord.ai_summary,
           aiChanges: conflictRecord.ai_changes,
           aiSuggestedMerge: conflictRecord.ai_suggested_merge,
           aiReasoning: conflictRecord.ai_reasoning,
+          aiSemanticAnalysis: conflictRecord.ai_semantic_analysis || conflictRecord.ai_reasoning || conflictRecord.ai_summary,
+          aiCommonInfo: conflictRecord.ai_common_info || [],
+          aiLocalUnique: conflictRecord.ai_local_unique || [],
+          aiRemoteUnique: conflictRecord.ai_remote_unique || [],
+          aiContradictions: conflictRecord.ai_contradictions || [],
+          aiConfidence: conflictRecord.ai_confidence || 'high',
           localUpdated: existing.updated_at,
           remoteUpdated: remoteNote.updated_at,
           remote_device_name: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer',
@@ -655,6 +678,18 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         appliedNotes.push({ id: existing.id, action: 'UNCHANGED_LOCAL_AHEAD' });
       } else {
         // Fallback: Concurrent divergence
+        if (isInboundSync) {
+          console.log(`[LAN Inbound Sync] Concurrent divergence fallback detected for note ${existing.id} on receiving peer.`);
+          appliedNotes.push({ 
+            id: existing.id, 
+            action: 'CONFLICT_PENDING_INITIATOR', 
+            noteId: existing.id,
+            localContent,
+            remoteContent
+          });
+          continue;
+        }
+
         NoteModel.updateSyncMetadata(existing.id, currentUserId, {
           syncState: 'CONFLICT',
           syncError: 'Conflict detected - awaiting resolution'
@@ -694,11 +729,23 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
           ai_changes: conflictRecord.ai_changes,
           ai_suggested_merge: conflictRecord.ai_suggested_merge,
           ai_reasoning: conflictRecord.ai_reasoning,
+          ai_semantic_analysis: conflictRecord.ai_semantic_analysis || conflictRecord.ai_reasoning || conflictRecord.ai_summary,
+          ai_common_info: conflictRecord.ai_common_info || [],
+          ai_local_unique: conflictRecord.ai_local_unique || [],
+          ai_remote_unique: conflictRecord.ai_remote_unique || [],
+          ai_contradictions: conflictRecord.ai_contradictions || [],
+          ai_confidence: conflictRecord.ai_confidence || 'high',
           aiStatus: conflictRecord.ai_status,
           aiSummary: conflictRecord.ai_summary,
           aiChanges: conflictRecord.ai_changes,
           aiSuggestedMerge: conflictRecord.ai_suggested_merge,
           aiReasoning: conflictRecord.ai_reasoning,
+          aiSemanticAnalysis: conflictRecord.ai_semantic_analysis || conflictRecord.ai_reasoning || conflictRecord.ai_summary,
+          aiCommonInfo: conflictRecord.ai_common_info || [],
+          aiLocalUnique: conflictRecord.ai_local_unique || [],
+          aiRemoteUnique: conflictRecord.ai_remote_unique || [],
+          aiContradictions: conflictRecord.ai_contradictions || [],
+          aiConfidence: conflictRecord.ai_confidence || 'high',
           localUpdated: existing.updated_at,
           remoteUpdated: remoteNote.updated_at,
           remote_device_name: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer',
@@ -1088,7 +1135,8 @@ router.post('/sync', async (req, res) => {
       decryptedPayload.notes || [],
       decryptedPayload.notebooks || [],
       senderDevice,
-      currentUserId
+      currentUserId,
+      { isInboundSync: true }
     );
 
     // 6. Gather local notes eligible for LAN sync (strictly sync_mode === 'lan' || sync_mode === 'both')
@@ -1893,7 +1941,8 @@ router.post('/sync/outbound', async (req, res) => {
       remoteData.localLanNotes || [],
       remoteData.localNotebooks || [],
       peer,
-      currentUserId
+      currentUserId,
+      { isInboundSync: false }
     );
 
     // Merge conflicts detected on both local node and peer node

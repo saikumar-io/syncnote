@@ -5,7 +5,6 @@ import CheckpointModal from './CheckpointModal';
 import VersionHistoryDrawer from './VersionHistoryDrawer';
 import DiffViewerModal from './DiffViewerModal';
 import VersionPreviewModal from './VersionPreviewModal';
-import ConflictResolverModal from './ConflictResolverModal';
 import SyncModeModal from './SyncModeModal';
 import { NoteSyncBadge } from './NoteListColumn';
 import { formatRelativeTime } from '../utils/timeUtils';
@@ -71,7 +70,6 @@ export default function MainContent({
   const [showCheckpointModal, setShowCheckpointModal] = useState(false);
   const [showDiffModal, setShowDiffModal] = useState(false);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
-  const [showConflictModal, setShowConflictModal] = useState(false);
 
   const [historyList, setHistoryList] = useState([]);
   const [selectedDiffData, setSelectedDiffData] = useState(null);
@@ -894,10 +892,8 @@ export default function MainContent({
                   className="btn-recovery btn-checkpoint"
                   style={{ background: '#ef4444', color: '#ffffff' }}
                   onClick={() => {
-                    if (openConflictModal && activeNoteConflict) {
-                      openConflictModal(activeNoteConflict);
-                    } else {
-                      setShowConflictModal(true);
+                    if (openConflictModal) {
+                      openConflictModal(activeNoteConflict || selectedNote?.id);
                     }
                   }}
                 >
@@ -1090,17 +1086,6 @@ export default function MainContent({
         isLoading={isLoadingPreview}
         error={previewError}
         onRestore={handleRestoreVersion}
-      />
-
-      <ConflictResolverModal
-        isOpen={showConflictModal}
-        note={selectedNote}
-        conflict={activeNoteConflict}
-        onClose={() => setShowConflictModal(false)}
-        onResolved={(noteId, method) => {
-          onUpdateNote && onUpdateNote(noteId, { sync_state: 'SYNCED' });
-          window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
-        }}
       />
 
       <SyncModeModal
