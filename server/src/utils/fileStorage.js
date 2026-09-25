@@ -3,7 +3,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 // Configurable root directory for physical Markdown note storage
-const NOTES_ROOT = path.join(__dirname, '../../../notes');
+const NOTES_ROOT = process.env.NOTES_DIR || path.join(__dirname, '../../../notes');
 
 // Ensure root notes directory exists
 if (!fs.existsSync(NOTES_ROOT)) {

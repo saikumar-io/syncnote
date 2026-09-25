@@ -13,8 +13,8 @@ if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
-const dbPath = path.join(dataDir, 'syncnote.db');
-const backupDbPath = path.join(dataDir, 'syncnote.db.bak');
+const dbPath = process.env.SQLITE_DB_PATH || path.join(dataDir, 'syncnote.db');
+const backupDbPath = process.env.SQLITE_DB_PATH ? `${process.env.SQLITE_DB_PATH}.bak` : path.join(dataDir, 'syncnote.db.bak');
 
 // Safe Automatic Database Backup before schema initialization
 if (fs.existsSync(dbPath)) {
@@ -290,6 +290,14 @@ const initDatabase = () => {
     db.exec('ALTER TABLE versions ADD COLUMN is_auto INTEGER DEFAULT 0;');
   } catch (err) {}
 
+  try {
+    db.exec('ALTER TABLE versions ADD COLUMN resolved_conflict_id TEXT;');
+  } catch (err) {}
+
+  try {
+    db.exec('ALTER TABLE conflicts ADD COLUMN resolved_device_id TEXT;');
+  } catch (err) {}
+
   // Sync Metadata & Mode Columns on notes and notebooks
   try {
     db.exec("ALTER TABLE notes ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'local';");
@@ -369,6 +377,7 @@ const initDatabase = () => {
         ai_latency_ms INTEGER,
         resolution_method TEXT,
         resolved_version_id TEXT,
+        resolved_device_id TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         resolved_at DATETIME,
@@ -826,8 +835,8 @@ const VersionModel = {
       const existingVer = db.prepare('SELECT id FROM versions WHERE id = ?').get(versionData.id);
       if (!existingVer) {
         const stmtVer = db.prepare(`
-          INSERT INTO versions (id, note_id, version_number, parent_version_id, message, device_id, created_at, content_hash, is_snapshot, is_auto)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO versions (id, note_id, version_number, parent_version_id, message, device_id, created_at, content_hash, is_snapshot, is_auto, resolved_conflict_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         stmtVer.run(
           versionData.id,
@@ -839,7 +848,8 @@ const VersionModel = {
           versionData.created_at || new Date().toISOString(),
           versionData.content_hash,
           versionData.is_snapshot || 0,
-          versionData.is_auto || 0
+          versionData.is_auto || 0,
+          versionData.resolved_conflict_id || null
         );
 
         const stmtDiff = db.prepare(`
@@ -1400,18 +1410,19 @@ const ConflictModel = {
     return ConflictModel.getById(id, userId);
   },
 
-  resolve: (id, { resolutionMethod, resolvedVersionId, userId }) => {
+  resolve: (id, { resolutionMethod, resolvedVersionId, resolvedDeviceId, userId }) => {
     const now = new Date().toISOString();
     const stmt = db.prepare(`
       UPDATE conflicts
       SET status = 'RESOLVED',
           resolution_method = ?,
           resolved_version_id = ?,
+          resolved_device_id = COALESCE(?, resolved_device_id),
           resolved_at = ?,
           updated_at = ?
       WHERE id = ?
     `);
-    stmt.run(resolutionMethod, resolvedVersionId || null, now, now, id);
+    stmt.run(resolutionMethod, resolvedVersionId || null, resolvedDeviceId || null, now, now, id);
     return ConflictModel.getById(id, userId);
   },
 

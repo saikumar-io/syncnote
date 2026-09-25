@@ -232,7 +232,22 @@ function parseOllamaResponse(rawText) {
   if (expMatch) explanation = expMatch[1].trim();
 
   const noteMatch = trimmed.match(/<MERGED[_\s]NOTE>([\s\S]*?)(?:<\/MERGED[_\s]NOTE>|$)/i);
-  if (noteMatch) mergedNote = noteMatch[1].trim();
+  if (noteMatch) {
+    mergedNote = noteMatch[1].trim();
+  } else if (expMatch && trimmed.includes('</EXPLANATION>')) {
+    // If <EXPLANATION> was present and closed, but <MERGED_NOTE> tag was omitted
+    const afterExp = trimmed.slice(trimmed.indexOf('</EXPLANATION>') + '</EXPLANATION>'.length).trim();
+    if (afterExp) {
+      const cleanedAfter = afterExp
+        .replace(/^(?:#+\s*|\*{1,2})?(?:here is the |proposed |final )?merged (?:note|markdown|version|content)[:\s]*/i, '')
+        .replace(/^```(?:markdown)?\s*/i, '')
+        .replace(/\s*```$/, '')
+        .trim();
+      if (cleanedAfter && !isPlaceholderMerge(cleanedAfter)) {
+        mergedNote = cleanedAfter;
+      }
+    }
+  }
 
   // 2. Fallback: check for plain or markdown bold headers (e.g. "MERGED_NOTE:", "**MERGED_NOTE:**", "### MERGED NOTE:")
   if (!mergedNote) {

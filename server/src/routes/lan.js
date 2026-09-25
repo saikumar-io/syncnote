@@ -11,7 +11,8 @@ const {
   NoteModel, 
   NotebookModel,
   VersionModel,
-  SessionModel
+  SessionModel,
+  ConflictModel
 } = require('../db/database');
 const { 
   writeNoteFile, 
@@ -159,6 +160,30 @@ function compareSyncManifests(localManifest, remoteManifest) {
 }
 
 /**
+ * Build note sync payload with resolution metadata so peers recognize conflict resolutions
+ */
+function buildNotesWithResolutionMetadata(eligibleNotes, currentUserId) {
+  return eligibleNotes.map(n => {
+    const latestVer = VersionModel.getLatestForNote(n.id, currentUserId);
+    const conflicts = ConflictModel.getByNoteId(n.id, currentUserId, false);
+    const resolvedConflict = conflicts.find(c => c.status === 'RESOLVED' && c.resolved_version_id === (latestVer ? latestVer.id : n.current_version_id));
+
+    return {
+      ...n,
+      content: readNoteFile(n.file_path),
+      parent_version_id: latestVer ? latestVer.parent_version_id : null,
+      current_version_id: latestVer ? latestVer.id : n.current_version_id,
+      version_number: latestVer ? latestVer.version_number : null,
+      version_message: latestVer ? latestVer.message : null,
+      is_resolution: Boolean(resolvedConflict || latestVer?.resolved_conflict_id),
+      resolved_conflict_id: resolvedConflict ? resolvedConflict.id : (latestVer?.resolved_conflict_id || null),
+      resolution_method: resolvedConflict ? resolvedConflict.resolution_method : null,
+      conflicting_version_ids: resolvedConflict ? [resolvedConflict.local_version_id, resolvedConflict.remote_version_id].filter(Boolean) : []
+    };
+  });
+}
+
+/**
  * Ingest incoming notes and notebooks from a paired peer,
  * passing through the existing note storage and version control engine.
  * Integrates with AI-Assisted Semantic Conflict Resolution.
@@ -222,6 +247,17 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
 
       // IDEMPOTENCY CHECK (Case 1 & Case 5): Identical content -> SKIP completely! No duplicate version.
       if (localHash === remoteHash || localContent === remoteContent) {
+        // Clear any active unresolved conflict for this note since content is now reconciled/identical
+        const activeConflicts = ConflictModel.getByNoteId(existing.id, currentUserId, true);
+        for (const c of activeConflicts) {
+          ConflictModel.resolve(c.id, {
+            resolutionMethod: remoteNote.resolution_method || 'ACCEPT_AI',
+            resolvedVersionId: remoteNote.current_version_id || existing.current_version_id,
+            userId: currentUserId
+          });
+          console.log(`[LAN Resolution Sync] Conflict ${c.id} cleared locally`);
+        }
+
         // Ensure local version checkpoint exists in versions table and current_version_id is set
         const localVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
         const resolvedVersionId = existing.current_version_id || remoteNote.current_version_id || (localVersion ? localVersion.id : null);
@@ -263,6 +299,81 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
           syncError: null
         });
         appliedNotes.push({ id: existing.id, action: 'UNCHANGED' });
+        continue;
+      }
+
+      // Check if incoming note is an authoritative conflict resolution from peer
+      const activeConflicts = ConflictModel.getByNoteId(existing.id, currentUserId, true);
+      const isResolution = Boolean(
+        remoteNote.is_resolution ||
+        remoteNote.resolved_conflict_id ||
+        (activeConflicts.length > 0 && (
+          (remoteNote.conflicting_version_ids && remoteNote.conflicting_version_ids.includes(existing.current_version_id)) ||
+          remoteNote.version_message?.toLowerCase().includes('merge') ||
+          remoteNote.version_message?.toLowerCase().includes('resolved')
+        ))
+      );
+
+      if (isResolution) {
+        console.log(`[LAN Resolution Sync] Received resolved version ${remoteNote.current_version_id}`);
+
+        // Write resolved content to disk
+        writeNoteFile(existing.file_path, remoteContent);
+
+        const existingVer = VersionModel.getById(remoteNote.current_version_id, currentUserId);
+        const latestLocalVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
+        const nextVerNum = remoteNote.version_number || ((latestLocalVersion ? latestLocalVersion.version_number : 0) + 1);
+
+        if (!existingVer) {
+          const diffHunks = computeLineDiffHunks(localContent, remoteContent);
+          const versionData = {
+            id: remoteNote.current_version_id,
+            note_id: existing.id,
+            version_number: nextVerNum,
+            parent_version_id: latestLocalVersion ? latestLocalVersion.id : null,
+            message: remoteNote.version_message || `Resolved conflict via LAN sync from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'}`,
+            device_id: senderDevice.id || senderDevice.deviceId || 'remote_device',
+            created_at: remoteNote.updated_at || new Date().toISOString(),
+            content_hash: remoteHash,
+            is_snapshot: 0,
+            is_auto: 0,
+            resolved_conflict_id: remoteNote.resolved_conflict_id || null
+          };
+          VersionModel.createCheckpointTransaction(versionData, diffHunks, existing.id, currentUserId);
+        }
+
+        NoteModel.update(
+          existing.id,
+          remoteNote.title || existing.title,
+          existing.file_path,
+          remoteNote.notebook_id || existing.notebook_id,
+          remoteHash,
+          remoteNote.current_version_id,
+          currentUserId,
+          remoteNote.sync_mode || existing.sync_mode
+        );
+
+        NoteModel.updateSyncMetadata(existing.id, currentUserId, {
+          lastSyncedHash: remoteHash,
+          lastSyncedAt: new Date().toISOString(),
+          syncState: 'SYNCED',
+          syncError: null
+        });
+
+        SessionModel.upsert(existing.id, remoteNote.current_version_id, remoteHash, 'clean', currentUserId);
+
+        // Clear all active conflicts for this note locally
+        for (const c of activeConflicts) {
+          ConflictModel.resolve(c.id, {
+            resolutionMethod: remoteNote.resolution_method || 'ACCEPT_AI',
+            resolvedVersionId: remoteNote.current_version_id,
+            userId: currentUserId
+          });
+          console.log(`[LAN Resolution Sync] Conflict ${c.id} cleared locally`);
+        }
+
+        console.log(`[LAN Resolution Sync] Applied resolved version to note ${existing.id}`);
+        appliedNotes.push({ id: existing.id, action: 'RESOLVED_FROM_PEER', versionId: remoteNote.current_version_id });
         continue;
       }
 
@@ -788,15 +899,7 @@ router.post('/sync', async (req, res) => {
       localNotes = localNotes.filter(n => selectedNoteIds.includes(n.id));
     }
 
-    const localNotesWithContent = localNotes.map(n => {
-      const latestVer = VersionModel.getLatestForNote(n.id, currentUserId);
-      return {
-        ...n,
-        content: readNoteFile(n.file_path),
-        parent_version_id: latestVer ? latestVer.parent_version_id : null,
-        current_version_id: latestVer ? latestVer.id : n.current_version_id
-      };
-    });
+    const localNotesWithContent = buildNotesWithResolutionMetadata(localNotes, currentUserId);
     const localNotebooks = NotebookModel.getAll(currentUserId);
 
     const responseData = {
@@ -1564,15 +1667,7 @@ router.post('/sync/outbound', async (req, res) => {
       eligibleNotes = eligibleNotes.filter(n => selectedNoteIds.includes(n.id));
     }
 
-    const notesWithContent = eligibleNotes.map(n => {
-      const latestVer = VersionModel.getLatestForNote(n.id, currentUserId);
-      return {
-        ...n,
-        content: readNoteFile(n.file_path),
-        parent_version_id: latestVer ? latestVer.parent_version_id : null,
-        current_version_id: latestVer ? latestVer.id : n.current_version_id
-      };
-    });
+    const notesWithContent = buildNotesWithResolutionMetadata(eligibleNotes, currentUserId);
     const notebooks = NotebookModel.getAll(currentUserId);
 
     // 2. Transmit encrypted payload over LAN transport
@@ -1619,4 +1714,65 @@ router.post('/sync/outbound', async (req, res) => {
   }
 });
 
+/**
+ * Broadcast an accepted conflict resolution to all trusted paired peers over LAN
+ */
+async function broadcastResolvedNoteToPeers(noteId, resolvedVersionId, currentUserId = 'usr_local_default') {
+  const getPeers = LanPairingModel.getPairedDevices || LanPairingModel.getAllDevices || LanPairingModel.getAll;
+  const trustedPeers = (getPeers ? getPeers.call(LanPairingModel, currentUserId) : []).filter(p => p.status === 'TRUSTED');
+  if (!trustedPeers || trustedPeers.length === 0) return;
+
+  const note = NoteModel.getById(noteId, currentUserId);
+  if (!note) return;
+
+  const version = VersionModel.getById(resolvedVersionId, currentUserId);
+  const content = readNoteFile(note.file_path);
+  const contentHash = calculateHash(content);
+
+  const conflicts = ConflictModel.getByNoteId(noteId, currentUserId, false);
+  const resolvedConflict = conflicts.find(c => c.resolved_version_id === resolvedVersionId) || conflicts[0];
+
+  const resolvedNotePayload = {
+    ...note,
+    content,
+    content_hash: contentHash,
+    current_version_id: resolvedVersionId,
+    parent_version_id: version ? version.parent_version_id : null,
+    version_number: version ? version.version_number : null,
+    version_message: version ? version.message : null,
+    is_resolution: true,
+    resolved_conflict_id: resolvedConflict ? resolvedConflict.id : (version?.resolved_conflict_id || null),
+    resolution_method: resolvedConflict ? resolvedConflict.resolution_method : 'ACCEPT_AI',
+    conflicting_version_ids: resolvedConflict ? [resolvedConflict.local_version_id, resolvedConflict.remote_version_id].filter(Boolean) : []
+  };
+
+  const localProfile = getPublicDeviceProfile();
+  const notebooks = NotebookModel.getAll(currentUserId);
+
+  for (const peer of trustedPeers) {
+    if (!peer.device_ip) continue;
+    try {
+      const peerPort = peer.device_port || 5000;
+      const peerIp = cleanIp(peer.device_ip);
+      await sendEncryptedLanSync(
+        peerIp,
+        peerPort,
+        localProfile,
+        peer,
+        { notes: [resolvedNotePayload], notebooks }
+      );
+      console.log(`[LAN Resolution Sync] Successfully delivered resolved version ${resolvedVersionId} to peer '${peer.device_name}' (${peer.id})`);
+    } catch (err) {
+      console.log(`[LAN Resolution Sync] Peer '${peer.device_name}' (${peer.id}) is offline or unreachable (${err.message}). Resolution will sync when peer connects.`);
+    }
+  }
+}
+
+router.broadcastResolvedNoteToPeers = broadcastResolvedNoteToPeers;
+router.applyIncomingNotesAndNotebooks = applyIncomingNotesAndNotebooks;
+router.buildNotesWithResolutionMetadata = buildNotesWithResolutionMetadata;
+
 module.exports = router;
+module.exports.broadcastResolvedNoteToPeers = broadcastResolvedNoteToPeers;
+module.exports.applyIncomingNotesAndNotebooks = applyIncomingNotesAndNotebooks;
+module.exports.buildNotesWithResolutionMetadata = buildNotesWithResolutionMetadata;

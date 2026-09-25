@@ -276,7 +276,25 @@ async function resolveConflict({
     previousWorkingContent = readNoteFile(note.file_path);
   }
 
+  // Ensure remote conflicting branch is preserved in version history before creating resolution
+  if (conflict.remote_version_id && !VersionModel.getById(conflict.remote_version_id, currentUserId)) {
+    const diffHunksRemote = computeLineDiffHunks(conflict.ancestor_content || conflict.local_content || '', conflict.remote_content || '');
+    VersionModel.createCheckpointTransaction({
+      id: conflict.remote_version_id,
+      note_id: note.id,
+      version_number: (latestLocalVersion ? latestLocalVersion.version_number : 1),
+      parent_version_id: conflict.ancestor_version_id || (latestLocalVersion ? latestLocalVersion.parent_version_id : null),
+      message: `Remote conflicting branch from ${conflict.remote_device_name || 'peer'}`,
+      device_id: conflict.remote_device_id || 'remote_peer',
+      created_at: conflict.created_at || now,
+      content_hash: calculateHash(conflict.remote_content || ''),
+      is_snapshot: 0,
+      is_auto: 0
+    }, diffHunksRemote, note.id, currentUserId);
+  }
+
   // Create NEW version in version control tree (ensures zero history destroyed)
+  console.log(`[Conflict Resolution] Creating resolved version for conflict ${conflict.id}`);
   const diffHunks = computeLineDiffHunks(previousWorkingContent, finalContent);
   const nextVerNum = (latestLocalVersion ? latestLocalVersion.version_number : 0) + 1;
   const newVerId = `v${nextVerNum}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -292,11 +310,13 @@ async function resolveConflict({
     created_at: now,
     content_hash: newHash,
     is_snapshot: 0,
-    is_auto: 0
+    is_auto: 0,
+    resolved_conflict_id: conflict.id
   };
 
   // Commit version transaction
   const createdVersion = VersionModel.createCheckpointTransaction(versionData, diffHunks, note.id, currentUserId);
+  console.log(`[Conflict Resolution] Resolved version created: ${newVerId}`);
 
   // Write merged Markdown file to disk
   writeNoteFile(note.file_path, finalContent);
@@ -329,6 +349,7 @@ async function resolveConflict({
     resolvedVersionId: newVerId,
     userId: currentUserId
   });
+  console.log(`[Conflict Resolution] Marked conflict ${conflict.id} as RESOLVED`);
 
   // Record research evaluation metric
   ConflictModel.recordMetric({
@@ -354,8 +375,23 @@ async function resolveConflict({
 
   console.log(`[ConflictService] Successfully resolved conflict ${conflict.id} using '${resolutionMethod}'. Created Version V${nextVerNum} (${newVerId}).`);
 
+  // Trigger immediate LAN resolution broadcast to paired peers
+  try {
+    console.log(`[LAN Resolution Sync] Broadcasting resolved version ${newVerId}`);
+    const { broadcastResolvedNoteToPeers } = require('../routes/lan');
+    if (typeof broadcastResolvedNoteToPeers === 'function') {
+      broadcastResolvedNoteToPeers(note.id, newVerId, currentUserId).catch(err => {
+        console.warn(`[LAN Resolution Sync] Broadcast notice: ${err.message}`);
+      });
+    }
+  } catch (e) {
+    // Fail silently in test environments where LAN routes are not mounted
+  }
+
   return {
     success: true,
+    newVersionId: newVerId,
+    versionId: newVerId,
     message: `Conflict resolved successfully as Version V${nextVerNum}`,
     resolvedVersion: createdVersion,
     conflict: resolvedConflict,
