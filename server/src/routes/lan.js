@@ -167,21 +167,40 @@ function buildNotesWithResolutionMetadata(eligibleNotes, currentUserId) {
   return eligibleNotes.map(n => {
     const latestVer = VersionModel.getLatestForNote(n.id, currentUserId);
     const conflicts = ConflictModel.getByNoteId(n.id, currentUserId, false);
-    const resolvedConflict = conflicts.find(c => c.status === 'RESOLVED' && c.resolved_version_id === (latestVer ? latestVer.id : n.current_version_id));
+    const activeConflicts = ConflictModel.getByNoteId(n.id, currentUserId, true);
+    const fileContent = readNoteFile(n.file_path);
+    const currentHash = calculateHash(fileContent);
+
+    // Only flag as resolution if there are NO active conflicts on this note,
+    // note is not in CONFLICT state, disk content matches the latest version checkpoint,
+    // and that version was specifically created as the resolution of an actual resolved conflict.
+    const resolvedConflict = (activeConflicts.length === 0 && n.sync_state !== 'CONFLICT')
+      ? conflicts.find(c => c.status === 'RESOLVED' && c.resolved_version_id === (latestVer ? latestVer.id : n.current_version_id))
+      : null;
+
+    const isResolution = Boolean(
+      resolvedConflict &&
+      latestVer &&
+      resolvedConflict.resolved_version_id === latestVer.id &&
+      latestVer.content_hash === currentHash &&
+      activeConflicts.length === 0 &&
+      n.sync_state !== 'CONFLICT'
+    );
 
     const effectiveVerId = latestVer ? latestVer.id : n.current_version_id;
     return {
       ...n,
-      content: readNoteFile(n.file_path),
+      content: fileContent,
+      content_hash: currentHash,
       parent_version_id: latestVer ? latestVer.parent_version_id : null,
       current_version_id: effectiveVerId,
       version_number: latestVer ? latestVer.version_number : null,
       version_message: latestVer ? latestVer.message : null,
       ancestor_version_ids: getAncestorChain(effectiveVerId, VersionModel, currentUserId),
-      is_resolution: Boolean(resolvedConflict || latestVer?.resolved_conflict_id),
-      resolved_conflict_id: resolvedConflict ? resolvedConflict.id : (latestVer?.resolved_conflict_id || null),
-      resolution_method: resolvedConflict ? resolvedConflict.resolution_method : null,
-      conflicting_version_ids: resolvedConflict ? [resolvedConflict.local_version_id, resolvedConflict.remote_version_id].filter(Boolean) : []
+      is_resolution: isResolution,
+      resolved_conflict_id: isResolution && resolvedConflict ? resolvedConflict.id : null,
+      resolution_method: isResolution && resolvedConflict ? resolvedConflict.resolution_method : null,
+      conflicting_version_ids: isResolution && resolvedConflict ? [resolvedConflict.local_version_id, resolvedConflict.remote_version_id].filter(Boolean) : []
     };
   });
 }
@@ -323,11 +342,29 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
       // NEVER use version_message string matching — it is too fragile and creates false positives.
       const activeConflicts = ConflictModel.getByNoteId(existing.id, currentUserId, true);
       const isResolution = Boolean(
-        remoteNote.is_resolution === true ||
-        (remoteNote.resolved_conflict_id && typeof remoteNote.resolved_conflict_id === 'string')
+        remoteNote.is_resolution === true &&
+        remoteNote.resolved_conflict_id &&
+        typeof remoteNote.resolved_conflict_id === 'string'
       );
 
+      // Verify whether incoming resolution can be safely applied without overwriting newer local edits
+      let canApplyResolution = isResolution;
       if (isResolution) {
+        if (activeConflicts.length > 0) {
+          const activeC = activeConflicts[0];
+          // If local note was modified since active conflict was recorded, do not silently overwrite
+          if (activeC.local_content && localContent !== activeC.local_content) {
+            console.log(`[LAN Resolution Sync] Local note ${existing.id} was edited since conflict; refusing silent resolution overwrite.`);
+            canApplyResolution = false;
+          }
+        } else if (existing.last_synced_hash && localHash !== existing.last_synced_hash && localHash !== remoteHash) {
+          // Local note was modified independently while not in conflict
+          console.log(`[LAN Resolution Sync] Local note ${existing.id} has uncommitted independent edits; refusing silent resolution overwrite.`);
+          canApplyResolution = false;
+        }
+      }
+
+      if (canApplyResolution) {
         console.log(`[LAN Resolution Sync] Received resolved version ${remoteNote.current_version_id}`);
 
         // Write resolved content to disk
@@ -451,14 +488,28 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         remoteChanged = remoteContent.trim().length > 0;
       }
 
+      // If both devices share the same version ID but have different content hashes, both have changed
+      if (localVerId && remoteVerId && localVerId === remoteVerId && localHash !== remoteHash) {
+        localChanged = true;
+        remoteChanged = true;
+      }
+
+      // If last_synced_hash exists and differs from both local and remote, both changed since last sync
+      if (existing.last_synced_hash && existing.last_synced_hash !== localHash && existing.last_synced_hash !== remoteHash) {
+        localChanged = true;
+        remoteChanged = true;
+      }
+
       const hasActiveConflict = activeConflicts.length > 0;
 
       // Concurrent divergence: BOTH changed independently, or ancestry detects divergence, or active conflict exists
       const concurrentDivergence = Boolean(
         hasActiveConflict ||
+        existing.sync_state === 'CONFLICT' ||
         (localChanged && remoteChanged) ||
         ancestry.relationship === 'CONCURRENT_DIVERGENCE' ||
-        (ancestry.relationship === 'NO_COMMON_ANCESTOR' && localChanged && remoteChanged)
+        (ancestry.relationship === 'NO_COMMON_ANCESTOR' && (localChanged || remoteChanged)) ||
+        (localVerId === remoteVerId && localHash !== remoteHash)
       );
 
       // Diagnostic logging as specified in requirement 12
@@ -478,6 +529,12 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         console.log(`[Conflict Check]`);
         console.log(`CONFLICT DETECTED - blocking automatic remote application`);
 
+        // Mark note metadata with explicit conflict status
+        NoteModel.updateSyncMetadata(existing.id, currentUserId, {
+          syncState: 'CONFLICT',
+          syncError: 'Conflict detected - awaiting resolution'
+        });
+
         // Record persistent conflict and invoke modular local Ollama service
         const conflictRecord = await createOrRecordConflict({
           noteId: existing.id,
@@ -496,12 +553,23 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         console.log(`[ConflictService]\nCreated conflict ${conflictRecord.id}`);
 
         conflicts.push({
+          id: conflictRecord.id,
           conflictId: conflictRecord.id,
+          note_id: existing.id,
           noteId: existing.id,
+          note_title: existing.title,
           title: existing.title,
+          local_content: localContent,
+          remote_content: remoteContent,
+          ancestor_content: ancestorContent,
           localContent,
           remoteContent,
           ancestorContent,
+          ai_status: conflictRecord.ai_status,
+          ai_summary: conflictRecord.ai_summary,
+          ai_changes: conflictRecord.ai_changes,
+          ai_suggested_merge: conflictRecord.ai_suggested_merge,
+          ai_reasoning: conflictRecord.ai_reasoning,
           aiStatus: conflictRecord.ai_status,
           aiSummary: conflictRecord.ai_summary,
           aiChanges: conflictRecord.ai_changes,
@@ -509,6 +577,7 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
           aiReasoning: conflictRecord.ai_reasoning,
           localUpdated: existing.updated_at,
           remoteUpdated: remoteNote.updated_at,
+          remote_device_name: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer',
           deviceName: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer'
         });
 
@@ -520,10 +589,11 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
       const isFastForward = Boolean(
         !localChanged &&
         remoteChanged &&
+        !hasActiveConflict &&
+        existing.sync_state !== 'CONFLICT' &&
         (
           ancestry.relationship === 'A_ANCESTOR_OF_B' ||
           remoteParentId === localVerId ||
-          localContent.trim().length === 0 ||
           !latestLocalVersion
         )
       );
@@ -585,6 +655,11 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         appliedNotes.push({ id: existing.id, action: 'UNCHANGED_LOCAL_AHEAD' });
       } else {
         // Fallback: Concurrent divergence
+        NoteModel.updateSyncMetadata(existing.id, currentUserId, {
+          syncState: 'CONFLICT',
+          syncError: 'Conflict detected - awaiting resolution'
+        });
+
         const conflictRecord = await createOrRecordConflict({
           noteId: existing.id,
           userId: currentUserId,
@@ -602,12 +677,23 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         console.log(`[ConflictService]\nCreated conflict ${conflictRecord.id}`);
 
         conflicts.push({
+          id: conflictRecord.id,
           conflictId: conflictRecord.id,
+          note_id: existing.id,
           noteId: existing.id,
+          note_title: existing.title,
           title: existing.title,
+          local_content: localContent,
+          remote_content: remoteContent,
+          ancestor_content: ancestorContent,
           localContent,
           remoteContent,
           ancestorContent,
+          ai_status: conflictRecord.ai_status,
+          ai_summary: conflictRecord.ai_summary,
+          ai_changes: conflictRecord.ai_changes,
+          ai_suggested_merge: conflictRecord.ai_suggested_merge,
+          ai_reasoning: conflictRecord.ai_reasoning,
           aiStatus: conflictRecord.ai_status,
           aiSummary: conflictRecord.ai_summary,
           aiChanges: conflictRecord.ai_changes,
@@ -615,6 +701,7 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
           aiReasoning: conflictRecord.ai_reasoning,
           localUpdated: existing.updated_at,
           remoteUpdated: remoteNote.updated_at,
+          remote_device_name: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer',
           deviceName: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer'
         });
 
@@ -1802,12 +1889,83 @@ router.post('/sync/outbound', async (req, res) => {
     }
 
     // 3. Ingest received peer changes through existing note and version control engine
-    const { appliedNotes, conflicts } = await applyIncomingNotesAndNotebooks(
+    const { appliedNotes, conflicts: localConflicts } = await applyIncomingNotesAndNotebooks(
       remoteData.localLanNotes || [],
       remoteData.localNotebooks || [],
       peer,
       currentUserId
     );
+
+    // Merge conflicts detected on both local node and peer node
+    const combinedConflicts = [...localConflicts];
+    if (Array.isArray(remoteData.conflicts)) {
+      for (const rc of remoteData.conflicts) {
+        const rcNoteId = rc.noteId || rc.note_id;
+        const existsLocally = combinedConflicts.some(c => (c.noteId === rcNoteId || c.note_id === rcNoteId));
+        if (!existsLocally) {
+          const localExistingConflicts = ConflictModel.getByNoteId(rcNoteId, currentUserId, true);
+          if (localExistingConflicts.length > 0) {
+            const lc = localExistingConflicts[0];
+            combinedConflicts.push({
+              ...rc,
+              id: lc.id,
+              conflictId: lc.id,
+              noteId: lc.note_id,
+              note_id: lc.note_id,
+              localContent: lc.local_content,
+              local_content: lc.local_content,
+              aiSuggestedMerge: lc.ai_suggested_merge,
+              ai_suggested_merge: lc.ai_suggested_merge
+            });
+          } else {
+            const localNote = NoteModel.getById(rcNoteId, currentUserId);
+            if (localNote) {
+              NoteModel.updateSyncMetadata(localNote.id, currentUserId, {
+                syncState: 'CONFLICT',
+                syncError: 'Conflict detected - awaiting resolution'
+              });
+              const localContent = readNoteFile(localNote.file_path);
+              const conflictRecord = await createOrRecordConflict({
+                noteId: localNote.id,
+                userId: currentUserId,
+                ancestorVersionId: rc.ancestorVersionId || rc.ancestor_version_id || null,
+                ancestorContent: rc.ancestorContent || rc.ancestor_content || '',
+                localVersionId: localNote.current_version_id,
+                localContent,
+                remoteVersionId: rc.remoteVersionId || rc.remote_version_id || null,
+                remoteContent: rc.remoteContent || rc.remote_content || '',
+                remoteDeviceId: peer.id,
+                remoteDeviceName: peer.device_name || 'Remote Peer',
+                syncSource: 'LAN'
+              });
+              combinedConflicts.push({
+                ...rc,
+                id: conflictRecord.id,
+                conflictId: conflictRecord.id,
+                noteId: localNote.id,
+                note_id: localNote.id,
+                title: localNote.title,
+                note_title: localNote.title,
+                localContent,
+                local_content: localContent,
+                aiStatus: conflictRecord.ai_status,
+                ai_status: conflictRecord.ai_status,
+                aiSuggestedMerge: conflictRecord.ai_suggested_merge,
+                ai_suggested_merge: conflictRecord.ai_suggested_merge,
+                aiSummary: conflictRecord.ai_summary,
+                ai_summary: conflictRecord.ai_summary,
+                aiReasoning: conflictRecord.ai_reasoning,
+                ai_reasoning: conflictRecord.ai_reasoning,
+                aiChanges: conflictRecord.ai_changes,
+                ai_changes: conflictRecord.ai_changes
+              });
+            } else {
+              combinedConflicts.push(rc);
+            }
+          }
+        }
+      }
+    }
 
     // 4. Update last seen timestamp
     LanPairingModel.updateLastSeen(peer.id, peer.device_ip, peerPort);
@@ -1817,8 +1975,8 @@ router.post('/sync/outbound', async (req, res) => {
       deviceId: peer.id,
       deviceName: peer.device_name,
       appliedCount: appliedNotes.length,
-      conflictCount: conflicts.length,
-      conflicts,
+      conflictCount: combinedConflicts.length,
+      conflicts: combinedConflicts,
       details: appliedNotes
     });
   } catch (err) {

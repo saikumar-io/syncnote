@@ -232,6 +232,17 @@ router.post('/push', requireAuth, async (req, res) => {
             if (payload.id && payload.content !== undefined) {
               const note = NoteModel.getById(payload.id, userId);
               if (note) {
+                // Block writing if note is in conflict or has unresolved conflicts
+                const activeConflicts = ConflictModel.getByNoteId(note.id, userId, true);
+                if (activeConflicts && activeConflicts.length > 0) {
+                  console.log(`[Sync Queue Push] Note ${note.id} has active conflict, skipping write.`);
+                  break;
+                }
+                if (note.sync_state === 'CONFLICT') {
+                  console.log(`[Sync Queue Push] Note ${note.id} is in CONFLICT state, skipping write.`);
+                  break;
+                }
+
                 writeNoteFile(note.file_path, payload.content);
 
                 // If note has sync_mode === 'google' or 'cloud' or 'both', push to Google Drive dedicated app folder

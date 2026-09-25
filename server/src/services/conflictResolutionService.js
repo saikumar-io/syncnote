@@ -74,7 +74,7 @@ async function createOrRecordConflict({
   // Mark note's sync_state as CONFLICT in SQLite metadata
   NoteModel.updateSyncMetadata(noteId, currentUserId, {
     syncState: 'CONFLICT',
-    syncError: `Concurrent conflict detected from ${remoteDeviceName} via ${syncSource}`
+    syncError: 'Conflict detected - awaiting resolution'
   });
 
   console.log(`[ConflictService] Recorded concurrent conflict ${conflictRecord.id} for note ${noteId}. Invoking local AI assistant...`);

@@ -99,22 +99,25 @@ export default function ConflictResolverModal({
     setErrorMessage('');
 
     try {
+      const conflictId = conflict.id || conflict.conflictId;
+      const noteIdentifier = conflict.note_id || conflict.noteId;
+
       // If it's a recorded persistent conflict in SQLite
-      if (conflict.id && !conflict.id.startsWith('virtual_')) {
-        const res = await apiClient.post(`/api/conflicts/${conflict.id}/resolve`, {
+      if (conflictId && !String(conflictId).startsWith('virtual_')) {
+        const res = await apiClient.post(`/api/conflicts/${conflictId}/resolve`, {
           resolutionMethod,
           customContent: customText !== null ? customText : (resolutionMethod === 'EDIT_MERGE' ? editedContent : null)
         });
 
-        if (onResolved) onResolved(conflict.note_id, resolutionMethod, res);
+        if (onResolved) onResolved(noteIdentifier, resolutionMethod, res);
       } else {
         // Fallback for legacy cloud resolve endpoint if virtual
         const choice = resolutionMethod === 'KEEP_REMOTE' ? 'keep_cloud' : 'keep_local';
         await apiClient.post('/api/sync/gdrive/resolve-conflict', {
-          noteId: conflict.note_id,
+          noteId: noteIdentifier,
           choice
         });
-        if (onResolved) onResolved(conflict.note_id, resolutionMethod);
+        if (onResolved) onResolved(noteIdentifier, resolutionMethod);
       }
 
       onClose();
@@ -123,6 +126,15 @@ export default function ConflictResolverModal({
       setErrorMessage(err.message || 'Failed to resolve conflict. Please try again.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleKeepRemote = () => {
+    const confirmed = window.confirm(
+      `Are you sure you want to replace your local note version with the remote version from ${remoteDeviceName}? This will overwrite your local changes.`
+    );
+    if (confirmed) {
+      handleAction('KEEP_REMOTE');
     }
   };
 
@@ -376,32 +388,98 @@ export default function ConflictResolverModal({
                 marginBottom: '14px' 
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--accent-primary, #3b82f6)', fontWeight: 600, fontSize: '0.78rem', marginBottom: '6px' }}>
-                  <Info size={14} />
-                  <span>AI Semantic Explanation</span>
+                  <Sparkles size={14} />
+                  <span>AI Semantic Conflict Analysis & Merge Explanation</span>
                 </div>
                 <div style={{ fontSize: '0.76rem', color: 'var(--text-primary)', lineHeight: 1.5, marginBottom: '6px' }}>
-                  {conflict?.ai_summary || 'Both devices created independent changes from the common ancestor.'}
+                  {conflict?.ai_summary || conflict?.aiSummary || 'Both devices created independent changes from the common ancestor.'}
                 </div>
-                {conflict?.ai_reasoning && (
+                {(conflict?.ai_reasoning || conflict?.aiReasoning) && (
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontStyle: 'italic', borderTop: '1px solid rgba(59,130,246,0.15)', paddingTop: '6px', marginTop: '6px' }}>
-                    Reasoning: {conflict.ai_reasoning}
+                    Reasoning: {conflict.ai_reasoning || conflict.aiReasoning}
                   </div>
                 )}
-                {conflict?.ai_changes && conflict.ai_changes.length > 0 && (
+                {((conflict?.ai_changes && conflict.ai_changes.length > 0) || (conflict?.aiChanges && conflict.aiChanges.length > 0)) && (
                   <ul style={{ margin: '6px 0 0 16px', padding: 0, fontSize: '0.71rem', color: 'var(--text-secondary)' }}>
-                    {conflict.ai_changes.map((change, idx) => (
+                    {(conflict?.ai_changes || conflict?.aiChanges || []).map((change, idx) => (
                       <li key={idx}>{change}</li>
                     ))}
                   </ul>
                 )}
               </div>
 
-              {/* Merged Content Box */}
+              {/* Version Comparison Section: LOCAL VERSION vs REMOTE VERSION */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                {/* LOCAL VERSION */}
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                    <span style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--accent-primary, #3b82f6)', letterSpacing: '0.04em' }}>
+                      LOCAL VERSION
+                    </span>
+                    <span style={{ fontSize: '0.66rem', color: 'var(--text-muted)' }}>This Device</span>
+                  </div>
+                  <pre style={{
+                    margin: 0,
+                    height: '140px',
+                    overflowY: 'auto',
+                    background: 'var(--bg-input, #09090b)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid rgba(59, 130, 246, 0.3)',
+                    borderRadius: '6px',
+                    padding: '8px 10px',
+                    fontFamily: 'var(--font-mono, monospace)',
+                    fontSize: '0.72rem',
+                    lineHeight: 1.45,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    boxSizing: 'border-box'
+                  }}>
+                    {conflict?.local_content || conflict?.localContent || '(Empty)'}
+                  </pre>
+                </div>
+
+                {/* REMOTE VERSION */}
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                    <span style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--accent-emerald, #10b981)', letterSpacing: '0.04em' }}>
+                      REMOTE VERSION
+                    </span>
+                    <span style={{ fontSize: '0.66rem', color: 'var(--text-muted)' }}>{remoteDeviceName}</span>
+                  </div>
+                  <pre style={{
+                    margin: 0,
+                    height: '140px',
+                    overflowY: 'auto',
+                    background: 'var(--bg-input, #09090b)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid rgba(16, 185, 129, 0.3)',
+                    borderRadius: '6px',
+                    padding: '8px 10px',
+                    fontFamily: 'var(--font-mono, monospace)',
+                    fontSize: '0.72rem',
+                    lineHeight: 1.45,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    boxSizing: 'border-box'
+                  }}>
+                    {conflict?.remote_content || conflict?.remoteContent || '(Empty)'}
+                  </pre>
+                </div>
+              </div>
+
+              {/* AI SUGGESTED MERGE Section */}
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
-                  <span style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                    {isEditing ? 'Editing Merged Note Content' : 'AI Suggested Merged Content'}
-                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '0.04em' }}>
+                      AI SUGGESTED MERGE
+                    </span>
+                    {isEditing && (
+                      <span style={{ fontSize: '0.68rem', padding: '1px 6px', borderRadius: '4px', background: 'rgba(59, 130, 246, 0.2)', color: 'var(--accent-primary)' }}>
+                        Editing Mode
+                      </span>
+                    )}
+                  </div>
                   {!isEditing ? (
                     <button
                       type="button"
@@ -417,12 +495,12 @@ export default function ConflictResolverModal({
                         gap: '4px'
                       }}
                     >
-                      <Edit3 size={12} /> Tweak / Edit Merge
+                      <Edit3 size={12} /> Edit & Accept
                     </button>
                   ) : (
                     <button
                       type="button"
-                      onClick={() => { setIsEditing(false); setEditedContent(conflict?.ai_suggested_merge || ''); }}
+                      onClick={() => { setIsEditing(false); setEditedContent(conflict?.ai_suggested_merge || conflict?.aiSuggestedMerge || ''); }}
                       style={{ fontSize: '0.70rem', color: 'var(--text-muted)', background: 'transparent', border: 'none', cursor: 'pointer' }}
                     >
                       Reset to AI Suggestion
@@ -436,7 +514,7 @@ export default function ConflictResolverModal({
                     onChange={(e) => setEditedContent(e.target.value)}
                     style={{
                       width: '100%',
-                      height: '200px',
+                      height: '160px',
                       background: 'var(--bg-input, #09090b)',
                       color: 'var(--text-primary)',
                       border: '1px solid var(--accent-primary, #3b82f6)',
@@ -454,11 +532,11 @@ export default function ConflictResolverModal({
                   <pre style={{
                     margin: 0,
                     width: '100%',
-                    height: '200px',
+                    height: '160px',
                     overflowY: 'auto',
                     background: 'var(--bg-input, #09090b)',
                     color: 'var(--text-primary)',
-                    border: '1px solid var(--border-subtle, #27272a)',
+                    border: '1px solid rgba(59, 130, 246, 0.35)',
                     borderRadius: '6px',
                     padding: '10px',
                     fontFamily: 'var(--font-mono, monospace)',
@@ -468,37 +546,9 @@ export default function ConflictResolverModal({
                     wordBreak: 'break-word',
                     boxSizing: 'border-box'
                   }}>
-                    {conflict?.ai_suggested_merge || conflict?.local_content || '(Empty)'}
+                    {conflict?.ai_suggested_merge || conflict?.aiSuggestedMerge || conflict?.local_content || conflict?.localContent || '(Empty)'}
                   </pre>
                 )}
-              </div>
-
-              {/* Three-Way Source Context (Common Ancestor, Device A, Device B) */}
-              <div style={{ marginTop: '16px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' }}>
-                <div>
-                  <div style={{ fontSize: '0.70rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px', textTransform: 'uppercase' }}>
-                    COMMON ANCESTOR
-                  </div>
-                  <pre style={{ margin: 0, height: '110px', overflowY: 'auto', background: 'var(--bg-input, #09090b)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '8px', fontSize: '0.70rem', lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', boxSizing: 'border-box' }}>
-                    {conflict?.ancestor_content || '(Base state empty)'}
-                  </pre>
-                </div>
-                <div>
-                  <div style={{ fontSize: '0.70rem', fontWeight: 700, color: 'var(--accent-primary, #3b82f6)', marginBottom: '4px', textTransform: 'uppercase' }}>
-                    DEVICE A (Local)
-                  </div>
-                  <pre style={{ margin: 0, height: '110px', overflowY: 'auto', background: 'var(--bg-input, #09090b)', color: 'var(--text-primary)', border: '1px solid rgba(59, 130, 246, 0.3)', borderRadius: '6px', padding: '8px', fontSize: '0.70rem', lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', boxSizing: 'border-box' }}>
-                    {conflict?.local_content || '(Empty)'}
-                  </pre>
-                </div>
-                <div>
-                  <div style={{ fontSize: '0.70rem', fontWeight: 700, color: 'var(--accent-emerald, #10b981)', marginBottom: '4px', textTransform: 'uppercase' }}>
-                    DEVICE B ({remoteDeviceName})
-                  </div>
-                  <pre style={{ margin: 0, height: '110px', overflowY: 'auto', background: 'var(--bg-input, #09090b)', color: 'var(--text-primary)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '6px', padding: '8px', fontSize: '0.70rem', lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', boxSizing: 'border-box' }}>
-                    {conflict?.remote_content || '(Empty)'}
-                  </pre>
-                </div>
               </div>
             </div>
           )}
@@ -619,20 +669,20 @@ export default function ConflictResolverModal({
               onClick={() => handleAction('KEEP_LOCAL')}
               disabled={isSubmitting}
               style={{ fontSize: '0.74rem', padding: '6px 12px' }}
-              title="Preserve local version and create a resolution checkpoint"
+              title="Keep Local: preserve local version and create a resolution checkpoint"
             >
-              Keep A
+              Keep Local
             </button>
 
             <button
               type="button"
               className="btn-secondary"
-              onClick={() => handleAction('KEEP_REMOTE')}
+              onClick={handleKeepRemote}
               disabled={isSubmitting}
               style={{ fontSize: '0.74rem', padding: '6px 12px' }}
-              title="Accept remote peer version as the new checkpoint"
+              title="Keep Remote: replace local version with remote version only after confirmation"
             >
-              Keep B
+              Keep Remote
             </button>
 
             <button
@@ -648,9 +698,9 @@ export default function ConflictResolverModal({
                 borderRadius: '6px',
                 cursor: 'pointer'
               }}
-              title="Defer decision: keep both versions for later resolution"
+              title="Reject / Cancel: keep both versions unresolved and do not overwrite anything"
             >
-              Resolve Later
+              Reject / Cancel
             </button>
           </div>
 
@@ -669,8 +719,9 @@ export default function ConflictResolverModal({
                   alignItems: 'center',
                   gap: '6px'
                 }}
+                title="Save and commit your edited version"
               >
-                <Check size={14} /> Save & Commit Merged Version
+                <Check size={14} /> Accept Edited Version
               </button>
             ) : (
               <>
@@ -686,8 +737,9 @@ export default function ConflictResolverModal({
                     alignItems: 'center',
                     gap: '5px'
                   }}
+                  title="Edit and customize the merged version before accepting"
                 >
-                  <Edit3 size={13} /> Edit Merge
+                  <Edit3 size={13} /> Edit & Accept
                 </button>
 
                 <button

@@ -145,10 +145,17 @@ export default function LanSyncPage() {
 
     try {
       const res = await sync.triggerLanSync(devId);
-      const msg = res?.conflictCount > 0 
-        ? `Synced (${res.conflictCount} conflict copy created)` 
+      const isConflict = (res?.conflictCount || 0) > 0;
+      const msg = isConflict 
+        ? `Conflict detected (${res.conflictCount}) - awaiting resolution` 
         : 'Synced just now';
-      setDeviceMessages(prev => ({ ...prev, [devId]: { type: 'success', text: msg } }));
+      setDeviceMessages(prev => ({ 
+        ...prev, 
+        [devId]: { 
+          type: isConflict ? 'warning' : 'success', 
+          text: msg 
+        } 
+      }));
 
       // Immediately refresh presence and sync status to reflect '✓ Up to date'
       if (sync.checkDevicesPresence) {

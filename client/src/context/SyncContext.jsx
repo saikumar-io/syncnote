@@ -482,7 +482,12 @@ export function SyncProvider({ children }) {
       if (res && res.success) {
         if (res.conflictCount > 0) {
           setSyncStatus('CONFLICT');
-          setActiveConflicts(res.conflicts || []);
+          const conflictList = res.conflicts || [];
+          setActiveConflicts(conflictList);
+          setUnresolvedConflicts(conflictList);
+          if (conflictList.length > 0) {
+            setActiveConflictModal(conflictList[0]);
+          }
         } else {
           setSyncStatus('SYNCED');
         }
