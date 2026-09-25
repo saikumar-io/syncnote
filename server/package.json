@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node src/server.js",
-    "test:lan": "node tests/test_lan_security.js && node tests/test_lan_sync_two_nodes.js"
+    "test:lan": "node tests/test_lan_security.js && node tests/test_lan_sync_two_nodes.js",
+    "test:ai": "node tests/test_ai_conflict_resolution.js",
+    "test": "npm run test:lan && npm run test:ai"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

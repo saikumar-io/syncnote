@@ -5,7 +5,8 @@ const {
   SyncQueueModel, 
   NoteModel, 
   NotebookModel,
-  LanPairingModel
+  LanPairingModel,
+  ConflictModel
 } = require('../db/database');
 const { writeNoteFile, deleteNoteFile, readNoteFile } = require('../utils/fileStorage');
 
@@ -189,6 +190,16 @@ router.post('/gdrive/resolve-conflict', requireAuth, async (req, res) => {
         lastSyncedAt: new Date().toISOString(),
         syncState: 'SYNCED',
         syncError: null
+      });
+    }
+
+    // Also mark corresponding active conflict record as resolved in ConflictModel
+    const activeConflicts = ConflictModel.getByNoteId(noteId, userId, true);
+    if (activeConflicts.length > 0) {
+      ConflictModel.resolve(activeConflicts[0].id, {
+        resolutionMethod: choice === 'keep_local' ? 'KEEP_LOCAL' : 'KEEP_REMOTE',
+        resolvedVersionId: note.current_version_id,
+        userId
       });
     }
 

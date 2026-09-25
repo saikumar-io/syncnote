@@ -17,6 +17,7 @@ const notesRouter = require('./routes/notes');
 const notebooksRouter = require('./routes/notebooks');
 const syncRouter = require('./routes/sync');
 const lanRouter = require('./routes/lan');
+const conflictsRouter = require('./routes/conflicts');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -38,6 +39,7 @@ app.use('/api/version-control', notesRouter);
 app.use('/api/notebooks', notebooksRouter);
 app.use('/api/sync', syncRouter);
 app.use('/api/lan', lanRouter);
+app.use('/api/conflicts', conflictsRouter);
 
 // API Root Index Endpoint
 app.get('/', (req, res) => {

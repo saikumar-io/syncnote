@@ -59,6 +59,7 @@ function getGoogleAccountStatus(userId) {
 
 const { NoteModel, NotebookModel, GoogleDriveAuthModel, VersionModel } = require('../db/database');
 const { calculateHash, readNoteFile, writeNoteFile, getNoteFilePath, generateVersionId } = require('./fileStorage');
+const { createOrRecordConflict } = require('../services/conflictResolutionService');
 
 /**
  * Get connected Google Drive status (Cloud Storage) for a user
@@ -609,32 +610,64 @@ async function syncUserNotesWithGoogleDrive(userId) {
             const localHash = calculateHash(localContent);
             const isUnsyncedLocalEdits = localNote.sync_state === 'MODIFIED_OFFLINE' || (localNote.last_synced_hash && localHash !== localNote.last_synced_hash);
 
-            if (isUnsyncedLocalEdits) {
-              console.log(`[Google Drive Cloud Pull] Local note '${localNote.title}' has unsynced local edits. Preserving local version.`);
-              results.modifiedOffline++;
-            } else {
-              // Local note is SYNCED or untouched: download latest remote content
-              const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${cloudFile.id}?alt=media`, {
-                headers: { Authorization: `Bearer ${authInfo.accessToken}` }
-              });
-              if (fileRes.ok) {
-                const remoteContent = await fileRes.text();
-                const remoteHash = calculateHash(remoteContent);
+            const fileRes = await fetch(`https://www.googleapis.com/drive/v3/files/${cloudFile.id}?alt=media`, {
+              headers: { Authorization: `Bearer ${authInfo.accessToken}` }
+            });
 
-                if (remoteHash !== localHash || !localNote.gdrive_file_id) {
-                  writeNoteFile(localNote.file_path, remoteContent);
-                  NoteModel.update(localNote.id, localNote.title, localNote.file_path, localNote.notebook_id, remoteHash, localNote.current_version_id, userKey, 'cloud');
-                  NoteModel.updateSyncMetadata(localNote.id, userKey, {
-                    gdriveFileId: cloudFile.id,
-                    lastSyncedHash: remoteHash,
-                    lastSyncedAt: new Date().toISOString(),
-                    syncState: 'SYNCED',
-                    syncError: null
+            if (fileRes.ok) {
+              const remoteContent = await fileRes.text();
+              const remoteHash = calculateHash(remoteContent);
+
+              if (remoteHash === localHash) {
+                // Idempotent: both local and cloud are identical
+                NoteModel.updateSyncMetadata(localNote.id, userKey, {
+                  gdriveFileId: cloudFile.id,
+                  lastSyncedHash: remoteHash,
+                  lastSyncedAt: new Date().toISOString(),
+                  syncState: 'SYNCED',
+                  syncError: null
+                });
+                results.synced++;
+              } else if (isUnsyncedLocalEdits) {
+                // Local has unpushed offline edits
+                if (localNote.last_synced_hash && remoteHash === localNote.last_synced_hash) {
+                  // Cloud hasn't changed since last sync; only local changed (Case B)
+                  console.log(`[Google Drive Cloud Pull] Local note '${localNote.title}' has unsynced local edits, cloud unchanged. Preserving local.`);
+                  results.modifiedOffline++;
+                } else {
+                  // Concurrent conflict: Both local and cloud were modified independently! (Case C)
+                  console.log(`[Google Drive Cloud Pull] Concurrent conflict detected for '${localNote.title}'. Invoking AI conflict resolution...`);
+                  const conflictRecord = await createOrRecordConflict({
+                    noteId: localNote.id,
+                    userId: userKey,
+                    ancestorVersionId: localNote.current_version_id,
+                    ancestorContent: '',
+                    localVersionId: localNote.current_version_id,
+                    localContent,
+                    remoteVersionId: cloudFile.id,
+                    remoteContent,
+                    remoteDeviceId: 'google_drive',
+                    remoteDeviceName: 'Google Drive Cloud',
+                    syncSource: 'CLOUD'
                   });
-                  console.log(`[Google Drive Cloud Pull] Updated local note '${localNote.title}' from Drive.`);
-                  results.synced++;
-                  results.items.push({ id: localNote.id, title: localNote.title, state: 'PULLED', gdriveFileId: cloudFile.id });
+
+                  results.conflicts++;
+                  results.items.push({ id: localNote.id, title: localNote.title, state: 'CONFLICT', gdriveFileId: cloudFile.id, conflictId: conflictRecord.id });
                 }
+              } else {
+                // Local is clean, cloud has updated content (Case A: normal sync)
+                writeNoteFile(localNote.file_path, remoteContent);
+                NoteModel.update(localNote.id, localNote.title, localNote.file_path, localNote.notebook_id, remoteHash, localNote.current_version_id, userKey, 'cloud');
+                NoteModel.updateSyncMetadata(localNote.id, userKey, {
+                  gdriveFileId: cloudFile.id,
+                  lastSyncedHash: remoteHash,
+                  lastSyncedAt: new Date().toISOString(),
+                  syncState: 'SYNCED',
+                  syncError: null
+                });
+                console.log(`[Google Drive Cloud Pull] Updated local note '${localNote.title}' from Drive.`);
+                results.synced++;
+                results.items.push({ id: localNote.id, title: localNote.title, state: 'PULLED', gdriveFileId: cloudFile.id });
               }
             }
           } else {
@@ -702,6 +735,11 @@ async function syncUserNotesWithGoogleDrive(userId) {
     }
 
     try {
+      if (note.sync_state === 'CONFLICT') {
+        console.log(`[Google Drive Sync] Note '${note.title}' has an active CONFLICT. Skipping push to cloud until resolved.`);
+        continue;
+      }
+
       const currentContent = readNoteFile(note.file_path);
       const currentHash = calculateHash(currentContent);
 

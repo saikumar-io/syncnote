@@ -344,8 +344,67 @@ const initDatabase = () => {
     console.warn('[SQLite DB] Note during pairing table cleanup:', cleanErr.message);
   }
 
-  console.log('[SQLite DB] File-first database schema ready with Auth, Version Control, Sync Queue & LAN Pairing tables.');
-};
+    // 4. Create AI Semantic Conflict Resolution & Research Evaluation Tables
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS conflicts (
+        id TEXT PRIMARY KEY,
+        note_id TEXT NOT NULL,
+        user_id TEXT NOT NULL DEFAULT 'usr_local_default',
+        ancestor_version_id TEXT,
+        ancestor_content TEXT,
+        local_version_id TEXT,
+        local_content TEXT NOT NULL,
+        remote_version_id TEXT,
+        remote_content TEXT NOT NULL,
+        remote_device_id TEXT,
+        remote_device_name TEXT,
+        sync_source TEXT NOT NULL DEFAULT 'LAN',
+        status TEXT NOT NULL DEFAULT 'UNRESOLVED',
+        ai_status TEXT NOT NULL DEFAULT 'PENDING',
+        ai_summary TEXT,
+        ai_changes TEXT,
+        ai_suggested_merge TEXT,
+        ai_reasoning TEXT,
+        ai_error TEXT,
+        ai_latency_ms INTEGER,
+        resolution_method TEXT,
+        resolved_version_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        resolved_at DATETIME,
+        FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS conflict_metrics (
+        id TEXT PRIMARY KEY,
+        conflict_id TEXT NOT NULL,
+        note_id TEXT NOT NULL,
+        sync_source TEXT NOT NULL,
+        detected_at DATETIME,
+        resolved_at DATETIME,
+        resolution_duration_ms INTEGER,
+        ai_available INTEGER DEFAULT 0,
+        ai_model TEXT,
+        ai_latency_ms INTEGER,
+        resolution_method TEXT,
+        ai_suggestion_accepted INTEGER DEFAULT 0,
+        ai_suggestion_edited INTEGER DEFAULT 0,
+        ai_suggestion_rejected INTEGER DEFAULT 0,
+        manual_choice TEXT,
+        ancestor_length INTEGER DEFAULT 0,
+        local_length INTEGER DEFAULT 0,
+        remote_length INTEGER DEFAULT 0,
+        merged_length INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_conflicts_note_id ON conflicts(note_id);
+      CREATE INDEX IF NOT EXISTS idx_conflicts_user_status ON conflicts(user_id, status);
+      CREATE INDEX IF NOT EXISTS idx_conflict_metrics_conflict ON conflict_metrics(conflict_id);
+    `);
+
+    console.log('[SQLite DB] File-first database schema ready with Auth, Version Control, Sync Queue, LAN Pairing & AI Conflicts tables.');
+  };
 
 initDatabase();
 
@@ -1192,6 +1251,254 @@ const GoogleDriveAuthModel = {
   }
 };
 
+// AI Semantic Conflict Resolution & Research Evaluation Helper Methods
+const ConflictModel = {
+  create: ({
+    id,
+    noteId,
+    userId = 'usr_local_default',
+    ancestorVersionId = null,
+    ancestorContent = '',
+    localVersionId = null,
+    localContent = '',
+    remoteVersionId = null,
+    remoteContent = '',
+    remoteDeviceId = null,
+    remoteDeviceName = 'Peer Device',
+    syncSource = 'LAN'
+  }) => {
+    const conflictId = id || `conflict_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const now = new Date().toISOString();
+    const stmt = db.prepare(`
+      INSERT INTO conflicts (
+        id, note_id, user_id,
+        ancestor_version_id, ancestor_content,
+        local_version_id, local_content,
+        remote_version_id, remote_content,
+        remote_device_id, remote_device_name,
+        sync_source, status, ai_status,
+        created_at, updated_at
+      ) VALUES (
+        ?, ?, ?,
+        ?, ?,
+        ?, ?,
+        ?, ?,
+        ?, ?,
+        ?, 'UNRESOLVED', 'PENDING',
+        ?, ?
+      )
+    `);
+    stmt.run(
+      conflictId, noteId, userId,
+      ancestorVersionId, ancestorContent || '',
+      localVersionId, localContent || '',
+      remoteVersionId, remoteContent || '',
+      remoteDeviceId, remoteDeviceName,
+      syncSource,
+      now, now
+    );
+    return ConflictModel.getById(conflictId, userId);
+  },
+
+  getById: (id, userId) => {
+    if (userId) {
+      const stmt = db.prepare(`
+        SELECT c.*, n.title as note_title, n.file_path as note_file_path
+        FROM conflicts c
+        LEFT JOIN notes n ON c.note_id = n.id
+        WHERE c.id = ? AND (c.user_id = ? OR c.user_id = 'usr_local_default')
+      `);
+      const row = stmt.get(id, userId);
+      if (row) {
+        return {
+          ...row,
+          ai_changes: row.ai_changes ? (typeof row.ai_changes === 'string' ? JSON.parse(row.ai_changes) : row.ai_changes) : []
+        };
+      }
+    }
+    const stmtGlobal = db.prepare(`
+      SELECT c.*, n.title as note_title, n.file_path as note_file_path
+      FROM conflicts c
+      LEFT JOIN notes n ON c.note_id = n.id
+      WHERE c.id = ?
+    `);
+    const rowGlobal = stmtGlobal.get(id);
+    if (!rowGlobal) return null;
+    return {
+      ...rowGlobal,
+      ai_changes: rowGlobal.ai_changes ? (typeof rowGlobal.ai_changes === 'string' ? JSON.parse(rowGlobal.ai_changes) : rowGlobal.ai_changes) : []
+    };
+  },
+
+  getByNoteId: (noteId, userId, unresolvedOnly = true) => {
+    let sql = `
+      SELECT c.*, n.title as note_title
+      FROM conflicts c
+      LEFT JOIN notes n ON c.note_id = n.id
+      WHERE c.note_id = ?
+    `;
+    const params = [noteId];
+    if (userId) {
+      sql += ` AND (c.user_id = ? OR c.user_id = 'usr_local_default')`;
+      params.push(userId);
+    }
+    if (unresolvedOnly) {
+      sql += ` AND c.status = 'UNRESOLVED'`;
+    }
+    sql += ` ORDER BY c.created_at DESC`;
+    const rows = db.prepare(sql).all(...params);
+    return rows.map(row => ({
+      ...row,
+      ai_changes: row.ai_changes ? (typeof row.ai_changes === 'string' ? JSON.parse(row.ai_changes) : row.ai_changes) : []
+    }));
+  },
+
+  getUnresolved: (userId) => {
+    let sql = `
+      SELECT c.*, n.title as note_title, n.file_path as note_file_path
+      FROM conflicts c
+      LEFT JOIN notes n ON c.note_id = n.id
+      WHERE c.status = 'UNRESOLVED'
+    `;
+    const params = [];
+    if (userId) {
+      sql += ` AND (c.user_id = ? OR c.user_id = 'usr_local_default')`;
+      params.push(userId);
+    }
+    sql += ` ORDER BY c.created_at DESC`;
+    const rows = db.prepare(sql).all(...params);
+    return rows.map(row => ({
+      ...row,
+      ai_changes: row.ai_changes ? (typeof row.ai_changes === 'string' ? JSON.parse(row.ai_changes) : row.ai_changes) : []
+    }));
+  },
+
+  updateAiStatus: (id, {
+    aiStatus,
+    aiSummary = null,
+    aiChanges = null,
+    aiSuggestedMerge = null,
+    aiReasoning = null,
+    aiError = null,
+    aiLatencyMs = null
+  }, userId = null) => {
+    const now = new Date().toISOString();
+    const changesStr = Array.isArray(aiChanges) ? JSON.stringify(aiChanges) : (aiChanges || null);
+    const stmt = db.prepare(`
+      UPDATE conflicts
+      SET ai_status = ?,
+          ai_summary = COALESCE(?, ai_summary),
+          ai_changes = COALESCE(?, ai_changes),
+          ai_suggested_merge = COALESCE(?, ai_suggested_merge),
+          ai_reasoning = COALESCE(?, ai_reasoning),
+          ai_error = ?,
+          ai_latency_ms = COALESCE(?, ai_latency_ms),
+          updated_at = ?
+      WHERE id = ?
+    `);
+    stmt.run(aiStatus, aiSummary, changesStr, aiSuggestedMerge, aiReasoning, aiError, aiLatencyMs, now, id);
+    return ConflictModel.getById(id, userId);
+  },
+
+  resolve: (id, { resolutionMethod, resolvedVersionId, userId }) => {
+    const now = new Date().toISOString();
+    const stmt = db.prepare(`
+      UPDATE conflicts
+      SET status = 'RESOLVED',
+          resolution_method = ?,
+          resolved_version_id = ?,
+          resolved_at = ?,
+          updated_at = ?
+      WHERE id = ?
+    `);
+    stmt.run(resolutionMethod, resolvedVersionId || null, now, now, id);
+    return ConflictModel.getById(id, userId);
+  },
+
+  recordMetric: ({
+    conflictId,
+    noteId,
+    syncSource = 'LAN',
+    detectedAt,
+    resolvedAt = new Date().toISOString(),
+    resolutionDurationMs = null,
+    aiAvailable = 0,
+    aiModel = null,
+    aiLatencyMs = null,
+    resolutionMethod = 'UNKNOWN',
+    aiSuggestionAccepted = 0,
+    aiSuggestionEdited = 0,
+    aiSuggestionRejected = 0,
+    manualChoice = null,
+    ancestorLength = 0,
+    localLength = 0,
+    remoteLength = 0,
+    mergedLength = 0
+  }) => {
+    const metricId = `metric_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const now = new Date().toISOString();
+    const stmt = db.prepare(`
+      INSERT INTO conflict_metrics (
+        id, conflict_id, note_id, sync_source,
+        detected_at, resolved_at, resolution_duration_ms,
+        ai_available, ai_model, ai_latency_ms, resolution_method,
+        ai_suggestion_accepted, ai_suggestion_edited, ai_suggestion_rejected,
+        manual_choice, ancestor_length, local_length, remote_length, merged_length,
+        created_at
+      ) VALUES (
+        ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?
+      )
+    `);
+    stmt.run(
+      metricId, conflictId, noteId, syncSource,
+      detectedAt || now, resolvedAt, resolutionDurationMs,
+      aiAvailable ? 1 : 0, aiModel, aiLatencyMs, resolutionMethod,
+      aiSuggestionAccepted ? 1 : 0, aiSuggestionEdited ? 1 : 0, aiSuggestionRejected ? 1 : 0,
+      manualChoice, ancestorLength, localLength, remoteLength, mergedLength,
+      now
+    );
+    return metricId;
+  },
+
+  getMetrics: () => {
+    const all = db.prepare('SELECT * FROM conflict_metrics ORDER BY created_at DESC LIMIT 200').all();
+    const totalCount = all.length;
+    const aiAvailableCount = all.filter(m => m.ai_available === 1).length;
+    const aiAcceptedCount = all.filter(m => m.ai_suggestion_accepted === 1).length;
+    const aiEditedCount = all.filter(m => m.ai_suggestion_edited === 1).length;
+    const aiRejectedCount = all.filter(m => m.ai_suggestion_rejected === 1).length;
+    const manualKeepCount = all.filter(m => m.manual_choice && m.manual_choice !== 'NONE').length;
+
+    const latencies = all.map(m => m.ai_latency_ms).filter(l => typeof l === 'number' && l > 0);
+    const avgLatency = latencies.length > 0 ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : 0;
+
+    const durations = all.map(m => m.resolution_duration_ms).filter(d => typeof d === 'number' && d > 0);
+    const avgDuration = durations.length > 0 ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
+
+    return {
+      summary: {
+        totalConflicts: totalCount,
+        aiAvailableCount,
+        aiAvailableRate: totalCount > 0 ? Math.round((aiAvailableCount / totalCount) * 100) : 0,
+        aiAcceptedCount,
+        aiAcceptanceRate: aiAvailableCount > 0 ? Math.round((aiAcceptedCount / aiAvailableCount) * 100) : 0,
+        aiEditedCount,
+        aiEditRate: aiAvailableCount > 0 ? Math.round((aiEditedCount / aiAvailableCount) * 100) : 0,
+        aiRejectedCount,
+        manualKeepCount,
+        avgAiLatencyMs: avgLatency,
+        avgResolutionDurationMs: avgDuration
+      },
+      recentEvents: all.slice(0, 50)
+    };
+  }
+};
+
 module.exports = { 
   db, 
   UserModel, 
@@ -1203,5 +1510,6 @@ module.exports = {
   SyncQueueModel,
   LanPairingModel,
   LanPairingRequestModel,
-  GoogleDriveAuthModel
+  GoogleDriveAuthModel,
+  ConflictModel
 };

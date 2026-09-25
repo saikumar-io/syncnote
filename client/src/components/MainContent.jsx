@@ -56,6 +56,11 @@ export default function MainContent({
   const [viewMode, setViewMode] = useState('edit'); // 'edit' | 'preview'
   const [savingStatus, setSavingStatus] = useState('Saved locally');
 
+  const { unresolvedConflicts = [], openConflictModal } = useSync();
+  const activeNoteConflict = selectedNote 
+    ? (unresolvedConflicts.find(c => c.note_id === selectedNote.id) || (selectedNote.sync_state === 'CONFLICT' ? { note_id: selectedNote.id, note_title: selectedNote.title } : null))
+    : null;
+
   // Interactive Action Drawers & Modals State
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [showSyncDrawer, setShowSyncDrawer] = useState(false);
@@ -878,19 +883,25 @@ export default function MainContent({
           )}
 
           {/* Conflict Resolution Banner */}
-          {selectedNote && selectedNote.sync_state === 'CONFLICT' && (
+          {selectedNote && (selectedNote.sync_state === 'CONFLICT' || activeNoteConflict) && (
             <div className="session-recovery-banner" style={{ background: 'rgba(239, 68, 68, 0.12)', borderBottom: '1px solid rgba(239, 68, 68, 0.3)' }}>
               <div className="recovery-message">
                 <AlertTriangle size={15} style={{ color: '#ef4444' }} />
-                <span style={{ color: '#ef4444', fontWeight: 600 }}>Sync Conflict: Cloud and local changes conflict.</span>
+                <span style={{ color: '#ef4444', fontWeight: 600 }}>Sync Conflict: Concurrent independent edits exist for this note. AI assistance available.</span>
               </div>
               <div className="recovery-actions">
                 <button
                   className="btn-recovery btn-checkpoint"
                   style={{ background: '#ef4444', color: '#ffffff' }}
-                  onClick={() => setShowConflictModal(true)}
+                  onClick={() => {
+                    if (openConflictModal && activeNoteConflict) {
+                      openConflictModal(activeNoteConflict);
+                    } else {
+                      setShowConflictModal(true);
+                    }
+                  }}
                 >
-                  Resolve Conflict
+                  Resolve Conflict with AI
                 </button>
               </div>
             </div>
@@ -1084,9 +1095,11 @@ export default function MainContent({
       <ConflictResolverModal
         isOpen={showConflictModal}
         note={selectedNote}
+        conflict={activeNoteConflict}
         onClose={() => setShowConflictModal(false)}
-        onResolved={(noteId, choice) => {
+        onResolved={(noteId, method) => {
           onUpdateNote && onUpdateNote(noteId, { sync_state: 'SYNCED' });
+          window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
         }}
       />
 

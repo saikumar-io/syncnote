@@ -4,12 +4,21 @@ import { useNavigate } from '../utils/router';
 import { Check, RefreshCw, AlertCircle, WifiOff } from 'lucide-react';
 
 export default function GlobalSyncIndicator() {
-  const { syncStatus, pendingCount, triggerSync } = useSync();
+  const { 
+    syncStatus, 
+    pendingCount, 
+    triggerSync, 
+    unresolvedCount = 0, 
+    unresolvedConflicts = [], 
+    openConflictModal 
+  } = useSync();
   const navigate = useNavigate();
 
   const handleClick = (e) => {
     e.stopPropagation();
-    if (pendingCount > 0 && syncStatus !== 'SYNCING') {
+    if (unresolvedCount > 0 && unresolvedConflicts.length > 0 && openConflictModal) {
+      openConflictModal(unresolvedConflicts[0]);
+    } else if (pendingCount > 0 && syncStatus !== 'SYNCING') {
       triggerSync();
     } else {
       navigate('/settings');
@@ -17,6 +26,20 @@ export default function GlobalSyncIndicator() {
   };
 
   const renderBadgeContent = () => {
+    if (unresolvedCount > 0 || syncStatus === 'CONFLICT') {
+      const count = unresolvedCount || 1;
+      return (
+        <span 
+          className="global-sync-badge conflict" 
+          style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.35)' }}
+          title={`${count} concurrent conflict(s) detected. Click to resolve with AI.`}
+        >
+          <AlertCircle size={12} />
+          <span>⚠ {count} conflict{count > 1 ? 's' : ''}</span>
+        </span>
+      );
+    }
+
     if (syncStatus === 'SYNCING') {
       return (
         <span className="global-sync-badge syncing" title="Synchronizing changes...">

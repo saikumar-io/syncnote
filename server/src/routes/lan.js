@@ -30,8 +30,11 @@ const {
 } = require('../utils/deviceCrypto');
 const {
   computeLineDiffHunks,
-  reconstructVersionContent
+  reconstructVersionContent,
+  findCommonAncestor,
+  detectAncestryRelationship
 } = require('../utils/versionControl');
+const { createOrRecordConflict } = require('../services/conflictResolutionService');
 const { discoverDevicesUDP } = require('../utils/lanDiscoveryService');
 const {
   httpRequest,
@@ -157,219 +160,258 @@ function compareSyncManifests(localManifest, remoteManifest) {
 /**
  * Ingest incoming notes and notebooks from a paired peer,
  * passing through the existing note storage and version control engine.
+ * Integrates with AI-Assisted Semantic Conflict Resolution.
  * Ensures complete idempotency and zero duplicate versions.
  */
-function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebooks = [], senderDevice, currentUserId) {
+async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebooks = [], senderDevice, currentUserId) {
   const appliedNotes = [];
   const conflicts = [];
 
-  const syncTx = db.transaction(() => {
-    // 1. Ingest Notebooks
-    for (const nb of incomingNotebooks) {
-      if (!nb || !nb.id) continue;
-      const existingNb = NotebookModel.getById(nb.id, currentUserId);
-      if (!existingNb) {
-        // Case 2: Notebook does not exist locally -> Create normally
-        NotebookModel.create(nb.id, nb.name || 'General Notes', currentUserId);
+  // 1. Ingest Notebooks
+  for (const nb of incomingNotebooks) {
+    if (!nb || !nb.id) continue;
+    const existingNb = NotebookModel.getById(nb.id, currentUserId);
+    if (!existingNb) {
+      // Case 2: Notebook does not exist locally -> Create normally
+      NotebookModel.create(nb.id, nb.name || 'General Notes', currentUserId);
+    } else {
+      // Notebook already exists locally
+      const incomingName = (nb.name || '').trim();
+      const localName = (existingNb.name || '').trim();
+
+      // Case 1 & Case 5: Identical state or empty incoming name -> completely idempotent
+      if (!incomingName || incomingName === localName) {
+        continue;
+      }
+
+      // Case 3 & Case 4: Names differ - determine if update is warranted
+      const incomingTime = nb.updated_at ? new Date(nb.updated_at).getTime() : (nb.created_at ? new Date(nb.created_at).getTime() : 0);
+      const localTime = existingNb.updated_at ? new Date(existingNb.updated_at).getTime() : (existingNb.created_at ? new Date(existingNb.created_at).getTime() : 0);
+
+      if (incomingTime > localTime) {
+        // Case 3: Incoming state is newer -> update notebook name
+        NotebookModel.rename(nb.id, incomingName, currentUserId);
+      } else if (incomingTime < localTime) {
+        // Local is newer -> Preserve local state, do not overwrite
+        continue;
       } else {
-        // Notebook already exists locally
-        const incomingName = (nb.name || '').trim();
-        const localName = (existingNb.name || '').trim();
-
-        // Case 1 & Case 5: Identical state or empty incoming name -> completely idempotent
-        if (!incomingName || incomingName === localName) {
-          continue;
-        }
-
-        // Case 3 & Case 4: Names differ - determine if update is warranted
-        const incomingTime = nb.updated_at ? new Date(nb.updated_at).getTime() : (nb.created_at ? new Date(nb.created_at).getTime() : 0);
-        const localTime = existingNb.updated_at ? new Date(existingNb.updated_at).getTime() : (existingNb.created_at ? new Date(existingNb.created_at).getTime() : 0);
-
-        if (incomingTime > localTime) {
-          // Case 3: Incoming state is newer -> update notebook name
+        // Case 4: Equal/unknown timestamp with different names
+        if (localName === 'General Notes' || localName === 'New Notebook') {
           NotebookModel.rename(nb.id, incomingName, currentUserId);
-        } else if (incomingTime < localTime) {
-          // Local is newer -> Preserve local state, do not overwrite
-          continue;
-        } else {
-          // Case 4: Equal/unknown timestamp with different names
-          // If local has default placeholder name, adopt the peer's specific name; otherwise preserve local name
-          if (localName === 'General Notes' || localName === 'New Notebook') {
-            NotebookModel.rename(nb.id, incomingName, currentUserId);
-          }
         }
       }
     }
+  }
 
-    // 2. Ingest Notes (Strict policy: only notes marked 'lan' or 'both')
-    for (const remoteNote of incomingNotes) {
-      if (!remoteNote || !remoteNote.id) continue;
-      const mode = remoteNote.sync_mode;
-      if (mode !== 'lan' && mode !== 'both') {
-        continue; // Strictly skip local or cloud-only notes
-      }
+  // 2. Ingest Notes (Strict policy: only notes marked 'lan' or 'both')
+  for (const remoteNote of incomingNotes) {
+    if (!remoteNote || !remoteNote.id) continue;
+    const mode = remoteNote.sync_mode;
+    if (mode !== 'lan' && mode !== 'both') {
+      continue; // Strictly skip local or cloud-only notes
+    }
 
-      const existing = NoteModel.getById(remoteNote.id, currentUserId);
-      const remoteContent = typeof remoteNote.content === 'string' ? remoteNote.content : '';
-      const remoteHash = remoteNote.content_hash || calculateHash(remoteContent);
+    const existing = NoteModel.getById(remoteNote.id, currentUserId);
+    const remoteContent = typeof remoteNote.content === 'string' ? remoteNote.content : '';
+    const remoteHash = remoteNote.content_hash || calculateHash(remoteContent);
 
-      if (existing) {
-        const localContent = readNoteFile(existing.file_path);
-        const localHash = calculateHash(localContent);
+    if (existing) {
+      const localContent = readNoteFile(existing.file_path);
+      const localHash = calculateHash(localContent);
 
-        // IDEMPOTENCY CHECK (Case 1 & Case 5): Identical content -> SKIP completely! No duplicate version.
-        if (localHash === remoteHash || localContent === remoteContent) {
-          if ((remoteNote.title && remoteNote.title !== existing.title) || 
-              (remoteNote.notebook_id && remoteNote.notebook_id !== existing.notebook_id)) {
-            NoteModel.update(
-              existing.id,
-              remoteNote.title || existing.title,
-              existing.file_path,
-              remoteNote.notebook_id || existing.notebook_id,
-              existing.content_hash,
-              existing.current_version_id,
-              currentUserId,
-              remoteNote.sync_mode || existing.sync_mode
-            );
-          }
-          appliedNotes.push({ id: existing.id, action: 'UNCHANGED' });
-          continue;
-        }
-
-        // Contents differ: check if remote note is an update of latest local checkpoint
-        const latestLocalVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
-        const isFastForward = Boolean(
-          latestLocalVersion &&
-          (remoteNote.parent_version_id === latestLocalVersion.id ||
-           remoteNote.previous_content_hash === latestLocalVersion.content_hash ||
-           localContent.trim().length === 0)
-        );
-
-        if (isFastForward) {
-          // Safe fast-forward update from peer (Case 3)
-          writeNoteFile(existing.file_path, remoteContent);
-          const nextVerNum = (latestLocalVersion ? latestLocalVersion.version_number : 0) + 1;
-          const diffHunks = computeLineDiffHunks(localContent, remoteContent);
-          const newVerId = remoteNote.current_version_id || `v${nextVerNum}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-          const versionData = {
-            id: newVerId,
-            note_id: existing.id,
-            version_number: nextVerNum,
-            parent_version_id: latestLocalVersion ? latestLocalVersion.id : null,
-            message: `Updated via LAN sync from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'}`,
-            device_id: senderDevice.id || senderDevice.deviceId,
-            created_at: remoteNote.updated_at || new Date().toISOString(),
-            content_hash: remoteHash,
-            is_snapshot: 0,
-            is_auto: 0
-          };
-
-          VersionModel.createCheckpointTransaction(versionData, diffHunks, existing.id, currentUserId);
-          SessionModel.upsert(existing.id, newVerId, remoteHash, 'clean', currentUserId);
-
+      // IDEMPOTENCY CHECK (Case 1 & Case 5): Identical content -> SKIP completely! No duplicate version.
+      if (localHash === remoteHash || localContent === remoteContent) {
+        if ((remoteNote.title && remoteNote.title !== existing.title) || 
+            (remoteNote.notebook_id && remoteNote.notebook_id !== existing.notebook_id)) {
           NoteModel.update(
             existing.id,
             remoteNote.title || existing.title,
             existing.file_path,
             remoteNote.notebook_id || existing.notebook_id,
-            remoteHash,
-            newVerId,
+            existing.content_hash,
+            existing.current_version_id,
             currentUserId,
             remoteNote.sync_mode || existing.sync_mode
           );
-
-          appliedNotes.push({ id: existing.id, action: 'UPDATED' });
-        } else {
-          // Case 4: Concurrent Conflict: Both sides modified independently
-          conflicts.push({
-            noteId: existing.id,
-            title: existing.title,
-            localContent,
-            remoteContent,
-            localUpdated: existing.updated_at,
-            remoteUpdated: remoteNote.updated_at,
-            deviceName: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer'
-          });
-
-          // Existing conflict handling: Create conflict copy note preserving both versions
-          const conflictTitle = `${existing.title} (LAN Conflict from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'})`;
-          const conflictPath = getNoteFilePath(conflictTitle, 'General Notes');
-          writeNoteFile(conflictPath, remoteContent);
-
-          const conflictNoteId = `note_conflict_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-          const diffHunks = computeLineDiffHunks('', remoteContent);
-          const conflictVerId = `v1_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-
-          NoteModel.create(
-            conflictNoteId,
-            conflictTitle,
-            conflictPath,
-            existing.notebook_id,
-            remoteHash,
-            conflictVerId,
-            currentUserId,
-            remoteNote.sync_mode || 'lan'
-          );
-
-          VersionModel.createCheckpointTransaction({
-            id: conflictVerId,
-            note_id: conflictNoteId,
-            version_number: 1,
-            parent_version_id: null,
-            message: `Conflict copy created from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'}`,
-            device_id: senderDevice.id || senderDevice.deviceId,
-            created_at: new Date().toISOString(),
-            content_hash: remoteHash,
-            is_snapshot: 0,
-            is_auto: 0
-          }, diffHunks, conflictNoteId, currentUserId);
-
-          SessionModel.upsert(conflictNoteId, conflictVerId, remoteHash, 'clean', currentUserId);
-          appliedNotes.push({ id: existing.id, action: 'CONFLICT_COPY_CREATED', conflictNoteId });
         }
-      } else {
-        // Case 2: New note: Safe import from peer
-        const noteTitle = remoteNote.title || 'Untitled Note';
-        const filePath = getNoteFilePath(noteTitle, 'General Notes');
-        writeNoteFile(filePath, remoteContent);
+        appliedNotes.push({ id: existing.id, action: 'UNCHANGED' });
+        continue;
+      }
 
-        const v1Id = remoteNote.current_version_id || `v1_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-        const diffHunks = computeLineDiffHunks('', remoteContent);
+      // Contents differ: Determine ancestry and branch relationships
+      const latestLocalVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
 
-        NoteModel.create(
-          remoteNote.id,
-          noteTitle,
-          filePath,
-          remoteNote.notebook_id || null,
-          remoteHash,
-          v1Id,
-          currentUserId,
-          remoteNote.sync_mode || 'lan'
+      // Check ancestry relationships using existing version control tree
+      let ancestry = { relationship: 'NO_COMMON_ANCESTOR', commonAncestorId: null };
+      if (latestLocalVersion) {
+        ancestry = detectAncestryRelationship(
+          latestLocalVersion.id,
+          remoteNote.current_version_id || remoteNote.parent_version_id,
+          VersionModel,
+          currentUserId
         );
+      }
 
-        VersionModel.createCheckpointTransaction({
-          id: v1Id,
-          note_id: remoteNote.id,
-          version_number: 1,
-          parent_version_id: null,
-          message: `Imported via LAN sync from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'}`,
+      // Check if remote is a fast-forward update of latest local checkpoint (Case A / Case 3)
+      const isFastForward = Boolean(
+        ancestry.relationship === 'A_ANCESTOR_OF_B' ||
+        (latestLocalVersion && (
+          remoteNote.parent_version_id === latestLocalVersion.id ||
+          remoteNote.previous_content_hash === latestLocalVersion.content_hash ||
+          localContent.trim().length === 0
+        ))
+      );
+
+      // Check if local is ahead of remote (Case B)
+      const isLocalAhead = Boolean(
+        ancestry.relationship === 'B_ANCESTOR_OF_A' ||
+        (latestLocalVersion && remoteNote.current_version_id && latestLocalVersion.parent_version_id === remoteNote.current_version_id)
+      );
+
+      if (isFastForward) {
+        // Safe fast-forward update from peer (Normal sync: Case A / Case 3, NO AI required)
+        writeNoteFile(existing.file_path, remoteContent);
+        const nextVerNum = (latestLocalVersion ? latestLocalVersion.version_number : 0) + 1;
+        const diffHunks = computeLineDiffHunks(localContent, remoteContent);
+        const newVerId = remoteNote.current_version_id || `v${nextVerNum}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+        const versionData = {
+          id: newVerId,
+          note_id: existing.id,
+          version_number: nextVerNum,
+          parent_version_id: latestLocalVersion ? latestLocalVersion.id : null,
+          message: `Updated via LAN sync from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'}`,
           device_id: senderDevice.id || senderDevice.deviceId,
-          created_at: remoteNote.created_at || new Date().toISOString(),
+          created_at: remoteNote.updated_at || new Date().toISOString(),
           content_hash: remoteHash,
           is_snapshot: 0,
           is_auto: 0
-        }, diffHunks, remoteNote.id, currentUserId);
+        };
 
-        SessionModel.upsert(remoteNote.id, v1Id, remoteHash, 'clean', currentUserId);
-        appliedNotes.push({ id: remoteNote.id, action: 'CREATED' });
+        VersionModel.createCheckpointTransaction(versionData, diffHunks, existing.id, currentUserId);
+        SessionModel.upsert(existing.id, newVerId, remoteHash, 'clean', currentUserId);
+
+        NoteModel.update(
+          existing.id,
+          remoteNote.title || existing.title,
+          existing.file_path,
+          remoteNote.notebook_id || existing.notebook_id,
+          remoteHash,
+          newVerId,
+          currentUserId,
+          remoteNote.sync_mode || existing.sync_mode
+        );
+
+        NoteModel.updateSyncMetadata(existing.id, currentUserId, {
+          lastSyncedHash: remoteHash,
+          lastSyncedAt: new Date().toISOString(),
+          syncState: 'SYNCED',
+          syncError: null
+        });
+
+        appliedNotes.push({ id: existing.id, action: 'UPDATED' });
+      } else if (isLocalAhead) {
+        // Local is ahead of remote (Normal sync: Case B, NO AI required)
+        appliedNotes.push({ id: existing.id, action: 'UNCHANGED_LOCAL_AHEAD' });
+      } else {
+        // Case C: Concurrent Conflict: Both devices modified independently from a common ancestor
+        let commonAncestorId = ancestry.commonAncestorId;
+        let ancestorContent = '';
+
+        try {
+          if (!commonAncestorId && remoteNote.parent_version_id) {
+            const knownParent = VersionModel.getById(remoteNote.parent_version_id, currentUserId);
+            if (knownParent) commonAncestorId = knownParent.id;
+          }
+
+          if (commonAncestorId) {
+            ancestorContent = reconstructVersionContent(commonAncestorId, VersionModel, currentUserId);
+          } else if (latestLocalVersion && latestLocalVersion.parent_version_id) {
+            ancestorContent = reconstructVersionContent(latestLocalVersion.parent_version_id, VersionModel, currentUserId);
+          }
+        } catch (ancErr) {
+          console.warn(`[LAN Sync Ancestry Notice]:`, ancErr.message);
+        }
+
+        // Record persistent conflict and invoke modular local Ollama service
+        const conflictRecord = await createOrRecordConflict({
+          noteId: existing.id,
+          userId: currentUserId,
+          ancestorVersionId: commonAncestorId,
+          ancestorContent,
+          localVersionId: existing.current_version_id,
+          localContent,
+          remoteVersionId: remoteNote.current_version_id,
+          remoteContent,
+          remoteDeviceId: senderDevice.id || senderDevice.deviceId,
+          remoteDeviceName: senderDevice.device_name || senderDevice.deviceName || 'Peer Device',
+          syncSource: 'LAN'
+        });
+
+        conflicts.push({
+          conflictId: conflictRecord.id,
+          noteId: existing.id,
+          title: existing.title,
+          localContent,
+          remoteContent,
+          ancestorContent,
+          aiStatus: conflictRecord.ai_status,
+          aiSummary: conflictRecord.ai_summary,
+          aiChanges: conflictRecord.ai_changes,
+          aiSuggestedMerge: conflictRecord.ai_suggested_merge,
+          aiReasoning: conflictRecord.ai_reasoning,
+          localUpdated: existing.updated_at,
+          remoteUpdated: remoteNote.updated_at,
+          deviceName: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer'
+        });
+
+        appliedNotes.push({ id: existing.id, action: 'CONFLICT_RECORDED', conflictId: conflictRecord.id });
       }
+    } else {
+      // Case 2: New note: Safe import from peer
+      const noteTitle = remoteNote.title || 'Untitled Note';
+      const filePath = getNoteFilePath(noteTitle, 'General Notes');
+      writeNoteFile(filePath, remoteContent);
+
+      const v1Id = remoteNote.current_version_id || `v1_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const diffHunks = computeLineDiffHunks('', remoteContent);
+
+      NoteModel.create(
+        remoteNote.id,
+        noteTitle,
+        filePath,
+        remoteNote.notebook_id || null,
+        remoteHash,
+        v1Id,
+        currentUserId,
+        remoteNote.sync_mode || 'lan'
+      );
+
+      VersionModel.createCheckpointTransaction({
+        id: v1Id,
+        note_id: remoteNote.id,
+        version_number: 1,
+        parent_version_id: null,
+        message: `Imported via LAN sync from ${senderDevice.device_name || senderDevice.deviceName || 'Peer'}`,
+        device_id: senderDevice.id || senderDevice.deviceId,
+        created_at: remoteNote.created_at || new Date().toISOString(),
+        content_hash: remoteHash,
+        is_snapshot: 0,
+        is_auto: 0
+      }, diffHunks, remoteNote.id, currentUserId);
+
+      SessionModel.upsert(remoteNote.id, v1Id, remoteHash, 'clean', currentUserId);
+      NoteModel.updateSyncMetadata(remoteNote.id, currentUserId, {
+        lastSyncedHash: remoteHash,
+        lastSyncedAt: new Date().toISOString(),
+        syncState: 'SYNCED',
+        syncError: null
+      });
+      appliedNotes.push({ id: remoteNote.id, action: 'CREATED' });
     }
+  }
 
-    return { appliedNotes, conflicts };
-  });
-
-  return syncTx();
+  return { appliedNotes, conflicts };
 }
 
 /* ==========================================================================
@@ -641,7 +683,7 @@ router.get('/pair/status/:requestId', (req, res) => {
  * POST /api/lan/sync
  * Authenticated & Encrypted Inbound LAN Sync endpoint (AES-256-GCM with replay protection)
  */
-router.post('/sync', (req, res) => {
+router.post('/sync', async (req, res) => {
   try {
     const { envelope, plainSyncRequest } = req.body || {};
     const localProfile = getPublicDeviceProfile();
@@ -700,7 +742,7 @@ router.post('/sync', (req, res) => {
     LanPairingModel.updateLastSeen(senderDevice.id, req.ip, senderDevice.device_port);
 
     // 5. Ingest incoming notes and notebooks through existing sync and version control engine
-    const { appliedNotes, conflicts } = applyIncomingNotesAndNotebooks(
+    const { appliedNotes, conflicts } = await applyIncomingNotesAndNotebooks(
       decryptedPayload.notes || [],
       decryptedPayload.notebooks || [],
       senderDevice,
@@ -715,10 +757,15 @@ router.post('/sync', (req, res) => {
       localNotes = localNotes.filter(n => selectedNoteIds.includes(n.id));
     }
 
-    const localNotesWithContent = localNotes.map(n => ({
-      ...n,
-      content: readNoteFile(n.file_path)
-    }));
+    const localNotesWithContent = localNotes.map(n => {
+      const latestVer = VersionModel.getLatestForNote(n.id, currentUserId);
+      return {
+        ...n,
+        content: readNoteFile(n.file_path),
+        parent_version_id: latestVer ? latestVer.parent_version_id : null,
+        current_version_id: latestVer ? latestVer.id : n.current_version_id
+      };
+    });
     const localNotebooks = NotebookModel.getAll(currentUserId);
 
     const responseData = {
@@ -1486,10 +1533,15 @@ router.post('/sync/outbound', async (req, res) => {
       eligibleNotes = eligibleNotes.filter(n => selectedNoteIds.includes(n.id));
     }
 
-    const notesWithContent = eligibleNotes.map(n => ({
-      ...n,
-      content: readNoteFile(n.file_path)
-    }));
+    const notesWithContent = eligibleNotes.map(n => {
+      const latestVer = VersionModel.getLatestForNote(n.id, currentUserId);
+      return {
+        ...n,
+        content: readNoteFile(n.file_path),
+        parent_version_id: latestVer ? latestVer.parent_version_id : null,
+        current_version_id: latestVer ? latestVer.id : n.current_version_id
+      };
+    });
     const notebooks = NotebookModel.getAll(currentUserId);
 
     // 2. Transmit encrypted payload over LAN transport
@@ -1509,7 +1561,7 @@ router.post('/sync/outbound', async (req, res) => {
     }
 
     // 3. Ingest received peer changes through existing note and version control engine
-    const { appliedNotes, conflicts } = applyIncomingNotesAndNotebooks(
+    const { appliedNotes, conflicts } = await applyIncomingNotesAndNotebooks(
       remoteData.localLanNotes || [],
       remoteData.localNotebooks || [],
       peer,

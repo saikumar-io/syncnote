@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, X, Command, Database, Moon, Sun, Monitor, Type, HardDrive, Copy, Check, Palette } from 'lucide-react';
+import { Settings, X, Command, Database, Moon, Sun, Monitor, Type, HardDrive, Copy, Check, Palette, Sparkles, Activity } from 'lucide-react';
 import { apiClient } from '../api/apiClient';
 
 export default function SettingsModal({ 
@@ -16,8 +16,10 @@ export default function SettingsModal({
 }) {
   const [storagePath, setStoragePath] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [conflictMetrics, setConflictMetrics] = useState(null);
+  const [ollamaStatus, setOllamaStatus] = useState(null);
 
-  // Fetch dynamic storage location from backend API
+  // Fetch dynamic storage location and AI conflict research metrics from backend API
   useEffect(() => {
     if (isOpen) {
       apiClient.get('/api/health')
@@ -29,6 +31,22 @@ export default function SettingsModal({
           }
         })
         .catch(() => setStoragePath(null));
+
+      apiClient.get('/api/conflicts/status')
+        .then((data) => {
+          if (data && data.ollama) {
+            setOllamaStatus(data.ollama);
+          }
+        })
+        .catch(() => {});
+
+      apiClient.get('/api/conflicts/metrics')
+        .then((data) => {
+          if (data && data.metrics) {
+            setConflictMetrics(data.metrics.summary);
+          }
+        })
+        .catch(() => {});
     }
   }, [isOpen]);
 
@@ -210,6 +228,51 @@ export default function SettingsModal({
                 <p style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
                   The storage location is managed by the current application environment.
                 </p>
+              </div>
+            )}
+          </div>
+
+          {/* AI Conflict Resolution & Evaluation Metrics */}
+          <div className="settings-card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                <Sparkles size={13} style={{ color: 'var(--accent-primary)' }} />
+                <span>AI Semantic Conflict Resolution</span>
+              </div>
+              <span style={{ 
+                fontSize: '0.66rem', 
+                padding: '2px 6px', 
+                borderRadius: '4px', 
+                background: ollamaStatus?.available ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+                color: ollamaStatus?.available ? '#10b981' : '#f59e0b',
+                border: `1px solid ${ollamaStatus?.available ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`
+              }}>
+                {ollamaStatus?.available ? `Ollama (${ollamaStatus.configuredModel || 'llama3.2:1b'})` : 'Ollama Offline'}
+              </span>
+            </div>
+
+            <p style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', margin: '0 0 10px 0', lineHeight: 1.4 }}>
+              Offline-first semantic analysis for concurrent conflicts using local LLM inference.
+            </p>
+
+            {conflictMetrics && conflictMetrics.totalConflicts > 0 ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', background: 'var(--bg-input)', padding: '8px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '0.86rem', fontWeight: 700, color: 'var(--text-primary)' }}>{conflictMetrics.totalConflicts}</div>
+                  <div style={{ fontSize: '0.64rem', color: 'var(--text-muted)' }}>Conflicts</div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#10b981' }}>{conflictMetrics.aiAcceptanceRate}%</div>
+                  <div style={{ fontSize: '0.64rem', color: 'var(--text-muted)' }}>AI Acceptance</div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '0.86rem', fontWeight: 700, color: 'var(--accent-primary)' }}>{conflictMetrics.avgAiLatencyMs}ms</div>
+                  <div style={{ fontSize: '0.64rem', color: 'var(--text-muted)' }}>Avg AI Latency</div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                No conflict events recorded yet. Metrics will appear here as concurrent edits are resolved.
               </div>
             )}
           </div>

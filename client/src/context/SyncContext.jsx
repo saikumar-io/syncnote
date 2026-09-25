@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { apiClient } from '../api/apiClient';
 import OfflineReconnectionModal from '../components/OfflineReconnectionModal';
+import ConflictResolverModal from '../components/ConflictResolverModal';
 
 const SyncContext = createContext(null);
 
@@ -17,6 +18,8 @@ export function SyncProvider({ children }) {
   const [pairedDevices, setPairedDevices] = useState([]);
   const [pendingPairingRequests, setPendingPairingRequests] = useState([]);
   const [activeConflicts, setActiveConflicts] = useState([]);
+  const [unresolvedConflicts, setUnresolvedConflicts] = useState([]);
+  const [activeConflictModal, setActiveConflictModal] = useState(null);
   const [showReconnectionModal, setShowReconnectionModal] = useState(false);
   const [wasOffline, setWasOffline] = useState(false);
 
@@ -75,6 +78,18 @@ export function SyncProvider({ children }) {
           setLastSyncedAt(gdriveRes.lastSyncAt);
         }
       }
+
+      // 3. Fetch canonical unresolved conflicts
+      try {
+        const conflictRes = await apiClient.get('/api/conflicts').catch(() => null);
+        if (conflictRes && Array.isArray(conflictRes.conflicts)) {
+          setUnresolvedConflicts(conflictRes.conflicts);
+          setActiveConflicts(conflictRes.conflicts);
+          if (conflictRes.conflicts.length > 0) {
+            setSyncStatus('CONFLICT');
+          }
+        }
+      } catch (cErr) {}
 
       // Check pending items if reconnecting
       if (currentlyConnected && wasOffline) {
@@ -542,6 +557,18 @@ export function SyncProvider({ children }) {
     pairedDevices,
     pendingPairingRequests,
     activeConflicts,
+    unresolvedConflicts,
+    unresolvedCount: unresolvedConflicts.length,
+    openConflictModal: (conflictOrNoteId) => {
+      if (!conflictOrNoteId) return;
+      if (typeof conflictOrNoteId === 'object') {
+        setActiveConflictModal(conflictOrNoteId);
+      } else {
+        const found = unresolvedConflicts.find(c => c.note_id === conflictOrNoteId);
+        setActiveConflictModal(found || { note_id: conflictOrNoteId });
+      }
+    },
+    closeConflictModal: () => setActiveConflictModal(null),
     showReconnectionModal,
     setShowReconnectionModal,
     triggerSync,
@@ -572,6 +599,15 @@ export function SyncProvider({ children }) {
         pendingItems={pendingGoogleItems}
         onClose={() => setShowReconnectionModal(false)}
         onSyncCompleted={() => refreshSyncStatus()}
+      />
+      <ConflictResolverModal
+        isOpen={Boolean(activeConflictModal)}
+        conflict={activeConflictModal}
+        onClose={() => setActiveConflictModal(null)}
+        onResolved={() => {
+          refreshSyncStatus();
+          window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
+        }}
       />
     </SyncContext.Provider>
   );
