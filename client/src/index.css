@@ -3272,7 +3272,8 @@ body[data-font-size="large"] .editor-content-textarea { font-size: 1.05rem; }
   transition: opacity 0.15s ease;
 }
 
-.file-tile-card:hover .tile-menu-btn {
+.file-tile-card:hover .tile-menu-btn,
+.wide-file-tile:hover .tile-menu-btn {
   opacity: 1;
 }
 

@@ -263,16 +263,10 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
 
       // IDEMPOTENCY CHECK (Case 1 & Case 5): Identical content -> SKIP completely! No duplicate version.
       if (localHash === remoteHash || localContent === remoteContent) {
-        // Clear any active unresolved conflict for this note since content is now reconciled/identical
-        const activeConflicts = ConflictModel.getByNoteId(existing.id, currentUserId, true);
-        for (const c of activeConflicts) {
-          ConflictModel.resolve(c.id, {
-            resolutionMethod: remoteNote.resolution_method || 'ACCEPT_AI',
-            resolvedVersionId: remoteNote.current_version_id || existing.current_version_id,
-            userId: currentUserId
-          });
-          console.log(`[LAN Resolution Sync] Conflict ${c.id} cleared locally`);
-        }
+        // Content is identical: nothing to sync for content, but do NOT auto-resolve any active conflicts.
+        // Conflicts require explicit user resolution — content identity alone does not resolve them.
+        // A conflict could have been recorded between two DIFFERENT versions and still be unresolved
+        // even if the remote happens to send the same content now.
 
         // Ensure local version checkpoint exists in versions table and current_version_id is set
         const localVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
@@ -318,16 +312,13 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         continue;
       }
 
-      // Check if incoming note is an authoritative conflict resolution from peer
+      // Check if incoming note is an authoritative conflict resolution from peer.
+      // A version is ONLY a resolution when it explicitly carries resolution metadata.
+      // NEVER use version_message string matching — it is too fragile and creates false positives.
       const activeConflicts = ConflictModel.getByNoteId(existing.id, currentUserId, true);
       const isResolution = Boolean(
-        remoteNote.is_resolution ||
-        remoteNote.resolved_conflict_id ||
-        (activeConflicts.length > 0 && (
-          (remoteNote.conflicting_version_ids && remoteNote.conflicting_version_ids.includes(existing.current_version_id)) ||
-          remoteNote.version_message?.toLowerCase().includes('merge') ||
-          remoteNote.version_message?.toLowerCase().includes('resolved')
-        ))
+        remoteNote.is_resolution === true ||
+        (remoteNote.resolved_conflict_id && typeof remoteNote.resolved_conflict_id === 'string')
       );
 
       if (isResolution) {

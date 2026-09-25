@@ -38,8 +38,8 @@ export default function DeleteNotebookModal({
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <AlertTriangle size={16} style={{ color: 'var(--accent-warning)' }} />
-            <h3 className="modal-title">Delete "{notebook.name}"?</h3>
+            <AlertTriangle size={16} style={{ color: 'var(--accent-danger)' }} />
+            <h3 className="modal-title" style={{ color: 'var(--accent-danger)' }}>Delete "{notebook.name}"?</h3>
           </div>
           <button className="icon-btn-ghost" onClick={onClose} title="Close (Esc)" type="button">
             <X size={15} />
@@ -47,9 +47,15 @@ export default function DeleteNotebookModal({
         </div>
 
         <div className="modal-body">
-          <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>
-            This notebook contains <strong>{noteCount} {noteCount === 1 ? 'note' : 'notes'}</strong>. Deleting this notebook will safely move all contained notes to <strong>"Unassigned"</strong>. No notes will be deleted.
-          </p>
+          {noteCount > 0 ? (
+            <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>
+              This notebook contains <strong>{noteCount} {noteCount === 1 ? 'note' : 'notes'}</strong>. All contained notes will be moved to <strong>"Unassigned"</strong>. No notes will be deleted.
+            </p>
+          ) : (
+            <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>
+              Delete the notebook <strong>"{notebook.name}"</strong>? This action cannot be undone.
+            </p>
+          )}
 
           <div className="modal-footer">
             <button type="button" className="secondary-action-btn" onClick={onClose}>
@@ -58,13 +64,13 @@ export default function DeleteNotebookModal({
             <button 
               type="button" 
               className="primary-action-btn"
-              style={{ background: 'var(--accent-warning)', borderColor: 'var(--accent-warning)', color: '#000000', fontWeight: 600 }}
+              style={{ background: 'var(--accent-danger)', borderColor: 'var(--accent-danger)', color: '#ffffff', fontWeight: 600 }}
               onClick={() => {
                 onConfirmDelete(notebook.id);
                 onClose();
               }}
             >
-              Delete Notebook & Keep Notes
+              Delete
             </button>
           </div>
         </div>
