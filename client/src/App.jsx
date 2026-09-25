@@ -205,58 +205,6 @@ export function AppContent() {
     }
   };
 
-  const [deleteNoteModal, setDeleteNoteModal] = useState({ isOpen: false, note: null });
-
-  const requestDeleteNote = (note) => {
-    if (!note) return;
-    setDeleteNoteModal({ isOpen: true, note });
-  };
-
-  const handleConfirmDeleteNote = async () => {
-    if (!deleteNoteModal.note) return;
-    const id = deleteNoteModal.note.id;
-    try {
-      await notesApi.delete(id);
-      setNotes((prev) => prev.filter((n) => n.id !== id));
-      if (activeNoteId === id) {
-        setActiveNoteId(null);
-      }
-      if (sync && sync.refreshSyncStatus) {
-        sync.refreshSyncStatus();
-      }
-    } catch (err) {
-      console.error('Error deleting note:', err);
-    } finally {
-      setDeleteNoteModal({ isOpen: false, note: null });
-    }
-  };
-
-  const handleCreateNotebook = async (name) => {
-    try {
-      if (!name || !name.trim()) return;
-      const created = await notebooksApi.create(name.trim());
-      if (created) {
-        await loadNotebooks();
-      }
-      return created;
-    } catch (err) {
-      console.error('Error creating notebook:', err);
-    }
-  };
-
-  const handleDeleteNotebook = async (folderId) => {
-    try {
-      if (!folderId) return;
-      await notebooksApi.delete(folderId);
-      await loadNotebooks();
-      await loadNotes();
-      if (sync && sync.refreshSyncStatus) {
-        sync.refreshSyncStatus();
-      }
-    } catch (err) {
-      console.error('Error deleting notebook:', err);
-    }
-  };
 
   const handleToggleFavorite = async (id) => {
     // Local preference toggle
@@ -332,13 +280,19 @@ export function AppContent() {
   };
 
   const requestDeleteNote = (note) => {
+    if (!note) return;
     setDeleteModal({ isOpen: true, item: note, type: 'note' });
   };
 
   const confirmDelete = async () => {
     if (!deleteModal.item) return;
+    const id = deleteModal.item.id;
     try {
-      await notesApi.delete(deleteModal.item.id);
+      await notesApi.delete(id);
+      setNotes((prev) => prev.filter((n) => n.id !== id));
+      if (activeNoteId === id) {
+        setActiveNoteId(null);
+      }
       await loadNotes();
       if (sync && sync.refreshSyncStatus) {
         sync.refreshSyncStatus();
@@ -354,18 +308,27 @@ export function AppContent() {
 
   const handleCreateNotebook = async (name) => {
     try {
-      await notebooksApi.create(name);
-      await loadNotebooks();
+      if (!name || !name.trim()) return;
+      const created = await notebooksApi.create(name.trim());
+      if (created) {
+        await loadNotebooks();
+      }
+      return created;
     } catch (err) {
       console.error('Error creating notebook:', err);
     }
   };
 
-  const handleDeleteNotebook = async (id) => {
+  const handleDeleteNotebook = async (folderId) => {
     try {
+      const id = typeof folderId === 'object' && folderId !== null ? folderId.id : folderId;
+      if (!id) return;
       await notebooksApi.delete(id);
       await loadNotebooks();
       await loadNotes();
+      if (sync && sync.refreshSyncStatus) {
+        sync.refreshSyncStatus();
+      }
     } catch (err) {
       console.error('Error deleting notebook:', err);
     }
@@ -542,11 +505,11 @@ export function AppContent() {
       />
 
       <DeleteModal 
-        isOpen={deleteNoteModal.isOpen}
-        title={deleteNoteModal.note ? deleteNoteModal.note.title : ''}
+        isOpen={deleteModal.isOpen}
+        title={deleteModal.item ? deleteModal.item.title : ''}
         itemType="Note"
-        onConfirm={handleConfirmDeleteNote}
-        onCancel={() => setDeleteNoteModal({ isOpen: false, note: null })}
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteModal({ isOpen: false, item: null, type: 'note' })}
       />
 
       <UsernameOnboardingModal
