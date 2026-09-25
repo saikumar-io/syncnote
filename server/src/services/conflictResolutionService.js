@@ -8,6 +8,9 @@ const { generateSemanticConflictResolution } = require('./ollamaService');
  * user review decisions, and version-control tree commits.
  */
 
+// Track in-flight AI resolution promises to prevent multiple simultaneous Ollama requests for the same conflict
+const inFlightAiRequests = new Map();
+
 /**
  * Record a detected concurrent conflict and trigger local AI analysis
  */
@@ -34,6 +37,11 @@ async function createOrRecordConflict({
     if (active.ai_status === 'AVAILABLE' && active.remote_content === remoteContent && active.local_content === localContent) {
       console.log(`[ConflictService] Existing unresolved conflict '${active.id}' already analyzed for note ${noteId}. Reusing.`);
       return active;
+    }
+    // If an AI resolution is already in-flight for this conflict, reuse the existing promise
+    if (inFlightAiRequests.has(active.id)) {
+      console.log(`[ConflictService] AI resolution already in-flight for conflict '${active.id}'. Awaiting existing request.`);
+      return inFlightAiRequests.get(active.id);
     }
   }
 
@@ -71,28 +79,37 @@ async function createOrRecordConflict({
 
   console.log(`[ConflictService] Recorded concurrent conflict ${conflictRecord.id} for note ${noteId}. Invoking local AI assistant...`);
 
-  // 4. Invoke local modular Ollama service
-  const aiResult = await generateSemanticConflictResolution({
-    noteId,
-    ancestorContent: resolvedAncestorContent,
-    localContent,
-    remoteContent,
-    localDeviceName: 'Device A (Local)',
-    remoteDeviceName: `${remoteDeviceName} (${syncSource})`
-  });
+  // 4. Invoke local modular Ollama service (guarded against concurrent duplicate requests)
+  const aiPromise = (async () => {
+    try {
+      const aiResult = await generateSemanticConflictResolution({
+        noteId,
+        ancestorContent: resolvedAncestorContent,
+        localContent,
+        remoteContent,
+        localDeviceName: 'Device A (Local)',
+        remoteDeviceName: `${remoteDeviceName} (${syncSource})`
+      });
 
-  // 5. Update conflict record with AI response
-  const updatedConflict = ConflictModel.updateAiStatus(conflictRecord.id, {
-    aiStatus: aiResult.available ? 'AVAILABLE' : 'UNAVAILABLE',
-    aiSummary: aiResult.data.summary,
-    aiChanges: aiResult.data.changesFromAncestor,
-    aiSuggestedMerge: aiResult.data.suggestedMerge,
-    aiReasoning: aiResult.data.reasoning,
-    aiError: aiResult.error || null,
-    aiLatencyMs: aiResult.latencyMs
-  }, currentUserId);
+      // 5. Update conflict record with AI response
+      const updatedConflict = ConflictModel.updateAiStatus(conflictRecord.id, {
+        aiStatus: aiResult.available ? 'AVAILABLE' : 'UNAVAILABLE',
+        aiSummary: aiResult.data.summary,
+        aiChanges: aiResult.data.changesFromAncestor,
+        aiSuggestedMerge: aiResult.data.suggestedMerge,
+        aiReasoning: aiResult.data.reasoning,
+        aiError: aiResult.error || null,
+        aiLatencyMs: aiResult.latencyMs
+      }, currentUserId);
 
-  return updatedConflict;
+      return updatedConflict;
+    } finally {
+      inFlightAiRequests.delete(conflictRecord.id);
+    }
+  })();
+
+  inFlightAiRequests.set(conflictRecord.id, aiPromise);
+  return await aiPromise;
 }
 
 /**
@@ -104,26 +121,40 @@ async function retryAiAnalysis(conflictId, userId) {
     throw new Error(`Conflict '${conflictId}' not found.`);
   }
 
+  if (inFlightAiRequests.has(conflictId)) {
+    console.log(`[ConflictService] AI resolution already in-flight for conflict '${conflictId}'. Awaiting existing request.`);
+    return inFlightAiRequests.get(conflictId);
+  }
+
   ConflictModel.updateAiStatus(conflictId, { aiStatus: 'GENERATING' }, userId);
 
-  const aiResult = await generateSemanticConflictResolution({
-    noteId: conflict.note_id,
-    ancestorContent: conflict.ancestor_content,
-    localContent: conflict.local_content,
-    remoteContent: conflict.remote_content,
-    localDeviceName: 'Device A (Local)',
-    remoteDeviceName: `${conflict.remote_device_name || 'Device B'} (${conflict.sync_source})`
-  });
+  const aiPromise = (async () => {
+    try {
+      const aiResult = await generateSemanticConflictResolution({
+        noteId: conflict.note_id,
+        ancestorContent: conflict.ancestor_content,
+        localContent: conflict.local_content,
+        remoteContent: conflict.remote_content,
+        localDeviceName: 'Device A (Local)',
+        remoteDeviceName: `${conflict.remote_device_name || 'Device B'} (${conflict.sync_source})`
+      });
 
-  return ConflictModel.updateAiStatus(conflictId, {
-    aiStatus: aiResult.available ? 'AVAILABLE' : 'UNAVAILABLE',
-    aiSummary: aiResult.data.summary,
-    aiChanges: aiResult.data.changesFromAncestor,
-    aiSuggestedMerge: aiResult.data.suggestedMerge,
-    aiReasoning: aiResult.data.reasoning,
-    aiError: aiResult.error || null,
-    aiLatencyMs: aiResult.latencyMs
-  }, userId);
+      return ConflictModel.updateAiStatus(conflictId, {
+        aiStatus: aiResult.available ? 'AVAILABLE' : 'UNAVAILABLE',
+        aiSummary: aiResult.data.summary,
+        aiChanges: aiResult.data.changesFromAncestor,
+        aiSuggestedMerge: aiResult.data.suggestedMerge,
+        aiReasoning: aiResult.data.reasoning,
+        aiError: aiResult.error || null,
+        aiLatencyMs: aiResult.latencyMs
+      }, userId);
+    } finally {
+      inFlightAiRequests.delete(conflictId);
+    }
+  })();
+
+  inFlightAiRequests.set(conflictId, aiPromise);
+  return await aiPromise;
 }
 
 /**

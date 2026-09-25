@@ -90,7 +90,7 @@ export default function ConflictResolverModal({
   const noteId = conflict?.note_id || propNote?.id || 'note_unknown';
   const remoteDeviceName = conflict?.remote_device_name || 'Remote Peer';
   const aiReady = conflict?.ai_status === 'AVAILABLE' && Boolean(conflict?.ai_suggested_merge);
-  const aiGenerating = conflict?.ai_status === 'GENERATING';
+  const aiGenerating = isLoading || conflict?.ai_status === 'GENERATING';
 
   // Action Handlers
   const handleAction = async (resolutionMethod, customText = null) => {
