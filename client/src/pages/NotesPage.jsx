@@ -545,7 +545,7 @@ function FolderTile({
 }) {
   return (
     <div 
-      className={`wide-file-tile folder-tile ${viewMode === 'list' ? 'list-row' : ''} ${isDragOver ? 'drag-over' : ''}`}
+      className={`wide-file-tile folder-tile ${viewMode === 'list' ? 'list-row' : ''} ${isDragOver ? 'drag-over' : ''} ${isMenuOpen ? 'menu-active' : ''}`}
       onClick={onOpen}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -630,7 +630,7 @@ function NoteTile({
 
   return (
     <div 
-      className={`wide-file-tile note-tile ${viewMode === 'list' ? 'list-row' : ''} ${isSelected ? 'selected' : ''}`}
+      className={`wide-file-tile note-tile ${viewMode === 'list' ? 'list-row' : ''} ${isSelected ? 'selected' : ''} ${isMenuOpen ? 'menu-active' : ''}`}
       onClick={onOpen}
       draggable
       onDragStart={handleDragStart}
@@ -687,7 +687,7 @@ function NoteTile({
             </button>
             <button className="dropdown-item-btn" onClick={onMoveNote}>
               <FolderInput size={13} />
-              <span>Move to notebook</span>
+              <span>Move</span>
             </button>
             <button className="dropdown-item-btn" onClick={onDuplicate}>
               <Copy size={13} />

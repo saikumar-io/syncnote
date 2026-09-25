@@ -371,6 +371,7 @@ async function generateSemanticConflictResolution({
   localDeviceName = 'Device A',
   remoteDeviceName = 'Device B'
 }) {
+  console.log('[Ollama]\nStarting conflict analysis');
   const config = getOllamaConfig();
   const startTime = Date.now();
 
@@ -412,6 +413,7 @@ async function generateSemanticConflictResolution({
 
     console.log(`[Ollama] Parsed merge successfully`);
     console.log(`Merged chars: ${parsedResult.data.suggestedMerge.length}`);
+    console.log('[Ollama]\nConflict analysis completed');
 
     return {
       success: true,
@@ -423,6 +425,7 @@ async function generateSemanticConflictResolution({
   } catch (err) {
     const latencyMs = Date.now() - startTime;
     console.warn(`[OllamaService Notice] Local AI conflict resolution unavailable (${err.message}). Falling back to manual resolution.`);
+    console.log('[Ollama]\nConflict analysis completed');
 
     return {
       success: false,

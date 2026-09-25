@@ -295,7 +295,7 @@ function findCommonAncestor(versionIdA, versionIdB, VersionModel, userId = 'usr_
  * - 'CONCURRENT_DIVERGENCE': Both branched from a common ancestor (Conflict!)
  * - 'NO_COMMON_ANCESTOR': Independent lineages
  */
-function detectAncestryRelationship(versionIdA, versionIdB, VersionModel, userId = 'usr_local_default') {
+function detectAncestryRelationship(versionIdA, versionIdB, VersionModel, userId = 'usr_local_default', options = {}) {
   if (!versionIdA || !versionIdB) {
     return { relationship: 'NO_COMMON_ANCESTOR', commonAncestorId: null };
   }
@@ -305,7 +305,18 @@ function detectAncestryRelationship(versionIdA, versionIdB, VersionModel, userId
   }
 
   const chainA = getAncestorChain(versionIdA, VersionModel, userId);
-  const chainB = getAncestorChain(versionIdB, VersionModel, userId);
+  let chainB = [];
+
+  if (Array.isArray(options.remoteAncestorChain) && options.remoteAncestorChain.length > 0) {
+    chainB = [...options.remoteAncestorChain];
+  } else {
+    chainB = getAncestorChain(versionIdB, VersionModel, userId);
+    // If versionIdB is not found in local DB, but its parent is provided, bridge through the parent chain
+    if (chainB.length <= 1 && options.remoteParentId) {
+      const parentChain = getAncestorChain(options.remoteParentId, VersionModel, userId);
+      chainB = [versionIdB, ...parentChain];
+    }
+  }
 
   const setA = new Set(chainA);
   const setB = new Set(chainB);

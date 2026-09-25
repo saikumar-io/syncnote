@@ -205,6 +205,59 @@ export function AppContent() {
     }
   };
 
+  const [deleteNoteModal, setDeleteNoteModal] = useState({ isOpen: false, note: null });
+
+  const requestDeleteNote = (note) => {
+    if (!note) return;
+    setDeleteNoteModal({ isOpen: true, note });
+  };
+
+  const handleConfirmDeleteNote = async () => {
+    if (!deleteNoteModal.note) return;
+    const id = deleteNoteModal.note.id;
+    try {
+      await notesApi.delete(id);
+      setNotes((prev) => prev.filter((n) => n.id !== id));
+      if (activeNoteId === id) {
+        setActiveNoteId(null);
+      }
+      if (sync && sync.refreshSyncStatus) {
+        sync.refreshSyncStatus();
+      }
+    } catch (err) {
+      console.error('Error deleting note:', err);
+    } finally {
+      setDeleteNoteModal({ isOpen: false, note: null });
+    }
+  };
+
+  const handleCreateNotebook = async (name) => {
+    try {
+      if (!name || !name.trim()) return;
+      const created = await notebooksApi.create(name.trim());
+      if (created) {
+        await loadNotebooks();
+      }
+      return created;
+    } catch (err) {
+      console.error('Error creating notebook:', err);
+    }
+  };
+
+  const handleDeleteNotebook = async (folderId) => {
+    try {
+      if (!folderId) return;
+      await notebooksApi.delete(folderId);
+      await loadNotebooks();
+      await loadNotes();
+      if (sync && sync.refreshSyncStatus) {
+        sync.refreshSyncStatus();
+      }
+    } catch (err) {
+      console.error('Error deleting notebook:', err);
+    }
+  };
+
   const handleToggleFavorite = async (id) => {
     // Local preference toggle
   };
@@ -489,11 +542,11 @@ export function AppContent() {
       />
 
       <DeleteModal 
-        isOpen={deleteModal.isOpen}
-        title={deleteModal.item ? deleteModal.item.title : ''}
+        isOpen={deleteNoteModal.isOpen}
+        title={deleteNoteModal.note ? deleteNoteModal.note.title : ''}
         itemType="Note"
-        onConfirm={confirmDelete}
-        onCancel={() => setDeleteModal({ isOpen: false, item: null, type: 'note' })}
+        onConfirm={handleConfirmDeleteNote}
+        onCancel={() => setDeleteNoteModal({ isOpen: false, note: null })}
       />
 
       <UsernameOnboardingModal

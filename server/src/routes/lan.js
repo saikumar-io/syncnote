@@ -33,7 +33,8 @@ const {
   computeLineDiffHunks,
   reconstructVersionContent,
   findCommonAncestor,
-  detectAncestryRelationship
+  detectAncestryRelationship,
+  getAncestorChain
 } = require('../utils/versionControl');
 const { createOrRecordConflict } = require('../services/conflictResolutionService');
 const { discoverDevicesUDP } = require('../utils/lanDiscoveryService');
@@ -168,13 +169,15 @@ function buildNotesWithResolutionMetadata(eligibleNotes, currentUserId) {
     const conflicts = ConflictModel.getByNoteId(n.id, currentUserId, false);
     const resolvedConflict = conflicts.find(c => c.status === 'RESOLVED' && c.resolved_version_id === (latestVer ? latestVer.id : n.current_version_id));
 
+    const effectiveVerId = latestVer ? latestVer.id : n.current_version_id;
     return {
       ...n,
       content: readNoteFile(n.file_path),
       parent_version_id: latestVer ? latestVer.parent_version_id : null,
-      current_version_id: latestVer ? latestVer.id : n.current_version_id,
+      current_version_id: effectiveVerId,
       version_number: latestVer ? latestVer.version_number : null,
       version_message: latestVer ? latestVer.message : null,
+      ancestor_version_ids: getAncestorChain(effectiveVerId, VersionModel, currentUserId),
       is_resolution: Boolean(resolvedConflict || latestVer?.resolved_conflict_id),
       resolved_conflict_id: resolvedConflict ? resolvedConflict.id : (latestVer?.resolved_conflict_id || null),
       resolution_method: resolvedConflict ? resolvedConflict.resolution_method : null,
@@ -302,12 +305,15 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
             remoteNote.sync_mode || existing.sync_mode
           );
         }
-        NoteModel.updateSyncMetadata(existing.id, currentUserId, {
-          lastSyncedHash: localHash,
-          lastSyncedAt: new Date().toISOString(),
-          syncState: 'SYNCED',
-          syncError: null
-        });
+        const activeConflictsCheck = ConflictModel.getByNoteId(existing.id, currentUserId, true);
+        if (activeConflictsCheck.length === 0) {
+          NoteModel.updateSyncMetadata(existing.id, currentUserId, {
+            lastSyncedHash: localHash,
+            lastSyncedAt: new Date().toISOString(),
+            syncState: 'SYNCED',
+            syncError: null
+          });
+        }
         appliedNotes.push({ id: existing.id, action: 'UNCHANGED' });
         continue;
       }
@@ -386,37 +392,154 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
 
       // Contents differ: Determine ancestry and branch relationships
       const latestLocalVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
+      const localVerId = existing.current_version_id || (latestLocalVersion ? latestLocalVersion.id : null);
+      const remoteVerId = remoteNote.current_version_id;
+      const remoteParentId = remoteNote.parent_version_id;
 
       // Check ancestry relationships using existing version control tree
-      let ancestry = { relationship: 'NO_COMMON_ANCESTOR', commonAncestorId: null };
-      if (latestLocalVersion) {
-        ancestry = detectAncestryRelationship(
-          latestLocalVersion.id,
-          remoteNote.current_version_id || remoteNote.parent_version_id,
-          VersionModel,
-          currentUserId
-        );
-      }
-
-      // Check if remote is a fast-forward update of latest local checkpoint (Case A / Case 3)
-      const isFastForward = Boolean(
-        ancestry.relationship === 'A_ANCESTOR_OF_B' ||
-        (latestLocalVersion && (
-          remoteNote.parent_version_id === latestLocalVersion.id ||
-          remoteNote.previous_content_hash === latestLocalVersion.content_hash
-        )) ||
-        localContent.trim().length === 0 ||
-        !latestLocalVersion
+      let ancestry = detectAncestryRelationship(
+        localVerId,
+        remoteVerId,
+        VersionModel,
+        currentUserId,
+        {
+          remoteParentId,
+          remoteAncestorChain: remoteNote.ancestor_version_ids
+        }
       );
 
-      // Check if local is ahead of remote (Case B)
+      // Determine Lowest Common Ancestor
+      let commonAncestorId = ancestry.commonAncestorId;
+      if (!commonAncestorId && localVerId && remoteVerId && localVerId === remoteVerId) {
+        commonAncestorId = localVerId;
+      }
+      if (!commonAncestorId && remoteParentId && VersionModel.getById(remoteParentId, currentUserId)) {
+        commonAncestorId = remoteParentId;
+      }
+      if (!commonAncestorId && latestLocalVersion && latestLocalVersion.parent_version_id) {
+        commonAncestorId = latestLocalVersion.parent_version_id;
+      }
+
+      // Reconstruct common ancestor content
+      let ancestorContent = '';
+      if (commonAncestorId) {
+        try {
+          ancestorContent = reconstructVersionContent(commonAncestorId, VersionModel, currentUserId);
+        } catch (ancErr) {
+          console.warn(`[LAN Sync Ancestry Notice]:`, ancErr.message);
+        }
+      }
+
+      const ancVer = commonAncestorId ? VersionModel.getById(commonAncestorId, currentUserId) : null;
+      const ancHash = ancVer?.content_hash || (ancestorContent ? calculateHash(ancestorContent) : null);
+
+      // Determine if local changed from ancestor and if remote changed from ancestor
+      let localChanged = false;
+      let remoteChanged = false;
+
+      if (commonAncestorId) {
+        const localVerAhead = localVerId !== commonAncestorId;
+        const localContentDiffers = (ancHash ? localHash !== ancHash : false) || (ancestorContent ? localContent !== ancestorContent : localContent.trim().length > 0);
+        localChanged = localVerAhead || localContentDiffers;
+
+        const remoteVerAhead = remoteVerId !== commonAncestorId;
+        const remoteContentDiffers = (ancHash ? remoteHash !== ancHash : false) || (ancestorContent ? remoteContent !== ancestorContent : remoteContent.trim().length > 0);
+        remoteChanged = remoteVerAhead || remoteContentDiffers;
+      } else {
+        // No common ancestor found: differing non-empty content represents independent branches
+        localChanged = localContent.trim().length > 0;
+        remoteChanged = remoteContent.trim().length > 0;
+      }
+
+      const hasActiveConflict = activeConflicts.length > 0;
+
+      // Concurrent divergence: BOTH changed independently, or ancestry detects divergence, or active conflict exists
+      const concurrentDivergence = Boolean(
+        hasActiveConflict ||
+        (localChanged && remoteChanged) ||
+        ancestry.relationship === 'CONCURRENT_DIVERGENCE' ||
+        (ancestry.relationship === 'NO_COMMON_ANCESTOR' && localChanged && remoteChanged)
+      );
+
+      // Diagnostic logging as specified in requirement 12
+      console.log(`[Conflict Check]`);
+      console.log(`Note: ${existing.id}`);
+      console.log(`[Conflict Check]`);
+      console.log(`Local version: ${localVerId || 'none'}`);
+      console.log(`Remote version: ${remoteVerId || 'none'}`);
+      console.log(`Common ancestor: ${commonAncestorId || 'none'}`);
+      console.log(`[Conflict Check]`);
+      console.log(`Local changed: ${Boolean(localChanged)}`);
+      console.log(`Remote changed: ${Boolean(remoteChanged)}`);
+      console.log(`[Conflict Check]`);
+      console.log(`Concurrent divergence: ${Boolean(concurrentDivergence)}`);
+
+      if (concurrentDivergence) {
+        console.log(`[Conflict Check]`);
+        console.log(`CONFLICT DETECTED - blocking automatic remote application`);
+
+        // Record persistent conflict and invoke modular local Ollama service
+        const conflictRecord = await createOrRecordConflict({
+          noteId: existing.id,
+          userId: currentUserId,
+          ancestorVersionId: commonAncestorId,
+          ancestorContent,
+          localVersionId: localVerId,
+          localContent,
+          remoteVersionId: remoteVerId,
+          remoteContent,
+          remoteDeviceId: senderDevice.id || senderDevice.deviceId,
+          remoteDeviceName: senderDevice.device_name || senderDevice.deviceName || 'Peer Device',
+          syncSource: 'LAN'
+        });
+
+        console.log(`[ConflictService]\nCreated conflict ${conflictRecord.id}`);
+
+        conflicts.push({
+          conflictId: conflictRecord.id,
+          noteId: existing.id,
+          title: existing.title,
+          localContent,
+          remoteContent,
+          ancestorContent,
+          aiStatus: conflictRecord.ai_status,
+          aiSummary: conflictRecord.ai_summary,
+          aiChanges: conflictRecord.ai_changes,
+          aiSuggestedMerge: conflictRecord.ai_suggested_merge,
+          aiReasoning: conflictRecord.ai_reasoning,
+          localUpdated: existing.updated_at,
+          remoteUpdated: remoteNote.updated_at,
+          deviceName: senderDevice.device_name || senderDevice.deviceName || 'Remote Peer'
+        });
+
+        appliedNotes.push({ id: existing.id, action: 'CONFLICT_RECORDED', conflictId: conflictRecord.id });
+        continue;
+      }
+
+      // Check if remote is a safe fast-forward update (Case A: Remote changed, Local unchanged)
+      const isFastForward = Boolean(
+        !localChanged &&
+        remoteChanged &&
+        (
+          ancestry.relationship === 'A_ANCESTOR_OF_B' ||
+          remoteParentId === localVerId ||
+          localContent.trim().length === 0 ||
+          !latestLocalVersion
+        )
+      );
+
+      // Check if local is ahead of remote (Case B: Local changed, Remote unchanged)
       const isLocalAhead = Boolean(
-        ancestry.relationship === 'B_ANCESTOR_OF_A' ||
-        (latestLocalVersion && remoteNote.current_version_id && latestLocalVersion.parent_version_id === remoteNote.current_version_id)
+        localChanged &&
+        !remoteChanged &&
+        (
+          ancestry.relationship === 'B_ANCESTOR_OF_A' ||
+          (latestLocalVersion && latestLocalVersion.parent_version_id === remoteVerId)
+        )
       );
 
       if (isFastForward) {
-        // Safe fast-forward update from peer (Normal sync: Case A / Case 3, NO AI required)
+        // Safe fast-forward update from peer (Normal sync: Case A, NO AI required)
         writeNoteFile(existing.file_path, remoteContent);
         const nextVerNum = (latestLocalVersion ? latestLocalVersion.version_number : 0) + 1;
         const diffHunks = computeLineDiffHunks(localContent, remoteContent);
@@ -461,39 +584,22 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         // Local is ahead of remote (Normal sync: Case B, NO AI required)
         appliedNotes.push({ id: existing.id, action: 'UNCHANGED_LOCAL_AHEAD' });
       } else {
-        // Case C: Concurrent Conflict: Both devices modified independently from a common ancestor
-        let commonAncestorId = ancestry.commonAncestorId;
-        let ancestorContent = '';
-
-        try {
-          if (!commonAncestorId && remoteNote.parent_version_id) {
-            const knownParent = VersionModel.getById(remoteNote.parent_version_id, currentUserId);
-            if (knownParent) commonAncestorId = knownParent.id;
-          }
-
-          if (commonAncestorId) {
-            ancestorContent = reconstructVersionContent(commonAncestorId, VersionModel, currentUserId);
-          } else if (latestLocalVersion && latestLocalVersion.parent_version_id) {
-            ancestorContent = reconstructVersionContent(latestLocalVersion.parent_version_id, VersionModel, currentUserId);
-          }
-        } catch (ancErr) {
-          console.warn(`[LAN Sync Ancestry Notice]:`, ancErr.message);
-        }
-
-        // Record persistent conflict and invoke modular local Ollama service
+        // Fallback: Concurrent divergence
         const conflictRecord = await createOrRecordConflict({
           noteId: existing.id,
           userId: currentUserId,
           ancestorVersionId: commonAncestorId,
           ancestorContent,
-          localVersionId: existing.current_version_id,
+          localVersionId: localVerId,
           localContent,
-          remoteVersionId: remoteNote.current_version_id,
+          remoteVersionId: remoteVerId,
           remoteContent,
           remoteDeviceId: senderDevice.id || senderDevice.deviceId,
           remoteDeviceName: senderDevice.device_name || senderDevice.deviceName || 'Peer Device',
           syncSource: 'LAN'
         });
+
+        console.log(`[ConflictService]\nCreated conflict ${conflictRecord.id}`);
 
         conflicts.push({
           conflictId: conflictRecord.id,

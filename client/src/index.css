@@ -3239,13 +3239,19 @@ body[data-font-size="large"] .editor-content-textarea { font-size: 1.05rem; }
   padding: 14px;
   cursor: pointer;
   transition: all 0.15s ease;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .file-tile-card:hover {
   border-color: var(--accent-primary);
   background: var(--bg-hover);
   transform: translateY(-1px);
+}
+
+.file-tile-card.menu-active,
+.wide-file-tile.menu-active {
+  z-index: 1500 !important;
+  overflow: visible !important;
 }
 
 .tile-top-bar {
@@ -3273,7 +3279,10 @@ body[data-font-size="large"] .editor-content-textarea { font-size: 1.05rem; }
 }
 
 .file-tile-card:hover .tile-menu-btn,
-.wide-file-tile:hover .tile-menu-btn {
+.wide-file-tile:hover .tile-menu-btn,
+.file-tile-card.menu-active .tile-menu-btn,
+.wide-file-tile.menu-active .tile-menu-btn,
+.tile-menu-btn.active {
   opacity: 1;
 }
 
@@ -3285,9 +3294,9 @@ body[data-font-size="large"] .editor-content-textarea { font-size: 1.05rem; }
   background: var(--bg-surface);
   border: 1px solid var(--border-medium);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-  z-index: 50;
-  min-width: 130px;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+  z-index: 2000 !important;
+  min-width: 150px;
   padding: 4px;
 }
 
@@ -3824,7 +3833,7 @@ body[data-font-size="large"] .editor-content-textarea { font-size: 1.05rem; }
   padding: 12px 14px;
   cursor: pointer;
   transition: all 0.15s ease;
-  overflow: hidden;
+  overflow: visible;
   user-select: none;
 }
 
