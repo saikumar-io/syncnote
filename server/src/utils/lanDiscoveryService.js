@@ -1,6 +1,7 @@
 const dgram = require('dgram');
 const os = require('os');
 const { getPublicDeviceProfile } = require('./deviceCrypto');
+const { cleanIp } = require('./lanTransport');
 
 const DISCOVERY_PORT = parseInt(process.env.LAN_DISCOVERY_PORT || '5001', 10);
 let serverSocket = null;
@@ -45,8 +46,8 @@ function startLanDiscoveryService() {
             protocolVersion: '1.0.0',
             syncnoteVersion: '1.0.0',
             port: parseInt(process.env.PORT || '5000', 10),
-            ip: rinfo.address,
-            ipAddresses: localIps,
+            ip: (localIps && localIps.length > 0) ? localIps[0] : cleanIp(rinfo.address),
+            ipAddresses: localIps.map(cleanIp),
             lanSyncAvailable: true,
             userId: payload.userId || 'usr_local_default'
           });
@@ -107,8 +108,8 @@ function discoverDevicesUDP(timeoutMs = 1200) {
             protocolVersion: data.protocolVersion || '1.0.0',
             syncnoteVersion: data.syncnoteVersion || '1.0.0',
             port: data.port || 5000,
-            ip: rinfo.address,
-            ipAddresses: data.ipAddresses || [rinfo.address],
+            ip: cleanIp(rinfo.address),
+            ipAddresses: (data.ipAddresses || [rinfo.address]).map(cleanIp),
             lanSyncAvailable: true,
             userId: data.userId || 'usr_local_default'
           });
@@ -147,6 +148,7 @@ function discoverDevicesUDP(timeoutMs = 1200) {
 }
 
 module.exports = {
+  getLocalIpAddresses,
   startLanDiscoveryService,
   discoverDevicesUDP
 };

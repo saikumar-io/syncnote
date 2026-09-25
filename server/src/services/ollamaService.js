@@ -121,6 +121,26 @@ async function checkOllamaHealth() {
 }
 
 /**
+ * Helper to check if text contains placeholder markers
+ */
+function isPlaceholderMerge(text) {
+  if (!text || typeof text !== 'string') return true;
+  const lower = text.toLowerCase().trim();
+  if (lower.length === 0) return true;
+  const placeholders = [
+    'full proposed merged',
+    'changes description',
+    'semantic divergence between',
+    '[insert',
+    'proposed merged note content',
+    'insert merged content',
+    '<write the complete',
+    'placeholder'
+  ];
+  return placeholders.some(p => lower.includes(p));
+}
+
+/**
  * Validate structured response from AI
  */
 function validateConflictResolution(parsed) {
@@ -139,11 +159,15 @@ function validateConflictResolution(parsed) {
   if (!Array.isArray(parsed.changesFromAncestor)) {
     parsed.changesFromAncestor = typeof parsed.changesFromAncestor === 'string' 
       ? [parsed.changesFromAncestor] 
-      : ['Device A modified note content', 'Device B modified note content'];
+      : (Array.isArray(parsed.changedSections) ? parsed.changedSections : ['Device A modified note content', 'Device B modified note content']);
   }
 
   if (typeof parsed.suggestedMerge !== 'string') {
     return { valid: false, reason: 'Response missing required suggestedMerge text' };
+  }
+
+  if (isPlaceholderMerge(parsed.suggestedMerge)) {
+    return { valid: false, reason: `suggestedMerge contains placeholder text ("${parsed.suggestedMerge}") instead of actual merged note content` };
   }
 
   if (typeof parsed.reasoning !== 'string' || !parsed.reasoning.trim()) {
@@ -157,40 +181,53 @@ function validateConflictResolution(parsed) {
  * Build system and user prompt for semantic conflict resolution
  */
 function buildPrompt({ noteId, ancestorContent, localContent, remoteContent, localDeviceName = 'Device A', remoteDeviceName = 'Device B' }) {
-  const systemPrompt = `You are the SyncNote AI Conflict Resolver Assistant.
-Your task is to analyze concurrent, independent edits made to the SAME note (note_id: "${noteId}") by two devices that branched from a common ancestor version.
+  const systemPrompt = `You are resolving a version conflict in a Markdown note.
 
-Strict Requirements:
-1. Understand the SEMANTIC meaning and content of the edits from the common ancestor.
-2. DO NOT use filenames, titles, file paths, or device identifiers as the basis for the merge.
-3. If changes are compatible and non-contradictory, combine both sets of information cleanly without redundancy.
-4. If changes are contradictory (e.g., Device A states "Database uses MySQL" and Device B states "Database uses PostgreSQL"), DO NOT blindly concatenate them. Explicitly explain the contradiction in "reasoning", summarize the difference in "summary", and provide a clear, balanced suggestedMerge noting both options or framing the choice for the user.
-5. The user will always review your suggestion before accepting, editing, or rejecting it.
-6. You MUST respond with ONLY a single, valid JSON object matching this exact schema:
+You are given:
+1. A common ancestor.
+2. The complete version from Device A.
+3. The complete version from Device B.
 
+Compare the actual contents.
+
+Produce a single coherent merged note.
+
+Preserve useful information from both versions when the changes are compatible.
+
+If both versions express the same information differently, combine them into one clear statement instead of duplicating them.
+
+If the changes are contradictory, do not invent facts or blindly combine contradictory claims. Explain the contradiction and provide a safe suggested resolution for the user.
+
+Do not describe the merge process instead of producing the merged note.
+
+The suggestedMerge field MUST contain the actual final Markdown note content.
+
+Never output placeholders.
+Never output text like "Full proposed merged note content...", "Device A changes description...", "[insert merged content]", or generic descriptions of what the merge should contain.
+
+You MUST respond with ONLY a single, valid JSON object matching this schema:
 {
   "conflictDetected": true,
-  "summary": "Short explanation of semantic differences",
-  "changesFromAncestor": [
-    "Device A changes description...",
-    "Device B changes description..."
-  ],
-  "suggestedMerge": "Full proposed merged note content preserving both sets of useful information",
-  "reasoning": "Clear rationale explaining whether changes were compatible or contradictory, and why this merge resolves the conflict"
+  "conflictType": "compatible",
+  "summary": "Brief summary of semantic differences",
+  "changesFromAncestor": ["Specific change from Device A", "Specific change from Device B"],
+  "changedSections": ["Name of modified section"],
+  "suggestedMerge": "The actual full text of the merged Markdown note",
+  "reasoning": "Clear explanation of whether changes are compatible or contradictory, and why this merge resolves the conflict"
 }
 
 Do not wrap in Markdown code fences if possible. Return only valid JSON.`;
 
-  const userPrompt = `=== COMMON ANCESTOR VERSION ===
+  const userPrompt = `=== COMMON ANCESTOR ===
 ${ancestorContent || '(Empty base note)'}
 
-=== ${localDeviceName.toUpperCase()} (LOCAL VERSION) ===
+=== DEVICE A (${localDeviceName.toUpperCase()}) ===
 ${localContent || '(Empty note)'}
 
-=== ${remoteDeviceName.toUpperCase()} (REMOTE VERSION) ===
+=== DEVICE B (${remoteDeviceName.toUpperCase()}) ===
 ${remoteContent || '(Empty note)'}
 
-Analyze semantic divergence from the common ancestor and provide your structured JSON resolution:`;
+Compare the actual contents above and provide your structured JSON resolution with the ACTUAL FULL MERGED NOTE in suggestedMerge:`;
 
   return { systemPrompt, userPrompt };
 }
@@ -239,21 +276,31 @@ async function generateSemanticConflictResolution({
       throw new Error('Ollama returned empty response');
     }
 
-    let parsed;
+    let parsed = null;
+    let parseError = null;
+
     try {
       let rawText = res.data.response.trim();
-      // Remove optional markdown json code blocks if returned
       if (rawText.startsWith('```json')) {
         rawText = rawText.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
       } else if (rawText.startsWith('```')) {
         rawText = rawText.replace(/^```\s*/, '').replace(/\s*```$/, '');
       }
       parsed = JSON.parse(rawText);
-    } catch (parseErr) {
-      // Retry once with a strict formatting prompt if model output failed to parse
-      console.warn(`[OllamaService] Initial JSON parse failed. Retrying with correction prompt...`);
-      const correctionPrompt = `${fullPrompt}\n\nIMPORTANT: Your previous output could not be parsed as JSON. Return ONLY the JSON object, starting with { and ending with }.`;
-      
+    } catch (pe) {
+      parseError = pe;
+    }
+
+    let validation = parsed ? validateConflictResolution(parsed) : { valid: false, reason: parseError?.message || 'JSON parse failed' };
+
+    // Retry once with a strict anti-placeholder correction prompt if validation failed
+    if (!validation.valid) {
+      console.warn(`[OllamaService] Initial output validation failed (${validation.reason}). Retrying with correction prompt...`);
+      const correctionPrompt = `${fullPrompt}\n\nCRITICAL REQUIREMENT: Your previous response was rejected: ${validation.reason}.
+You must produce a single, valid JSON object.
+The "suggestedMerge" field MUST contain the ACTUAL FINAL MERGED NOTE CONTENT.
+DO NOT output placeholders or meta-descriptions. Write the real note content.`;
+
       const retryRes = await makeOllamaRequest('/api/generate', 'POST', {
         model: config.model,
         prompt: correctionPrompt,
@@ -269,9 +316,9 @@ async function generateSemanticConflictResolution({
         retryText = retryText.replace(/^```\s*/, '').replace(/\s*```$/, '');
       }
       parsed = JSON.parse(retryText);
+      validation = validateConflictResolution(parsed);
     }
 
-    const validation = validateConflictResolution(parsed);
     if (!validation.valid) {
       throw new Error(`AI response failed schema validation: ${validation.reason}`);
     }

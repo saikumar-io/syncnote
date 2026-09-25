@@ -38,6 +38,7 @@ const { createOrRecordConflict } = require('../services/conflictResolutionServic
 const { discoverDevicesUDP } = require('../utils/lanDiscoveryService');
 const {
   httpRequest,
+  cleanIp,
   checkPeerReachable,
   sendPairingRequest,
   pollPairingStatus,
@@ -221,19 +222,46 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
 
       // IDEMPOTENCY CHECK (Case 1 & Case 5): Identical content -> SKIP completely! No duplicate version.
       if (localHash === remoteHash || localContent === remoteContent) {
+        // Ensure local version checkpoint exists in versions table and current_version_id is set
+        const localVersion = VersionModel.getLatestForNote(existing.id, currentUserId);
+        const resolvedVersionId = existing.current_version_id || remoteNote.current_version_id || (localVersion ? localVersion.id : null);
+        if (!localVersion || !existing.current_version_id) {
+          const vId = resolvedVersionId || generateVersionId();
+          const diffHunks = computeLineDiffHunks('', localContent);
+          VersionModel.createCheckpointTransaction({
+            id: vId,
+            note_id: existing.id,
+            version_number: 1,
+            parent_version_id: null,
+            message: 'Baseline checkpoint',
+            device_id: 'local_device',
+            created_at: existing.created_at || new Date().toISOString(),
+            content_hash: localHash,
+            is_snapshot: 1,
+            is_auto: 0
+          }, diffHunks, existing.id, currentUserId);
+        }
+
         if ((remoteNote.title && remoteNote.title !== existing.title) || 
-            (remoteNote.notebook_id && remoteNote.notebook_id !== existing.notebook_id)) {
+            (remoteNote.notebook_id && remoteNote.notebook_id !== existing.notebook_id) ||
+            !existing.current_version_id) {
           NoteModel.update(
             existing.id,
             remoteNote.title || existing.title,
             existing.file_path,
             remoteNote.notebook_id || existing.notebook_id,
             existing.content_hash,
-            existing.current_version_id,
+            resolvedVersionId,
             currentUserId,
             remoteNote.sync_mode || existing.sync_mode
           );
         }
+        NoteModel.updateSyncMetadata(existing.id, currentUserId, {
+          lastSyncedHash: localHash,
+          lastSyncedAt: new Date().toISOString(),
+          syncState: 'SYNCED',
+          syncError: null
+        });
         appliedNotes.push({ id: existing.id, action: 'UNCHANGED' });
         continue;
       }
@@ -257,9 +285,10 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         ancestry.relationship === 'A_ANCESTOR_OF_B' ||
         (latestLocalVersion && (
           remoteNote.parent_version_id === latestLocalVersion.id ||
-          remoteNote.previous_content_hash === latestLocalVersion.content_hash ||
-          localContent.trim().length === 0
-        ))
+          remoteNote.previous_content_hash === latestLocalVersion.content_hash
+        )) ||
+        localContent.trim().length === 0 ||
+        !latestLocalVersion
       );
 
       // Check if local is ahead of remote (Case B)
@@ -370,7 +399,9 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
     } else {
       // Case 2: New note: Safe import from peer
       const noteTitle = remoteNote.title || 'Untitled Note';
-      const filePath = getNoteFilePath(noteTitle, 'General Notes');
+      const nb = remoteNote.notebook_id ? NotebookModel.getById(remoteNote.notebook_id, currentUserId) : null;
+      const nbName = nb ? nb.name : 'General Notes';
+      const filePath = getNoteFilePath(noteTitle, nbName);
       writeNoteFile(filePath, remoteContent);
 
       const v1Id = remoteNote.current_version_id || `v1_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -396,7 +427,7 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
         device_id: senderDevice.id || senderDevice.deviceId,
         created_at: remoteNote.created_at || new Date().toISOString(),
         content_hash: remoteHash,
-        is_snapshot: 0,
+        is_snapshot: 1,
         is_auto: 0
       }, diffHunks, remoteNote.id, currentUserId);
 
@@ -458,7 +489,7 @@ router.post('/connect', (req, res) => {
       return res.status(400).json({ error: 'Cannot connect to self.' });
     }
 
-    const peerIp = req.ip || req.socket?.remoteAddress;
+    const peerIp = cleanIp(req.ip || req.socket?.remoteAddress);
 
     // Establish fresh TRUSTED pairing (resets sequence tracking and clears prior revocation)
     const pairedDevice = LanPairingModel.createPairing({
@@ -596,7 +627,7 @@ router.post('/pair/request', (req, res) => {
       return res.status(400).json({ error: 'Cannot connect to self.' });
     }
 
-    const peerIp = req.ip || req.socket?.remoteAddress;
+    const peerIp = cleanIp(req.ip || req.socket?.remoteAddress);
 
     // Check if requester is ALREADY trusted
     const existing = LanPairingModel.getById(requesterDeviceId);
@@ -739,7 +770,7 @@ router.post('/sync', async (req, res) => {
     const currentUserId = senderDevice.user_id || 'usr_local_default';
 
     // 4. Update sender device last seen and IP
-    LanPairingModel.updateLastSeen(senderDevice.id, req.ip, senderDevice.device_port);
+    LanPairingModel.updateLastSeen(senderDevice.id, cleanIp(req.ip || req.socket?.remoteAddress), senderDevice.device_port);
 
     // 5. Ingest incoming notes and notebooks through existing sync and version control engine
     const { appliedNotes, conflicts } = await applyIncomingNotesAndNotebooks(
@@ -936,7 +967,7 @@ router.post('/heartbeat', (req, res) => {
     }
 
     // 4. Update last seen timestamp & IP for this sender device
-    const peerIp = req.ip || req.socket?.remoteAddress;
+    const peerIp = cleanIp(req.ip || req.socket?.remoteAddress);
     LanPairingModel.updateLastSeen(senderDevice.id, peerIp, senderDevice.device_port);
 
     // Compute lightweight sync comparison using existing metadata criteria
@@ -1089,7 +1120,7 @@ router.post('/pair/approve', (req, res) => {
     const pairedDev = LanPairingModel.createPairing({
       id: pairingReq.requester_device_id,
       deviceName: pairingReq.requester_device_name,
-      deviceIp: pairingReq.requester_device_ip,
+      deviceIp: cleanIp(pairingReq.requester_device_ip),
       devicePort: pairingReq.requester_port || 5000,
       pairingToken,
       publicKey: pairingReq.requester_public_key,
@@ -1546,17 +1577,19 @@ router.post('/sync/outbound', async (req, res) => {
 
     // 2. Transmit encrypted payload over LAN transport
     const peerPort = peer.device_port || 5000;
+    const peerIp = cleanIp(peer.device_ip);
+    console.log(`[LAN Outbound Sync] Initiating sync to peer '${peer.device_name}' (${peer.id}) at ${peerIp}:${peerPort}`);
     let remoteData;
     try {
       remoteData = await sendEncryptedLanSync(
-        peer.device_ip,
+        peerIp,
         peerPort,
         localProfile,
         peer,
         { notes: notesWithContent, notebooks }
       );
     } catch (syncErr) {
-      console.warn(`[LAN Outbound Sync] Sync to peer '${peer.id}' failed: ${syncErr.message}`);
+      console.warn(`[LAN Outbound Sync] Sync to peer '${peer.id}' (${peerIp}:${peerPort}) failed: ${syncErr.message}`);
       throw syncErr;
     }
 

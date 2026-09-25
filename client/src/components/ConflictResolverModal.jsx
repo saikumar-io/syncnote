@@ -472,6 +472,34 @@ export default function ConflictResolverModal({
                   </pre>
                 )}
               </div>
+
+              {/* Three-Way Source Context (Common Ancestor, Device A, Device B) */}
+              <div style={{ marginTop: '16px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' }}>
+                <div>
+                  <div style={{ fontSize: '0.70rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px', textTransform: 'uppercase' }}>
+                    COMMON ANCESTOR
+                  </div>
+                  <pre style={{ margin: 0, height: '110px', overflowY: 'auto', background: 'var(--bg-input, #09090b)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '8px', fontSize: '0.70rem', lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', boxSizing: 'border-box' }}>
+                    {conflict?.ancestor_content || '(Base state empty)'}
+                  </pre>
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.70rem', fontWeight: 700, color: 'var(--accent-primary, #3b82f6)', marginBottom: '4px', textTransform: 'uppercase' }}>
+                    DEVICE A (Local)
+                  </div>
+                  <pre style={{ margin: 0, height: '110px', overflowY: 'auto', background: 'var(--bg-input, #09090b)', color: 'var(--text-primary)', border: '1px solid rgba(59, 130, 246, 0.3)', borderRadius: '6px', padding: '8px', fontSize: '0.70rem', lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', boxSizing: 'border-box' }}>
+                    {conflict?.local_content || '(Empty)'}
+                  </pre>
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.70rem', fontWeight: 700, color: 'var(--accent-emerald, #10b981)', marginBottom: '4px', textTransform: 'uppercase' }}>
+                    DEVICE B ({remoteDeviceName})
+                  </div>
+                  <pre style={{ margin: 0, height: '110px', overflowY: 'auto', background: 'var(--bg-input, #09090b)', color: 'var(--text-primary)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '6px', padding: '8px', fontSize: '0.70rem', lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', boxSizing: 'border-box' }}>
+                    {conflict?.remote_content || '(Empty)'}
+                  </pre>
+                </div>
+              </div>
             </div>
           )}
 
@@ -593,7 +621,7 @@ export default function ConflictResolverModal({
               style={{ fontSize: '0.74rem', padding: '6px 12px' }}
               title="Preserve local version and create a resolution checkpoint"
             >
-              Keep Device A (Local)
+              Keep A
             </button>
 
             <button
@@ -604,7 +632,7 @@ export default function ConflictResolverModal({
               style={{ fontSize: '0.74rem', padding: '6px 12px' }}
               title="Accept remote peer version as the new checkpoint"
             >
-              Keep Device B (Remote)
+              Keep B
             </button>
 
             <button
@@ -622,7 +650,7 @@ export default function ConflictResolverModal({
               }}
               title="Defer decision: keep both versions for later resolution"
             >
-              Reject / Resolve Later
+              Resolve Later
             </button>
           </div>
 

@@ -7,7 +7,8 @@ const {
   readNoteFile, 
   moveNoteFile, 
   deleteNoteFile, 
-  calculateHash 
+  calculateHash,
+  generateVersionId 
 } = require('../utils/fileStorage');
 const {
   computeLineDiffHunks,
@@ -153,9 +154,25 @@ router.post('/', async (req, res) => {
     const contentHash = calculateHash(finalContent);
 
     const id = `note_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const newMeta = NoteModel.create(id, finalTitle, filePath, finalNotebookId, contentHash, null, req.user.id, finalSyncMode);
+    const v1Id = generateVersionId();
+    const diffHunks = computeLineDiffHunks('', finalContent);
 
-    SessionModel.upsert(id, null, contentHash, finalContent.trim().length > 0 ? 'uncheckpointed' : 'clean', req.user.id);
+    const newMeta = NoteModel.create(id, finalTitle, filePath, finalNotebookId, contentHash, v1Id, req.user.id, finalSyncMode);
+
+    VersionModel.createCheckpointTransaction({
+      id: v1Id,
+      note_id: id,
+      version_number: 1,
+      parent_version_id: null,
+      message: 'Initial note creation',
+      device_id: 'local_device',
+      created_at: new Date().toISOString(),
+      content_hash: contentHash,
+      is_snapshot: 1,
+      is_auto: 0
+    }, diffHunks, id, req.user.id);
+
+    SessionModel.upsert(id, v1Id, contentHash, 'clean', req.user.id);
     const sessionInfo = getNoteSessionInfo(newMeta, finalContent, req.user.id);
 
     // If sync_mode === 'google' or 'cloud' or 'both', attempt Google Drive sync upload
@@ -213,10 +230,30 @@ router.put('/:id', async (req, res) => {
     const finalNotebookId = notebook_id !== undefined ? notebook_id : existing.notebook_id;
     const finalSyncMode = sync_mode !== undefined ? (['local', 'google', 'cloud', 'lan', 'both'].includes(sync_mode) ? (sync_mode === 'google' ? 'cloud' : sync_mode) : existing.sync_mode) : existing.sync_mode;
 
-    const latestVersion = VersionModel.getLatestForNote(id, req.user.id);
-    const finalVersion = current_version_id !== undefined
+    let latestVersion = VersionModel.getLatestForNote(id, req.user.id);
+    let finalVersion = current_version_id !== undefined
       ? current_version_id
       : (latestVersion ? latestVersion.id : existing.current_version_id);
+
+    // Self-healing: Ensure a valid version checkpoint and non-null current_version_id exist
+    if (!finalVersion || !latestVersion) {
+      const v1Id = existing.current_version_id || generateVersionId();
+      const diffHunks = computeLineDiffHunks('', finalContent);
+      VersionModel.createCheckpointTransaction({
+        id: v1Id,
+        note_id: id,
+        version_number: 1,
+        parent_version_id: null,
+        message: 'Initial checkpoint',
+        device_id: 'local_device',
+        created_at: existing.created_at || new Date().toISOString(),
+        content_hash: calculateHash(finalContent),
+        is_snapshot: 1,
+        is_auto: 0
+      }, diffHunks, id, req.user.id);
+      finalVersion = v1Id;
+      latestVersion = VersionModel.getById(v1Id, req.user.id);
+    }
 
     console.log(`[NoteSave] noteId: ${id}, receivedContentLength: ${typeof content === 'string' ? content.length : 'not-provided'}, savedContentLength: ${finalContent ? finalContent.length : 0}, currentVersionId: ${finalVersion}`);
 

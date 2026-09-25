@@ -8,17 +8,34 @@ const {
 } = require('./deviceCrypto');
 
 /**
- * Perform HTTP request with timeout
+ * Clean IPv6-mapped IPv4 prefix (e.g. ::ffff:10.20.89.181 -> 10.20.89.181)
+ */
+function cleanIp(ip) {
+  if (!ip) return ip;
+  return String(ip).replace(/^::ffff:/i, '').trim();
+}
+
+/**
+ * Perform HTTP request with timeout and diagnostic logging
  */
 function httpRequest(options, postData = null, timeoutMs = 5000) {
+  const cleanHostname = cleanIp(options.hostname);
+  const targetPort = options.port || 5000;
+  const targetPath = options.path || '/';
+  const method = options.method || 'GET';
+
+  console.log(`[LAN Transport] Connecting to ${cleanHostname}:${targetPort}${targetPath} via ${method} (timeout: ${timeoutMs}ms)...`);
+
   return new Promise((resolve, reject) => {
     const req = http.request({
       ...options,
+      hostname: cleanHostname,
       timeout: timeoutMs
     }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
+        console.log(`[LAN Transport Success] Connected to ${cleanHostname}:${targetPort}${targetPath} (HTTP ${res.statusCode})`);
         try {
           const parsed = JSON.parse(data);
           resolve({ status: res.statusCode, data: parsed });
@@ -28,10 +45,15 @@ function httpRequest(options, postData = null, timeoutMs = 5000) {
       });
     });
 
-    req.on('error', (err) => reject(err));
+    req.on('error', (err) => {
+      console.warn(`[LAN Transport Failure] Connection error to ${cleanHostname}:${targetPort}${targetPath}: ${err.message}`);
+      reject(err);
+    });
+
     req.on('timeout', () => {
       req.destroy();
-      reject(new Error(`Connection timeout after ${timeoutMs}ms to ${options.hostname}:${options.port}`));
+      console.warn(`[LAN Transport Timeout] Connection timed out after ${timeoutMs}ms to ${cleanHostname}:${targetPort}${targetPath}`);
+      reject(new Error(`Connection timeout after ${timeoutMs}ms to ${cleanHostname}:${targetPort}`));
     });
 
     if (postData) {
@@ -333,6 +355,7 @@ async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfi
 }
 
 module.exports = {
+  cleanIp,
   httpRequest,
   checkPeerReachable,
   sendPairingRequest,

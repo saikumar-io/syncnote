@@ -50,12 +50,16 @@ app.get('/', (req, res) => {
   });
 });
 
-const { startLanDiscoveryService } = require('./utils/lanDiscoveryService');
+const { startLanDiscoveryService, getLocalIpAddresses } = require('./utils/lanDiscoveryService');
 
-// Start Express Listener
-app.listen(PORT, () => {
+// Start Express Listener (Bind to 0.0.0.0 so peer devices on LAN can connect)
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  const localIps = getLocalIpAddresses();
   console.log(`=================================`);
   console.log(` SyncNote Server Running Port: ${PORT}`);
+  console.log(` Local Server Bind Address: ${HOST}:${PORT} (All network interfaces)`);
+  console.log(` Local LAN IP(s): ${localIps.join(', ') || '127.0.0.1'}`);
   console.log(` Health URL: http://localhost:${PORT}/api/health`);
   console.log(` Environment Diagnostics:`);
   console.log(` - GOOGLE_CLIENT_ID: ${process.env.GOOGLE_CLIENT_ID ? 'LOADED' : 'NOT SET'}`);
