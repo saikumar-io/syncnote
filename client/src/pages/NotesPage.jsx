@@ -174,21 +174,34 @@ export default function NotesPage({
     }
   };
 
-  // Safe Notebook Deletion
-  const handleDeleteNotebookClick = (folder) => {
-    const count = getFolderNoteCount(folder.id);
-    if (count > 0) {
-      setDeleteNotebookTarget(folder);
-    } else {
-      if (onDeleteNotebook) onDeleteNotebook(folder.id);
+  // Rename Notebook handler
+  const handleRenameNotebook = (folder) => {
+    const newName = prompt('Enter new notebook name:', folder.name || '');
+    if (newName && newName.trim() && newName.trim() !== folder.name) {
+      if (onUpdateNote) {
+        // We re-use the notebooks API via App.jsx; call notebooksApi.rename via onRenameNotebook if provided
+      }
+      // Direct: call the API and reload (handled via notebooksApi in App.jsx)
+      import('../api/notebooksApi').then(({ notebooksApi }) => {
+        notebooksApi.rename(folder.id, newName.trim()).then(() => {
+          // Fire notes-updated so App.jsx reloads notebooks
+          window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
+        }).catch(err => {
+          console.error('[Notebook Rename Error]', err);
+        });
+      }).catch(err => {
+        console.error('[Notebook Rename Import Error]', err);
+      });
     }
   };
 
+  // Safe Notebook Deletion
+  const handleDeleteNotebookClick = (folder) => {
+    // Always show confirmation modal (even for empty notebooks, for safety)
+    setDeleteNotebookTarget(folder);
+  };
+
   const confirmDeleteNotebookWithNotes = (folderId) => {
-    const containedNotes = notes.filter((n) => n.notebook_id === folderId);
-    containedNotes.forEach((n) => {
-      if (onUpdateNote) onUpdateNote(n.id, { notebook_id: null });
-    });
     if (onDeleteNotebook) onDeleteNotebook(folderId);
   };
 
@@ -397,6 +410,7 @@ export default function NotesPage({
                     viewMode={viewMode}
                     isDragOver={isDragOver}
                     onOpen={() => setCurrentFolderId(folder.id)}
+                    onRename={() => { handleRenameNotebook(folder); setActiveMenuKey(null); }}
                     onDelete={() => handleDeleteNotebookClick(folder)}
                     onDragOver={(e) => handleDragOverFolder(e, folder.id)}
                     onDragLeave={() => setDragOverFolderId(null)}
@@ -520,7 +534,8 @@ function FolderTile({
   noteCount, 
   viewMode, 
   isDragOver,
-  onOpen, 
+  onOpen,
+  onRename,
   onDelete, 
   onDragOver, 
   onDragLeave, 
@@ -564,12 +579,18 @@ function FolderTile({
           <div className="tile-dropdown-popover">
             <button className="dropdown-item-btn" onClick={() => { onOpen(); }}>
               <Folder size={13} />
-              <span>Open Folder</span>
+              <span>Open</span>
             </button>
+            {onRename && (
+              <button className="dropdown-item-btn" onClick={() => { onRename(); }}>
+                <Edit2 size={13} />
+                <span>Rename</span>
+              </button>
+            )}
             {onDelete && (
               <button className="dropdown-item-btn danger" onClick={() => { onDelete(); }}>
                 <Trash2 size={13} />
-                <span>Delete Folder</span>
+                <span>Delete</span>
               </button>
             )}
           </div>

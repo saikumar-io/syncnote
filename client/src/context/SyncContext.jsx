@@ -83,11 +83,23 @@ export function SyncProvider({ children }) {
       try {
         const conflictRes = await apiClient.get('/api/conflicts').catch(() => null);
         if (conflictRes && Array.isArray(conflictRes.conflicts)) {
-          setUnresolvedConflicts(conflictRes.conflicts);
-          setActiveConflicts(conflictRes.conflicts);
-          if (conflictRes.conflicts.length > 0) {
-            setSyncStatus('CONFLICT');
-          }
+          const newConflicts = conflictRes.conflicts;
+          setUnresolvedConflicts(prev => {
+            const prevCount = prev.length;
+            const newCount = newConflicts.length;
+            if (newCount > 0) {
+              setSyncStatus('CONFLICT');
+            } else if (prevCount > 0 && newCount === 0) {
+              // Conflicts were cleared externally (e.g., peer broadcast resolution)
+              setSyncStatus('SYNCED');
+              // Close any open conflict modal automatically
+              setActiveConflictModal(null);
+              // Force notes reload so UI reflects the resolved content
+              window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
+            }
+            return newConflicts;
+          });
+          setActiveConflicts(newConflicts);
         }
       } catch (cErr) {}
 

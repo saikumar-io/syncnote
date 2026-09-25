@@ -198,6 +198,19 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
     if (!nb || !nb.id) continue;
     const existingNb = NotebookModel.getById(nb.id, currentUserId);
     if (!existingNb) {
+      // Before creating, check if a notebook with the SAME name already exists locally (different ID)
+      // This prevents duplicates when both devices created notebooks independently with the same name
+      const incomingNameNorm = (nb.name || 'General Notes').trim().toLowerCase();
+      const allLocalNotebooks = NotebookModel.getAll(currentUserId);
+      const duplicateByName = allLocalNotebooks.find(
+        ln => ln.id !== nb.id && (ln.name || '').trim().toLowerCase() === incomingNameNorm
+      );
+      if (duplicateByName) {
+        // A notebook with the same name already exists locally under a different ID.
+        // Skip creation to avoid duplicate cards; local notebook wins since it already has content.
+        console.log(`[LAN Sync Notebook] Skipping duplicate notebook "${nb.name}" (incoming: ${nb.id}, local: ${duplicateByName.id})`);
+        continue;
+      }
       // Case 2: Notebook does not exist locally -> Create normally
       NotebookModel.create(nb.id, nb.name || 'General Notes', currentUserId);
     } else {
@@ -229,13 +242,16 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
     }
   }
 
-  // 2. Ingest Notes (Strict policy: only notes marked 'lan' or 'both')
+  // 2. Ingest Notes (Strict policy: only notes marked 'lan' or 'both', unless it's a conflict resolution)
   for (const remoteNote of incomingNotes) {
     if (!remoteNote || !remoteNote.id) continue;
     const mode = remoteNote.sync_mode;
-    if (mode !== 'lan' && mode !== 'both') {
+    // Resolution packets bypass the sync_mode filter — they must always be applied
+    const isExplicitResolution = Boolean(remoteNote.is_resolution || remoteNote.resolved_conflict_id);
+    if (!isExplicitResolution && mode !== 'lan' && mode !== 'both') {
       continue; // Strictly skip local or cloud-only notes
     }
+
 
     const existing = NoteModel.getById(remoteNote.id, currentUserId);
     const remoteContent = typeof remoteNote.content === 'string' ? remoteNote.content : '';
@@ -1718,9 +1734,17 @@ router.post('/sync/outbound', async (req, res) => {
  * Broadcast an accepted conflict resolution to all trusted paired peers over LAN
  */
 async function broadcastResolvedNoteToPeers(noteId, resolvedVersionId, currentUserId = 'usr_local_default') {
-  const getPeers = LanPairingModel.getPairedDevices || LanPairingModel.getAllDevices || LanPairingModel.getAll;
-  const trustedPeers = (getPeers ? getPeers.call(LanPairingModel, currentUserId) : []).filter(p => p.status === 'TRUSTED');
-  if (!trustedPeers || trustedPeers.length === 0) return;
+  // First try user-scoped peers, then fallback to any trusted device in DB
+  let trustedPeers = LanPairingModel.getPairedDevices(currentUserId);
+  if (!trustedPeers || trustedPeers.length === 0) {
+    // Fallback: get ALL trusted devices regardless of user_id
+    trustedPeers = (LanPairingModel.getAllDevices ? LanPairingModel.getAllDevices(currentUserId) : [])
+      .filter(p => p.status === 'TRUSTED');
+  }
+  if (!trustedPeers || trustedPeers.length === 0) {
+    console.log(`[LAN Resolution Sync] No trusted peers found for broadcast.`);
+    return;
+  }
 
   const note = NoteModel.getById(noteId, currentUserId);
   if (!note) return;
