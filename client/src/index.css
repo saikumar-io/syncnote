@@ -4874,6 +4874,70 @@ kbd {
   margin-top: 2px;
 }
 
+.auth-otp-input {
+  letter-spacing: 8px;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 1.25rem;
+  font-weight: 700;
+  padding: 0 12px !important;
+}
+
+.auth-resend-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.auth-resend-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent-primary);
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: opacity var(--ease-fast);
+}
+
+.auth-resend-btn:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.auth-resend-btn:not(:disabled):hover {
+  text-decoration: underline;
+}
+
+.auth-success-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 12px 0 8px;
+  gap: 12px;
+}
+
+.auth-success-icon-box {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--accent-emerald-subtle);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: var(--accent-emerald);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
 /* --------------------------------------------------------------------------
    16. UTILITY CLASSES & SPINNERS
    -------------------------------------------------------------------------- */

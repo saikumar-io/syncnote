@@ -1,13 +1,16 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { UserModel } = require('../db/database');
-const { PgUserModel, PgDeviceModel } = require('../db/postgres');
+const { PgUserModel, PgDeviceModel, PgPasswordResetModel } = require('../db/postgres');
 const {
   hashPassword,
   comparePassword,
   generateToken,
+  verifyToken,
   validateRegistrationInput
 } = require('../utils/auth');
+const { sendPasswordResetOtpEmail } = require('../utils/emailService');
 const { requireAuth, optionalAuth } = require('../middleware/authMiddleware');
 
 const COOKIE_OPTIONS = {
@@ -15,6 +18,12 @@ const COOKIE_OPTIONS = {
   secure: process.env.NODE_ENV === 'production',
   sameSite: 'lax',
   maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+};
+
+const CLEAR_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'lax'
 };
 
 /**
@@ -145,7 +154,7 @@ router.post('/login', async (req, res) => {
  * POST /api/auth/logout
  */
 router.post('/logout', (req, res) => {
-  res.clearCookie('syncnote_token', COOKIE_OPTIONS);
+  res.clearCookie('syncnote_token', CLEAR_COOKIE_OPTIONS);
   return res.json({ success: true, message: 'Logged out successfully.' });
 });
 
@@ -156,7 +165,7 @@ router.get('/me', requireAuth, async (req, res) => {
   try {
     const user = await PgUserModel.findById(req.user.id);
     if (!user) {
-      res.clearCookie('syncnote_token', COOKIE_OPTIONS);
+      res.clearCookie('syncnote_token', CLEAR_COOKIE_OPTIONS);
       return res.status(401).json({ error: 'User not found.' });
     }
 
@@ -282,6 +291,7 @@ router.post('/set-password', requireAuth, async (req, res) => {
 
 /**
  * POST /api/auth/forgot-password
+ * Initiates OTP password recovery flow
  */
 router.post('/forgot-password', async (req, res) => {
   try {
@@ -294,40 +304,189 @@ router.post('/forgot-password', async (req, res) => {
     const user = await PgUserModel.findByEmail(cleanEmail);
 
     if (!user) {
-      return res.json({
-        success: true,
-        message: 'If an account exists with this email address, password reset instructions have been generated.'
-      });
+      return res.status(404).json({ error: 'No account found with this email address.' });
     }
 
-    const recoveryToken = generateToken({
-      id: user.id,
-      email: user.email,
-      type: 'password_recovery'
+    // Rate limiting & 60-second resend cooldown check
+    const lastReq = await PgPasswordResetModel.getLastRequest(cleanEmail);
+    if (lastReq && lastReq.created_at) {
+      const elapsedMs = Date.now() - new Date(lastReq.created_at).getTime();
+      const cooldownMs = 60 * 1000;
+      if (elapsedMs < cooldownMs) {
+        const remainingSec = Math.ceil((cooldownMs - elapsedMs) / 1000);
+        return res.status(429).json({
+          error: `Please wait ${remainingSec}s before requesting a new code.`,
+          remainingSeconds: remainingSec
+        });
+      }
+    }
+
+    // Generate secure 6-digit OTP
+    const otp = String(crypto.randomInt(100000, 1000000));
+    const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
+
+    // Store secure hash of OTP (invalidating previous unused requests)
+    await PgPasswordResetModel.create({
+      userId: user.id,
+      email: cleanEmail,
+      otpHash,
+      expiresAt
     });
 
-    console.log(`[Password Recovery] Generated reset token for ${cleanEmail}`);
+    // Send OTP directly to user's registered email (never logged or exposed in response)
+    const emailResult = await sendPasswordResetOtpEmail({ toEmail: cleanEmail, otp });
+    if (!emailResult.success) {
+      return res.status(500).json({ error: 'Failed to send OTP verification email. Please check server email configuration.' });
+    }
 
     return res.json({
       success: true,
-      message: 'Password reset instructions have been generated.',
-      recoveryToken
+      message: 'OTP sent to your email.'
     });
   } catch (err) {
-    console.error('Forgot Password Error:', err);
-    return res.status(500).json({ error: 'Failed to process password recovery request.' });
+    console.error('[Email Service] Failed to send OTP email');
+    return res.status(500).json({ error: 'Failed to process password recovery request. Please try again.' });
+  }
+});
+
+/**
+ * POST /api/auth/resend-otp
+ * Resends a fresh 6-digit OTP with 60-second cooldown enforcement
+ */
+router.post('/resend-otp', async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await PgUserModel.findByEmail(cleanEmail);
+
+    if (!user) {
+      return res.status(404).json({ error: 'No account found with this email address.' });
+    }
+
+    // Enforce 60-second cooldown
+    const lastReq = await PgPasswordResetModel.getLastRequest(cleanEmail);
+    if (lastReq && lastReq.created_at) {
+      const elapsedMs = Date.now() - new Date(lastReq.created_at).getTime();
+      const cooldownMs = 60 * 1000;
+      if (elapsedMs < cooldownMs) {
+        const remainingSec = Math.ceil((cooldownMs - elapsedMs) / 1000);
+        return res.status(429).json({
+          error: `Please wait ${remainingSec}s before requesting a new code.`,
+          remainingSeconds: remainingSec
+        });
+      }
+    }
+
+    // Generate fresh secure 6-digit OTP
+    const otp = String(crypto.randomInt(100000, 1000000));
+    const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+    await PgPasswordResetModel.create({
+      userId: user.id,
+      email: cleanEmail,
+      otpHash,
+      expiresAt
+    });
+
+    const emailResult = await sendPasswordResetOtpEmail({ toEmail: cleanEmail, otp });
+    if (!emailResult.success) {
+      return res.status(500).json({ error: 'Failed to send OTP verification email. Please check server email configuration.' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'OTP sent to your email.'
+    });
+  } catch (err) {
+    console.error('[Email Service] Failed to send OTP email');
+    return res.status(500).json({ error: 'Failed to resend OTP. Please try again.' });
+  }
+});
+
+/**
+ * POST /api/auth/verify-otp
+ * Verifies the 6-digit OTP, enforces attempt limits and expiration
+ */
+router.post('/verify-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body || {};
+
+    if (!email || !otp) {
+      return res.status(400).json({ error: 'Email and 6-digit OTP are required.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanOtp = String(otp).trim();
+
+    if (!/^\d{6}$/.test(cleanOtp)) {
+      return res.status(400).json({ error: 'OTP must be a 6-digit number.' });
+    }
+
+    const resetRecord = await PgPasswordResetModel.getLatestActive(cleanEmail);
+
+    if (!resetRecord || resetRecord.used || resetRecord.verified) {
+      return res.status(400).json({ error: 'Invalid or expired OTP.' });
+    }
+
+    // Check attempt limits (max 5)
+    if (resetRecord.attempts >= (resetRecord.max_attempts || 5)) {
+      return res.status(400).json({ error: 'Too many incorrect attempts. Please request a new OTP.' });
+    }
+
+    // Check expiration (10 minutes)
+    if (new Date(resetRecord.expires_at).getTime() < Date.now()) {
+      return res.status(400).json({ error: 'Invalid or expired OTP.' });
+    }
+
+    // Constant-time hash verification
+    const inputHash = crypto.createHash('sha256').update(cleanOtp).digest('hex');
+    const bufInput = Buffer.from(inputHash, 'hex');
+    const bufStored = Buffer.from(resetRecord.otp_hash, 'hex');
+    const isMatch = bufInput.length === bufStored.length && crypto.timingSafeEqual(bufInput, bufStored);
+
+    if (!isMatch) {
+      await PgPasswordResetModel.incrementAttempts(resetRecord.id);
+      return res.status(400).json({ error: 'Invalid or expired OTP.' });
+    }
+
+    // Mark verified
+    await PgPasswordResetModel.markVerified(resetRecord.id);
+
+    // Issue short-lived verified session token
+    const resetToken = generateToken({
+      id: resetRecord.user_id,
+      resetId: resetRecord.id,
+      email: cleanEmail,
+      type: 'password_reset_verified'
+    });
+
+    return res.json({
+      success: true,
+      message: 'OTP verified successfully.',
+      resetToken
+    });
+  } catch (err) {
+    console.error('Verify OTP Error:', err.message);
+    return res.status(500).json({ error: 'Failed to verify OTP. Please try again.' });
   }
 });
 
 /**
  * POST /api/auth/reset-password
+ * Updates password only upon valid verified OTP session
  */
 router.post('/reset-password', async (req, res) => {
   try {
-    const { recoveryToken, newPassword, confirmPassword } = req.body || {};
+    const { resetToken, newPassword, confirmPassword } = req.body || {};
 
-    if (!recoveryToken) {
-      return res.status(400).json({ error: 'Recovery token is required.' });
+    if (!resetToken) {
+      return res.status(400).json({ error: 'Verification token is required. Please verify OTP first.' });
     }
 
     if (!newPassword || newPassword.length < 6) {
@@ -338,21 +497,35 @@ router.post('/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'New passwords do not match.' });
     }
 
-    const decoded = verifyToken(recoveryToken);
-    if (!decoded || decoded.type !== 'password_recovery' || !decoded.id) {
-      return res.status(400).json({ error: 'Invalid or expired recovery token. Please request a new one.' });
+    const decoded = verifyToken(resetToken);
+    if (!decoded || decoded.type !== 'password_reset_verified' || !decoded.resetId || !decoded.id) {
+      return res.status(400).json({ error: 'Invalid or expired session. Please start the password recovery process again.' });
     }
 
+    const resetRecord = await PgPasswordResetModel.getById(decoded.resetId);
+    if (!resetRecord || !resetRecord.verified || resetRecord.used) {
+      return res.status(400).json({ error: 'Invalid or already used OTP session. Please request a new OTP.' });
+    }
+
+    // Check expiration
+    if (new Date(resetRecord.expires_at).getTime() < Date.now()) {
+      return res.status(400).json({ error: 'OTP session has expired. Please request a new OTP.' });
+    }
+
+    // Securely hash new password with existing bcrypt hasher
     const newHash = await hashPassword(newPassword);
     await PgUserModel.updatePassword(decoded.id, newHash);
 
+    // Invalidate reset record so it can NEVER be reused
+    await PgPasswordResetModel.markUsed(resetRecord.id);
+
     return res.json({
       success: true,
-      message: 'Password has been reset successfully! You can now log in with your new password.'
+      message: 'Password changed successfully.'
     });
   } catch (err) {
-    console.error('Reset Password Error:', err);
-    return res.status(500).json({ error: 'Failed to reset password.' });
+    console.error('Reset Password Error:', err.message);
+    return res.status(500).json({ error: 'Failed to reset password. Please try again.' });
   }
 });
 

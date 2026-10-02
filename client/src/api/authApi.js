@@ -55,6 +55,14 @@ export const authApi = {
     return apiClient.post(`${API_BASE}/forgot-password`, data);
   },
 
+  async resendOtp(data) {
+    return apiClient.post(`${API_BASE}/resend-otp`, data);
+  },
+
+  async verifyOtp(data) {
+    return apiClient.post(`${API_BASE}/verify-otp`, data);
+  },
+
   async resetPassword(data) {
     return apiClient.post(`${API_BASE}/reset-password`, data);
   },

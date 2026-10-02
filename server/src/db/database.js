@@ -86,6 +86,24 @@ const initDatabase = () => {
       authorized_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS password_resets (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      email TEXT NOT NULL,
+      otp_hash TEXT NOT NULL,
+      expires_at DATETIME NOT NULL,
+      attempts INTEGER DEFAULT 0,
+      max_attempts INTEGER DEFAULT 5,
+      verified INTEGER DEFAULT 0,
+      used INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_password_resets_email ON password_resets(email);
+    CREATE INDEX IF NOT EXISTS idx_password_resets_user_id ON password_resets(user_id);
   `);
 
   try { db.exec("ALTER TABLE google_drive_auths ADD COLUMN status TEXT DEFAULT 'CONNECTED';"); } catch (e) {}
@@ -556,6 +574,57 @@ const UserModel = {
     `).run(userId, cleanEmail, username, String(googleId), avatarUrl || null, now, now);
 
     return UserModel.findById(userId);
+  }
+};
+
+// Password Reset Operations Helper Methods (OTP Flow)
+const PasswordResetModel = {
+  create: ({ id, userId, email, otpHash, expiresAt }) => {
+    const resetId = id || `reset_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const cleanEmail = (email || '').trim().toLowerCase();
+    const now = new Date().toISOString();
+
+    // Invalidate any previous unused OTP requests for this email
+    db.prepare('UPDATE password_resets SET used = 1, updated_at = ? WHERE email = ? AND used = 0').run(now, cleanEmail);
+
+    const stmt = db.prepare(`
+      INSERT INTO password_resets (id, user_id, email, otp_hash, expires_at, attempts, max_attempts, verified, used, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 0, 5, 0, 0, ?, ?)
+    `);
+    stmt.run(resetId, userId, cleanEmail, otpHash, expiresAt, now, now);
+    return PasswordResetModel.getById(resetId);
+  },
+
+  getById: (id) => {
+    return db.prepare('SELECT * FROM password_resets WHERE id = ?').get(id) || null;
+  },
+
+  getLatestActive: (email) => {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    return db.prepare('SELECT * FROM password_resets WHERE email = ? AND used = 0 ORDER BY created_at DESC LIMIT 1').get(cleanEmail) || null;
+  },
+
+  getLastRequest: (email) => {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    return db.prepare('SELECT * FROM password_resets WHERE email = ? ORDER BY created_at DESC LIMIT 1').get(cleanEmail) || null;
+  },
+
+  incrementAttempts: (id) => {
+    const now = new Date().toISOString();
+    db.prepare('UPDATE password_resets SET attempts = attempts + 1, updated_at = ? WHERE id = ?').run(now, id);
+    return PasswordResetModel.getById(id);
+  },
+
+  markVerified: (id) => {
+    const now = new Date().toISOString();
+    db.prepare('UPDATE password_resets SET verified = 1, updated_at = ? WHERE id = ?').run(now, id);
+    return PasswordResetModel.getById(id);
+  },
+
+  markUsed: (id) => {
+    const now = new Date().toISOString();
+    db.prepare('UPDATE password_resets SET used = 1, updated_at = ? WHERE id = ?').run(now, id);
+    return PasswordResetModel.getById(id);
   }
 };
 
@@ -1892,5 +1961,6 @@ module.exports = {
   LanPairingModel,
   LanPairingRequestModel,
   GoogleDriveAuthModel,
-  ConflictModel
+  ConflictModel,
+  PasswordResetModel
 };

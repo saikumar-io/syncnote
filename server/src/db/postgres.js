@@ -84,6 +84,26 @@ async function initPostgresSchema() {
 
       await client.query(`CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);`);
 
+      // Create password_resets table in PostgreSQL
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS password_resets (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+          email VARCHAR(255) NOT NULL,
+          otp_hash TEXT NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL,
+          attempts INTEGER DEFAULT 0,
+          max_attempts INTEGER DEFAULT 5,
+          verified BOOLEAN DEFAULT FALSE,
+          used BOOLEAN DEFAULT FALSE,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+      `);
+
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_password_resets_email ON password_resets(email);`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_password_resets_user_id ON password_resets(user_id);`);
+
       isPostgresConnected = true;
       console.log('✅ [PostgreSQL] Central user authentication schema initialized successfully.');
       return true;
@@ -389,11 +409,154 @@ const PgDeviceModel = {
   }
 };
 
+/**
+ * Password Reset Model (PostgreSQL with SQLite fallback)
+ */
+const PgPasswordResetModel = {
+  async create({ userId, email, otpHash, expiresAt }) {
+    const cleanEmail = (email || '').trim().toLowerCase();
+
+    if (isPostgresConnected && pool) {
+      try {
+        // Invalidate any previous unused OTPs
+        await query(
+          'UPDATE password_resets SET used = TRUE, updated_at = NOW() WHERE email = $1 AND used = FALSE',
+          [cleanEmail]
+        );
+
+        const res = await query(
+          `INSERT INTO password_resets (user_id, email, otp_hash, expires_at, attempts, max_attempts, verified, used)
+           VALUES ($1, $2, $3, $4, 0, 5, FALSE, FALSE)
+           RETURNING *`,
+          [userId, cleanEmail, otpHash, expiresAt]
+        );
+        const row = res.rows[0];
+        // Mirror to SQLite
+        const { PasswordResetModel } = require('./database');
+        try {
+          PasswordResetModel.create({ id: row.id, userId, email: cleanEmail, otpHash, expiresAt });
+        } catch (e) {}
+        return row;
+      } catch (err) {
+        console.warn('[PgPasswordResetModel.create error]:', err.message);
+      }
+    }
+
+    const { PasswordResetModel } = require('./database');
+    return PasswordResetModel.create({ userId, email: cleanEmail, otpHash, expiresAt });
+  },
+
+  async getById(id) {
+    if (isPostgresConnected && pool) {
+      try {
+        const res = await query('SELECT * FROM password_resets WHERE id = $1', [id]);
+        if (res.rows.length > 0) return res.rows[0];
+        return null;
+      } catch (err) {
+        console.warn('[PgPasswordResetModel.getById error]:', err.message);
+      }
+    }
+
+    const { PasswordResetModel } = require('./database');
+    return PasswordResetModel.getById(id);
+  },
+
+  async getLatestActive(email) {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    if (isPostgresConnected && pool) {
+      try {
+        const res = await query(
+          'SELECT * FROM password_resets WHERE email = $1 AND used = FALSE ORDER BY created_at DESC LIMIT 1',
+          [cleanEmail]
+        );
+        if (res.rows.length > 0) return res.rows[0];
+        return null;
+      } catch (err) {
+        console.warn('[PgPasswordResetModel.getLatestActive error]:', err.message);
+      }
+    }
+
+    const { PasswordResetModel } = require('./database');
+    return PasswordResetModel.getLatestActive(cleanEmail);
+  },
+
+  async getLastRequest(email) {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    if (isPostgresConnected && pool) {
+      try {
+        const res = await query(
+          'SELECT * FROM password_resets WHERE email = $1 ORDER BY created_at DESC LIMIT 1',
+          [cleanEmail]
+        );
+        if (res.rows.length > 0) return res.rows[0];
+        return null;
+      } catch (err) {
+        console.warn('[PgPasswordResetModel.getLastRequest error]:', err.message);
+      }
+    }
+
+    const { PasswordResetModel } = require('./database');
+    return PasswordResetModel.getLastRequest(cleanEmail);
+  },
+
+  async incrementAttempts(id) {
+    if (isPostgresConnected && pool) {
+      try {
+        const res = await query(
+          'UPDATE password_resets SET attempts = attempts + 1, updated_at = NOW() WHERE id = $1 RETURNING *',
+          [id]
+        );
+        if (res.rows.length > 0) return res.rows[0];
+      } catch (err) {
+        console.warn('[PgPasswordResetModel.incrementAttempts error]:', err.message);
+      }
+    }
+
+    const { PasswordResetModel } = require('./database');
+    return PasswordResetModel.incrementAttempts(id);
+  },
+
+  async markVerified(id) {
+    if (isPostgresConnected && pool) {
+      try {
+        const res = await query(
+          'UPDATE password_resets SET verified = TRUE, updated_at = NOW() WHERE id = $1 RETURNING *',
+          [id]
+        );
+        if (res.rows.length > 0) return res.rows[0];
+      } catch (err) {
+        console.warn('[PgPasswordResetModel.markVerified error]:', err.message);
+      }
+    }
+
+    const { PasswordResetModel } = require('./database');
+    return PasswordResetModel.markVerified(id);
+  },
+
+  async markUsed(id) {
+    if (isPostgresConnected && pool) {
+      try {
+        const res = await query(
+          'UPDATE password_resets SET used = TRUE, updated_at = NOW() WHERE id = $1 RETURNING *',
+          [id]
+        );
+        if (res.rows.length > 0) return res.rows[0];
+      } catch (err) {
+        console.warn('[PgPasswordResetModel.markUsed error]:', err.message);
+      }
+    }
+
+    const { PasswordResetModel } = require('./database');
+    return PasswordResetModel.markUsed(id);
+  }
+};
+
 module.exports = {
   pool,
   query,
   initPostgresSchema,
   isPostgresConnected: () => isPostgresConnected,
   PgUserModel,
-  PgDeviceModel
+  PgDeviceModel,
+  PgPasswordResetModel
 };
