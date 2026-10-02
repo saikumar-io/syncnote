@@ -311,9 +311,8 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
       // NEVER use version_message string matching — it is too fragile and creates false positives.
       const activeConflicts = ConflictModel.getByNoteId(existing.id, currentUserId, true);
       const isResolution = Boolean(
-        remoteNote.is_resolution === true &&
-        remoteNote.resolved_conflict_id &&
-        typeof remoteNote.resolved_conflict_id === 'string'
+        remoteNote.is_resolution === true ||
+        (remoteNote.resolved_conflict_id && typeof remoteNote.resolved_conflict_id === 'string')
       );
 
       // Verify whether incoming resolution can be safely applied without overwriting newer local edits

@@ -234,9 +234,9 @@ TASK AND MERGE RULES:
    - Do NOT invent facts or details that do not exist in either version.
    - Do NOT silently discard unique information from either version.
 4. Contradiction Detection:
-   - If both versions contain contradictory, conflicting, or mutually exclusive facts (e.g., Local chooses PostgreSQL while Remote chooses MongoDB as the primary database), do NOT arbitrarily decide which one is correct.
-   - Do NOT invent a resolution for contradictions.
-   - Instead, explicitly identify and list each contradiction in "contradictions", clearly explain the contradiction in "semantic_analysis", and state in "suggested_merge" that user decision is required.
+   - Complementary information or phrasing differences about the same subject (e.g., "MongoDB is used as the database" and "MongoDB is used to store application data. Redis is used for caching") are COMPATIBLE, NOT contradictions. In this case, "contradictions" MUST be [] (empty array) and "suggested_merge" should naturally merge both facts into a coherent note: e.g. "# Database\n\nMongoDB is used to store application data, while Redis is used for caching."
+   - ONLY list items in "contradictions" if the two versions contain mutually exclusive facts that cannot both be true simultaneously (e.g., Local chooses PostgreSQL while Remote chooses MongoDB as the primary database).
+   - If mutually exclusive contradictions exist, do NOT arbitrarily decide which is correct; list them in "contradictions", explain them in "semantic_analysis", and state in "suggested_merge" that user decision is required.
 
 Respond with a JSON object conforming strictly to:
 {
@@ -244,7 +244,7 @@ Respond with a JSON object conforming strictly to:
   "common_information": ["string list of facts present in both versions"],
   "local_unique_information": ["string list of facts unique to Local"],
   "remote_unique_information": ["string list of facts unique to Remote"],
-  "contradictions": ["string list of contradictory facts identified between versions"],
+  "contradictions": ["string list of contradictory facts identified between versions, or empty array if compatible"],
   "suggested_merge": "string containing the meaningful merged note content preserving both versions, or explaining that user decision is required if mutually exclusive contradictions exist",
   "confidence": "high or low"
 }`;
@@ -376,15 +376,19 @@ function parseOllamaResponse(rawText, { localContent = '', remoteContent = '' } 
   // Helper to normalize array or string fields
   const normalizeList = (val) => {
     if (!val) return [];
+    if (typeof val === 'string') {
+      const vTrim = val.trim();
+      if (!vTrim || /^(none|n\/a|no contradictions?|\[\s*\])$/i.test(vTrim)) return [];
+      try {
+        const parsed = JSON.parse(vTrim);
+        if (Array.isArray(parsed)) return normalizeList(parsed);
+      } catch (e) {}
+      return [vTrim];
+    }
     if (Array.isArray(val)) {
       return val
         .map(v => typeof v === 'string' ? v.trim() : JSON.stringify(v))
-        .filter(v => v.length > 0 && !/^(none|n\/a|no contradictions?)$/i.test(v));
-    }
-    if (typeof val === 'string') {
-      const vTrim = val.trim();
-      if (!vTrim || /^(none|n\/a|no contradictions?)$/i.test(vTrim)) return [];
-      return [vTrim];
+        .filter(v => v.length > 0 && !/^(none|n\/a|no contradictions?|\[\s*\])$/i.test(v));
     }
     return [];
   };
@@ -429,19 +433,32 @@ function parseOllamaResponse(rawText, { localContent = '', remoteContent = '' } 
         mergedNote = directContradiction.suggestedMerge;
         explanation = directContradiction.semanticAnalysis;
         confidence = 'low';
-      } else if (complementaryMerge) {
-        contradictions = [];
-        mergedNote = complementaryMerge;
-        explanation = explanation || 'Preserved complementary useful information from both versions.';
-        confidence = 'high';
-      } else if (contradictions.length > 0 || /user decision required|different choices/i.test(mergedNote)) {
-        confidence = 'low';
-        if (contradictions.length === 0) {
-          contradictions = ['Local and remote versions contain conflicting choices. User decision required.'];
+      } else {
+        // If not a direct structural contradiction, filter out false-positive "contradictions" where both sides agree on the subject
+        if (contradictions.length > 0) {
+          const lLower = (localContent || '').toLowerCase();
+          const rLower = (remoteContent || '').toLowerCase();
+          contradictions = contradictions.filter(c => {
+            const cLower = c.toLowerCase();
+            // If both local and remote agree on the tech (e.g. mongodb), differences in phrasing are complementary, not contradictions
+            if (lLower.includes('mongodb') && rLower.includes('mongodb') && cLower.includes('mongodb')) {
+              return false;
+            }
+            return true;
+          });
         }
-        const lowerMerge = (mergedNote || '').toLowerCase();
-        if (!lowerMerge.includes('user decision required') && !lowerMerge.includes('decision') && !lowerMerge.includes('different choices')) {
-          mergedNote = "Both versions contain different choices. User decision required.";
+
+        if (contradictions.length === 0) {
+          confidence = 'high';
+          if ((!mergedNote || isPlaceholderMerge(mergedNote)) && complementaryMerge) {
+            mergedNote = complementaryMerge;
+            explanation = explanation || 'Preserved complementary useful information from both versions.';
+          }
+        } else {
+          confidence = 'low';
+          if (!mergedNote || isPlaceholderMerge(mergedNote)) {
+            mergedNote = "Both versions contain different choices. User decision required.";
+          }
         }
       }
 
