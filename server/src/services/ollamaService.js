@@ -210,7 +210,7 @@ function isPlaceholderMerge(text) {
  * Requires structured JSON response detailing semantic analysis, common info, contradictions, and merge.
  */
 function buildPrompt({ noteId, ancestorContent, localContent, remoteContent, localDeviceName = 'Device A', remoteDeviceName = 'Device B' }) {
-  const prompt = `You are a semantic reconciliation engine for two conflicting versions of a Markdown note.
+  const prompt = `You are an expert semantic reconciliation engine for two conflicting versions of a Markdown note.
 
 LOCAL VERSION:
 ${localContent || '(Empty note)'}
@@ -219,20 +219,34 @@ REMOTE VERSION:
 ${remoteContent || '(Empty note)'}
 
 ${ancestorContent ? `COMMON ANCESTOR:\n${ancestorContent}\n` : ''}
-TASK:
-1. Reconcile meaning: When both versions express the same underlying facts using different phrasing or words, recognize that they convey the same meaning. Produce a single concise merged statement in "suggested_merge" without repeating redundant sentences.
-2. Combine complementary facts: If both versions contain different useful non-conflicting facts, preserve all meaningful pieces of information in "suggested_merge".
-3. Identify contradictions: If statements contain mutually exclusive or contradictory facts, list them in "contradictions".
+TASK AND MERGE RULES:
+1. Semantic Understanding & Meaningful Merge:
+   - Understand the meaning and context of both versions rather than simply choosing Local or Remote.
+   - Do NOT blindly concatenate the two versions.
+   - Preserve information from both versions when they are compatible and complementary.
+   - Remove duplicate or repeated information.
+   - Resolve wording differences naturally into coherent sentences.
+   - Preserve important technical details from both versions.
+2. Structure & Markdown Preservation:
+   - Maintain the original Markdown structure where possible.
+   - Preserve headings, lists, code blocks, links, tables, and formatting.
+3. Integrity & Accuracy:
+   - Do NOT invent facts or details that do not exist in either version.
+   - Do NOT silently discard unique information from either version.
+4. Contradiction Detection:
+   - If both versions contain contradictory, conflicting, or mutually exclusive facts (e.g., Local chooses PostgreSQL while Remote chooses MongoDB as the primary database), do NOT arbitrarily decide which one is correct.
+   - Do NOT invent a resolution for contradictions.
+   - Instead, explicitly identify and list each contradiction in "contradictions", clearly explain the contradiction in "semantic_analysis", and state in "suggested_merge" that user decision is required.
 
 Respond with a JSON object conforming strictly to:
 {
-  "semantic_analysis": "string explaining equivalence, common points, or differences",
-  "common_information": ["string"],
-  "local_unique_information": ["string"],
-  "remote_unique_information": ["string"],
-  "contradictions": ["string"],
-  "suggested_merge": "string",
-  "confidence": "high"
+  "semantic_analysis": "string explaining equivalence, common points, unique facts, or contradictions",
+  "common_information": ["string list of facts present in both versions"],
+  "local_unique_information": ["string list of facts unique to Local"],
+  "remote_unique_information": ["string list of facts unique to Remote"],
+  "contradictions": ["string list of contradictory facts identified between versions"],
+  "suggested_merge": "string containing the meaningful merged note content preserving both versions, or explaining that user decision is required if mutually exclusive contradictions exist",
+  "confidence": "high or low"
 }`;
 
   return { prompt, systemPrompt: prompt, userPrompt: '' };

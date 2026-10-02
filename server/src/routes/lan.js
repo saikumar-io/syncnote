@@ -277,7 +277,28 @@ async function applyIncomingNotesAndNotebooks(incomingNotes = [], incomingNotebo
     }
 
 
-    const existing = NoteModel.getById(remoteNote.id, currentUserId);
+    let existing = NoteModel.getById(remoteNote.id, currentUserId);
+    // Associate by note-name identity if devices created notes with the same name independently
+    if (!existing && remoteNote.title) {
+      existing = NoteModel.findByNameInLocation(remoteNote.title, remoteNote.notebook_id, currentUserId);
+      if (!existing && remoteNote.notebook_id) {
+        const incomingNb = incomingNotebooks.find(n => n && n.id === remoteNote.notebook_id);
+        if (incomingNb && incomingNb.name) {
+          const localNb = NotebookModel.getAll(currentUserId).find(
+            ln => (ln.name || '').trim().toLowerCase() === (incomingNb.name || '').trim().toLowerCase()
+          );
+          if (localNb) {
+            existing = NoteModel.findByNameInLocation(remoteNote.title, localNb.id, currentUserId);
+          }
+        }
+      }
+      if (!existing) {
+        const allNotes = NoteModel.getAll(currentUserId);
+        existing = allNotes.find(
+          n => (n.title || '').trim().toLowerCase() === (remoteNote.title || '').trim().toLowerCase()
+        );
+      }
+    }
     const remoteContent = typeof remoteNote.content === 'string' ? remoteNote.content : '';
     const remoteHash = remoteNote.content_hash || calculateHash(remoteContent);
 
@@ -2077,7 +2098,11 @@ router.post('/sync/outbound', async (req, res) => {
     if (Array.isArray(remoteData.conflicts)) {
       for (const rc of remoteData.conflicts) {
         const rcNoteId = rc.noteId || rc.note_id;
-        const existsLocally = combinedConflicts.some(c => (c.noteId === rcNoteId || c.note_id === rcNoteId));
+        const rcTitle = rc.title || rc.note_title;
+        const existsLocally = combinedConflicts.some(c => 
+          (c.noteId === rcNoteId || c.note_id === rcNoteId) ||
+          (rcTitle && (c.title === rcTitle || c.note_title === rcTitle))
+        );
         if (!existsLocally) {
           const localExistingConflicts = ConflictModel.getByNoteId(rcNoteId, currentUserId, true);
           if (localExistingConflicts.length > 0) {
@@ -2094,7 +2119,16 @@ router.post('/sync/outbound', async (req, res) => {
               ai_suggested_merge: lc.ai_suggested_merge
             });
           } else {
-            const localNote = NoteModel.getById(rcNoteId, currentUserId);
+            let localNote = NoteModel.getById(rcNoteId, currentUserId);
+            if (!localNote && rcTitle) {
+              localNote = NoteModel.findByNameInLocation(rcTitle, rc.notebook_id, currentUserId);
+              if (!localNote) {
+                const allNotes = NoteModel.getAll(currentUserId);
+                localNote = allNotes.find(
+                  n => (n.title || '').trim().toLowerCase() === rcTitle.trim().toLowerCase()
+                );
+              }
+            }
             if (localNote) {
               NoteModel.updateSyncMetadata(localNote.id, currentUserId, {
                 syncState: 'CONFLICT',
