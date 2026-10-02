@@ -109,7 +109,9 @@ function makeOllamaRequest(endpoint, method = 'GET', data = null, timeoutMs = 45
       if (isSettled) return;
       isSettled = true;
       clearTimeout(timeoutId);
-      console.warn(`[Ollama] Request error: ${err.message}`);
+      if (err.code !== 'ECONNREFUSED') {
+        console.warn(`[Ollama] Request error: ${err.message}`);
+      }
       reject(err);
     });
 
@@ -120,20 +122,38 @@ function makeOllamaRequest(endpoint, method = 'GET', data = null, timeoutMs = 45
   });
 }
 
+let cachedOllamaHealth = null;
+let lastOllamaCheckAt = 0;
+const OLLAMA_OFFLINE_CACHE_MS = 30000; // 30 seconds
+let lastLoggedOllamaState = null;
+
 /**
  * Check if local Ollama daemon is reachable and whether configured model is present
+ * Includes caching and backoff to avoid continuous network attempt spam when offline.
  */
-async function checkOllamaHealth() {
+async function checkOllamaHealth(forceCheck = false) {
   const config = getOllamaConfig();
+
+  // If previously checked and was offline, return cached offline state until cache expires or forced
+  if (!forceCheck && cachedOllamaHealth && !cachedOllamaHealth.available && (Date.now() - lastOllamaCheckAt < OLLAMA_OFFLINE_CACHE_MS)) {
+    return cachedOllamaHealth;
+  }
+
   try {
-    const res = await makeOllamaRequest('/api/tags', 'GET', null, 3000);
+    const res = await makeOllamaRequest('/api/tags', 'GET', null, 2500);
     const models = (res.data && Array.isArray(res.data.models)) ? res.data.models.map(m => m.name) : [];
     
     // Check if configured model or prefix matches
     const hasConfiguredModel = models.some(m => m === config.model || m.startsWith(config.model.split(':')[0]));
 
-    return {
+    if (lastLoggedOllamaState !== 'ONLINE') {
+      console.log(`[Ollama] Service is ONLINE at ${config.host}`);
+      lastLoggedOllamaState = 'ONLINE';
+    }
+
+    cachedOllamaHealth = {
       available: true,
+      status: 'ONLINE',
       host: config.host,
       configuredModel: config.model,
       modelReady: hasConfiguredModel,
@@ -142,16 +162,26 @@ async function checkOllamaHealth() {
         ? `Local Ollama is ready with model '${config.model}'.` 
         : `Ollama is running, but model '${config.model}' was not found in installed models (${models.join(', ') || 'none'}).`
     };
+    lastOllamaCheckAt = Date.now();
+    return cachedOllamaHealth;
   } catch (err) {
-    return {
+    if (lastLoggedOllamaState !== 'OFFLINE') {
+      console.log(`[Ollama] Service unavailable at ${config.host} (offline)`);
+      lastLoggedOllamaState = 'OFFLINE';
+    }
+
+    cachedOllamaHealth = {
       available: false,
+      status: 'OFFLINE',
       host: config.host,
       configuredModel: config.model,
       modelReady: false,
       availableModels: [],
-      error: err.message,
-      message: `Local Ollama daemon is unreachable at ${config.host}. Manual conflict resolution is enabled.`
+      error: err.code === 'ECONNREFUSED' ? 'ECONNREFUSED' : err.message,
+      message: 'Ollama is offline. Start Ollama to use local AI features.'
     };
+    lastOllamaCheckAt = Date.now();
+    return cachedOllamaHealth;
   }
 }
 

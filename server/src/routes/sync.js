@@ -28,6 +28,9 @@ router.get('/gdrive/status', optionalAuth, async (req, res) => {
     const pendingItems = getPendingGoogleSyncItems(userId);
     return res.json({
       connected: drive.connected,
+      authRequired: Boolean(drive.authRequired),
+      syncState: drive.syncState || (drive.authRequired ? 'AUTHENTICATION REQUIRED' : drive.connected ? 'CONNECTED' : 'DISABLED'),
+      error: drive.error || null,
       email: drive.email,
       folderName: drive.folderName || 'SyncNote',
       folderId: drive.folderId || null,
@@ -35,7 +38,7 @@ router.get('/gdrive/status', optionalAuth, async (req, res) => {
       authorizedAt: drive.authorizedAt
     });
   } catch (err) {
-    return res.status(200).json({ connected: false, error: 'Failed to retrieve Google Drive status', details: err.message });
+    return res.status(200).json({ connected: false, authRequired: false, syncState: 'DISABLED', error: 'Failed to retrieve Google Drive status', details: err.message });
   }
 });
 
@@ -43,6 +46,22 @@ router.get('/gdrive/status', optionalAuth, async (req, res) => {
 router.post(['/gdrive/sync', '/gdrive/sync-now'], optionalAuth, async (req, res) => {
   try {
     const userId = req.user ? req.user.id : 'usr_local_default';
+    const driveStatus = getGoogleDriveStatus(userId);
+    if (!driveStatus.connected) {
+      if (driveStatus.authRequired) {
+        return res.status(401).json({
+          success: false,
+          authRequired: true,
+          error: 'Google Drive authentication expired. Reconnect Google Drive in Settings.'
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        disconnected: true,
+        error: 'Google Drive is disconnected. Connect Google Drive in Settings.'
+      });
+    }
+
     const { noteId } = req.body || {};
 
     if (noteId) {
@@ -70,6 +89,22 @@ router.post(['/gdrive/sync', '/gdrive/sync-now'], optionalAuth, async (req, res)
 router.post('/gdrive/notes/:noteId/sync', optionalAuth, async (req, res) => {
   try {
     const userId = req.user ? req.user.id : 'usr_local_default';
+    const driveStatus = getGoogleDriveStatus(userId);
+    if (!driveStatus.connected) {
+      if (driveStatus.authRequired) {
+        return res.status(401).json({
+          success: false,
+          authRequired: true,
+          error: 'Google Drive authentication expired. Reconnect Google Drive in Settings.'
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        disconnected: true,
+        error: 'Google Drive is disconnected. Connect Google Drive in Settings.'
+      });
+    }
+
     const { noteId } = req.params;
     const result = await syncSingleNoteWithGoogleDrive(userId, noteId);
     return res.json({
@@ -113,7 +148,7 @@ router.get('/gdrive/reachability', optionalAuth, async (req, res) => {
 router.get('/status', optionalAuth, async (req, res) => {
   try {
     const userId = req.user ? req.user.id : 'usr_local_default';
-    const stats = SyncQueueModel.getStats();
+    const stats = SyncQueueModel.getStats(userId);
     const allNotes = NoteModel.getAll(userId);
     const googleAccount = getGoogleAccountStatus(userId);
     const googleDrive = getGoogleDriveStatus(userId);
@@ -127,6 +162,23 @@ router.get('/status', optionalAuth, async (req, res) => {
       both: allNotes.filter(n => n.sync_mode === 'both').length
     };
 
+    const isAllLocal = allNotes.length > 0 && allNotes.every(n => n.sync_mode === 'local');
+    const hasSyncEnabledNotes = allNotes.some(n => n.sync_mode !== 'local');
+
+    // Calculate distinct pending sync items (avoid double-counting between sync_queue and pendingGoogleItems)
+    const pendingEntityIds = new Set();
+    const queuePending = SyncQueueModel.getPending(userId);
+    queuePending.forEach(item => {
+      if (item.status === 'PENDING') {
+        pendingEntityIds.add(`${item.entity_type}:${item.entity_id}`);
+      }
+    });
+    pendingGoogleItems.forEach(item => {
+      pendingEntityIds.add(`NOTE:${item.id}`);
+    });
+
+    const activePendingCount = pendingEntityIds.size;
+
     return res.json({
       status: 'ok',
       userId: req.user ? req.user.id : 'usr_local_default',
@@ -139,10 +191,13 @@ router.get('/status', optionalAuth, async (req, res) => {
         available: true,
         pairedDevicesCount: pairedDevices.length
       },
-      pendingCount: stats.pendingCount + pendingGoogleItems.length,
+      pendingCount: activePendingCount,
       pendingGoogleCount: pendingGoogleItems.length,
+      failedCount: stats.failedCount || 0,
       syncedCount: stats.syncedCount,
       lastSyncedAt: stats.lastSyncedAt,
+      isAllLocal,
+      hasSyncEnabledNotes,
       breakdown
     });
   } catch (err) {
@@ -213,7 +268,7 @@ router.post('/gdrive/resolve-conflict', requireAuth, async (req, res) => {
 router.post('/push', requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
-    const items = SyncQueueModel.getPending();
+    const items = SyncQueueModel.getPending(userId);
 
     const syncedIds = [];
     const failedIds = [];
@@ -247,11 +302,11 @@ router.post('/push', requireAuth, async (req, res) => {
 
                 // If note has sync_mode === 'google' or 'cloud' or 'both', push to Google Drive dedicated app folder
                 if (note.sync_mode === 'google' || note.sync_mode === 'cloud' || note.sync_mode === 'both') {
-                  try {
-                    await uploadNoteToGoogleDrive(userId, note, payload.content);
-                  } catch (gErr) {
-                    console.warn(`[Sync Queue Push] Google Drive sync note notice: ${gErr.message}`);
+                  const driveStatus = getGoogleDriveStatus(userId);
+                  if (!driveStatus.connected) {
+                    throw new Error(driveStatus.authRequired ? 'Google Drive authentication expired.' : 'Google Drive is disconnected.');
                   }
+                  await uploadNoteToGoogleDrive(userId, note, payload.content);
                 }
               }
             }
@@ -297,7 +352,7 @@ router.post('/push', requireAuth, async (req, res) => {
       }
     }
 
-    const updatedStats = SyncQueueModel.getStats();
+    const updatedStats = SyncQueueModel.getStats(userId);
 
     return res.json({
       success: true,

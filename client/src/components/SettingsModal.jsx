@@ -290,7 +290,11 @@ export default function SettingsModal({
               </div>
               <div className="shortcut-row">
                 <span className="shortcut-label">Create New Markdown Note</span>
-                <kbd className="shortcut-kbd">Ctrl N</kbd>
+                <kbd className="shortcut-kbd">Ctrl Alt N</kbd>
+              </div>
+              <div className="shortcut-row">
+                <span className="shortcut-label">Interactive Knowledge Graph</span>
+                <kbd className="shortcut-kbd">Ctrl Alt G</kbd>
               </div>
             </div>
           </div>

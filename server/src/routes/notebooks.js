@@ -27,20 +27,24 @@ router.get('/', (req, res) => {
  */
 router.post('/', (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, parent_id } = req.body;
     if (!name || typeof name !== 'string') {
       return res.status(400).json({ status: 'error', message: 'Notebook name is required' });
     }
 
     const id = `nb_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const newNotebook = NotebookModel.create(id, name.trim(), req.user.id);
+    const newNotebook = NotebookModel.create(id, name.trim(), req.user.id, parent_id || null);
 
-    SyncQueueModel.enqueue({
-      entityType: 'FOLDER',
-      entityId: id,
-      operation: 'CREATE_FOLDER',
-      payload: { id, name: name.trim() }
-    });
+    const hasSyncEnabledNotes = NoteModel.getAll(req.user.id).some(n => n.sync_mode !== 'local');
+    if (hasSyncEnabledNotes) {
+      SyncQueueModel.enqueue({
+        entityType: 'FOLDER',
+        entityId: id,
+        operation: 'CREATE_FOLDER',
+        payload: { id, name: name.trim(), parent_id: parent_id || null },
+        userId: req.user.id
+      });
+    }
 
     res.status(201).json({ 
       status: 'success', 
@@ -84,12 +88,16 @@ router.put('/:id', (req, res) => {
       }
     });
 
-    SyncQueueModel.enqueue({
-      entityType: 'FOLDER',
-      entityId: id,
-      operation: 'UPDATE_FOLDER',
-      payload: { id, name: newName }
-    });
+    const hasSyncEnabledNotes = NoteModel.getAll(req.user.id).some(n => n.sync_mode !== 'local');
+    if (hasSyncEnabledNotes) {
+      SyncQueueModel.enqueue({
+        entityType: 'FOLDER',
+        entityId: id,
+        operation: 'UPDATE_FOLDER',
+        payload: { id, name: newName },
+        userId: req.user.id
+      });
+    }
 
     res.json({ 
       status: 'success', 
@@ -126,12 +134,17 @@ router.delete('/:id', (req, res) => {
 
     NotebookModel.delete(id, req.user.id);
 
-    SyncQueueModel.enqueue({
-      entityType: 'FOLDER',
-      entityId: id,
-      operation: 'DELETE_FOLDER',
-      payload: { id }
-    });
+    SyncQueueModel.invalidateForEntity('FOLDER', id, req.user.id);
+    const hasSyncEnabledNotes = NoteModel.getAll(req.user.id).some(n => n.sync_mode !== 'local');
+    if (hasSyncEnabledNotes) {
+      SyncQueueModel.enqueue({
+        entityType: 'FOLDER',
+        entityId: id,
+        operation: 'DELETE_FOLDER',
+        payload: { id },
+        userId: req.user.id
+      });
+    }
 
     res.json({ 
       status: 'success', 

@@ -10,7 +10,8 @@ export default function NoteEditorPage({
   onUpdateNote,
   onToggleFavorite,
   onRequestDeleteNote,
-  onCreateNote
+  onCreateNote,
+  onRequestMoveNotebook
 }) {
   const { noteId } = useParams();
   const navigate = useNavigate();
@@ -55,7 +56,7 @@ export default function NoteEditorPage({
         notebooks={notebooks}
         onUpdateNote={onUpdateNote}
         onToggleFavorite={onToggleFavorite}
-        onRequestMoveNotebook={() => {}}
+        onRequestMoveNotebook={onRequestMoveNotebook}
         onRequestDeleteNote={onRequestDeleteNote}
         onCreateNote={onCreateNote}
         onOpenGraphView={() => navigate('/graph')}

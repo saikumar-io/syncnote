@@ -31,7 +31,7 @@ export function NoteSyncBadge({ note, onClick }) {
       <span 
         className="sync-badge local" 
         onClick={onClick}
-        title="Sync Mode: LOCAL (Private to this device)" 
+        title="Sync Mode: LOCAL (No synchronization required)" 
         style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '0.66rem', padding: '1px 5px', borderRadius: '3px', background: 'rgba(156, 163, 175, 0.12)', color: 'var(--text-muted)', cursor: onClick ? 'pointer' : 'default' }}
       >
         <Lock size={9} />
@@ -41,14 +41,42 @@ export function NoteSyncBadge({ note, onClick }) {
   }
 
   if (mode === 'lan') {
+    let lanStatus = '✓ Synced';
+    let lanColor = '#10b981';
+    let lanBg = 'rgba(16, 185, 129, 0.12)';
+    let LanIcon = CheckCircle2;
+
+    if (state === 'CONFLICT') {
+      lanStatus = '⚠ Conflict';
+      lanColor = '#ef4444';
+      lanBg = 'rgba(239, 68, 68, 0.12)';
+      LanIcon = AlertTriangle;
+    } else if (state === 'SYNC_FAILED') {
+      lanStatus = '! Sync failed';
+      lanColor = '#ef4444';
+      lanBg = 'rgba(239, 68, 68, 0.12)';
+      LanIcon = XCircle;
+    } else if (state === 'SYNCING') {
+      lanStatus = '↻ Syncing...';
+      lanColor = '#3b82f6';
+      lanBg = 'rgba(59, 130, 246, 0.12)';
+      LanIcon = RefreshCw;
+    } else if (state === 'MODIFIED_OFFLINE' || state === 'NOT_SYNCED') {
+      lanStatus = '↻ Pending';
+      lanColor = '#f59e0b';
+      lanBg = 'rgba(245, 158, 11, 0.12)';
+      LanIcon = Zap;
+    }
+
     return (
       <span 
         className="sync-badge lan" 
         onClick={onClick}
-        title="Sync Mode: LAN (Peer-to-peer encrypted sync)" 
-        style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '0.66rem', padding: '1px 5px', borderRadius: '3px', background: 'rgba(16, 185, 129, 0.12)', color: 'var(--accent-emerald)', cursor: onClick ? 'pointer' : 'default' }}
+        title={`LAN Sync: ${state}`} 
+        style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '0.66rem', fontWeight: 600, padding: '1px 5px', borderRadius: '3px', background: lanBg, color: lanColor, cursor: onClick ? 'pointer' : 'default' }}
       >
-        [ LAN ]
+        <LanIcon size={10} className={state === 'SYNCING' ? 'spin' : ''} />
+        [ LAN ] {lanStatus}
       </span>
     );
   }

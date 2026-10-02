@@ -3,12 +3,33 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 // Configurable root directory for physical Markdown note storage
-const NOTES_ROOT = process.env.NOTES_DIR || path.join(__dirname, '../../../notes');
+const serverDataNotes = path.resolve(__dirname, '../../data/notes');
+const NOTES_ROOT = process.env.NOTES_DIR
+  ? (path.isAbsolute(process.env.NOTES_DIR) ? process.env.NOTES_DIR : path.resolve(__dirname, '../../', process.env.NOTES_DIR))
+  : serverDataNotes;
 
 // Ensure root notes directory exists
 if (!fs.existsSync(NOTES_ROOT)) {
   fs.mkdirSync(NOTES_ROOT, { recursive: true });
 }
+
+/**
+ * Resolve note file path reliably regardless of cwd
+ */
+const resolveFilePath = (filePath) => {
+  if (!filePath) return '';
+  if (path.isAbsolute(filePath)) return filePath;
+  // If it exists directly relative to cwd, use it
+  if (fs.existsSync(filePath)) return path.resolve(filePath);
+  // Check relative to server folder
+  const serverPath = path.resolve(__dirname, '../../', filePath);
+  if (fs.existsSync(serverPath)) return serverPath;
+  // Check relative to project root
+  const rootPath = path.resolve(__dirname, '../../../', filePath);
+  if (fs.existsSync(rootPath)) return rootPath;
+  // Default to server-relative path
+  return path.resolve(__dirname, '../../', filePath);
+};
 
 /**
  * Convert title to safe filename (e.g. "My Note!" -> "my-note.md")
@@ -86,11 +107,12 @@ const writeNoteFile = (filePath, content = '') => {
       strContent = String(strContent || '');
     }
   }
-  const dir = path.dirname(filePath);
+  const resolved = resolveFilePath(filePath);
+  const dir = path.dirname(resolved);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(filePath, strContent, 'utf8');
+  fs.writeFileSync(resolved, strContent, 'utf8');
 };
 
 /**
@@ -98,8 +120,9 @@ const writeNoteFile = (filePath, content = '') => {
  */
 const readNoteFile = (filePath) => {
   try {
-    if (fs.existsSync(filePath)) {
-      return fs.readFileSync(filePath, 'utf8');
+    const resolved = resolveFilePath(filePath);
+    if (resolved && fs.existsSync(resolved)) {
+      return fs.readFileSync(resolved, 'utf8');
     }
   } catch (err) {
     console.error(`[FileStorage] Error reading file ${filePath}:`, err);
@@ -113,12 +136,14 @@ const readNoteFile = (filePath) => {
 const moveNoteFile = (oldPath, newPath) => {
   if (!oldPath || oldPath === newPath) return;
   try {
-    if (fs.existsSync(oldPath)) {
-      const newDir = path.dirname(newPath);
+    const resolvedOld = resolveFilePath(oldPath);
+    const resolvedNew = resolveFilePath(newPath);
+    if (fs.existsSync(resolvedOld)) {
+      const newDir = path.dirname(resolvedNew);
       if (!fs.existsSync(newDir)) {
         fs.mkdirSync(newDir, { recursive: true });
       }
-      fs.renameSync(oldPath, newPath);
+      fs.renameSync(resolvedOld, resolvedNew);
     }
   } catch (err) {
     console.error(`[FileStorage] Error moving file from ${oldPath} to ${newPath}:`, err);
@@ -130,8 +155,9 @@ const moveNoteFile = (oldPath, newPath) => {
  */
 const deleteNoteFile = (filePath) => {
   try {
-    if (filePath && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    const resolved = resolveFilePath(filePath);
+    if (resolved && fs.existsSync(resolved)) {
+      fs.unlinkSync(resolved);
     }
   } catch (err) {
     console.error(`[FileStorage] Error deleting file ${filePath}:`, err);

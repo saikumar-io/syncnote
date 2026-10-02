@@ -23,6 +23,11 @@ export const notesApi = {
     return data?.data;
   },
 
+  async toggleFavorite(id, isFavorite) {
+    const data = await apiClient.put(`${API_BASE}/${id}/favorite`, { is_favorite: isFavorite });
+    return data?.data;
+  },
+
   async delete(id) {
     return apiClient.delete(`${API_BASE}/${id}`);
   },

@@ -57,7 +57,7 @@ function getGoogleAccountStatus(userId) {
   };
 }
 
-const { NoteModel, NotebookModel, GoogleDriveAuthModel, VersionModel } = require('../db/database');
+const { NoteModel, NotebookModel, GoogleDriveAuthModel, VersionModel, SyncQueueModel } = require('../db/database');
 const { calculateHash, readNoteFile, writeNoteFile, getNoteFilePath, generateVersionId } = require('./fileStorage');
 const { createOrRecordConflict } = require('../services/conflictResolutionService');
 
@@ -72,14 +72,15 @@ function getGoogleDriveStatus(userId) {
     GoogleDriveAuthModel.migrateDefaultUserTo(userKey);
   }
 
-  let session = userGoogleDriveAuths.get(userKey);
-
-  // If not in memory, query database
-  if (!session && GoogleDriveAuthModel) {
+  let session = null;
+  if (GoogleDriveAuthModel) {
     const dbRecord = GoogleDriveAuthModel.get(userKey);
-    if (dbRecord && dbRecord.isConnected) {
+    if (dbRecord) {
       session = {
-        isConnected: true,
+        isConnected: dbRecord.isConnected,
+        authRequired: dbRecord.authRequired,
+        status: dbRecord.status,
+        authError: dbRecord.authError,
         email: dbRecord.email,
         accessToken: dbRecord.accessToken,
         refreshToken: dbRecord.refreshToken,
@@ -88,7 +89,25 @@ function getGoogleDriveStatus(userId) {
         authorizedAt: dbRecord.authorizedAt
       };
       userGoogleDriveAuths.set(userKey, session);
+    } else {
+      userGoogleDriveAuths.delete(userKey);
     }
+  } else {
+    session = userGoogleDriveAuths.get(userKey);
+  }
+
+  if (session && (session.authRequired || session.status === 'AUTHENTICATION_REQUIRED')) {
+    return {
+      connected: false,
+      authRequired: true,
+      syncState: 'AUTHENTICATION REQUIRED',
+      status: 'AUTHENTICATION_REQUIRED',
+      error: session.authError || 'Google Drive authentication expired. Reconnect Google Drive to continue cloud synchronization.',
+      email: session.email || null,
+      folderName: 'SyncNote',
+      folderId: session.folderId || null,
+      authorizedAt: session.authorizedAt || null
+    };
   }
 
   const isRealConnection = Boolean(session && session.isConnected && session.accessToken && !session.accessToken.startsWith('drive_access_'));
@@ -96,6 +115,9 @@ function getGoogleDriveStatus(userId) {
   if (isRealConnection) {
     return {
       connected: true,
+      authRequired: false,
+      syncState: session.syncState || 'CONNECTED',
+      status: 'CONNECTED',
       email: session.email,
       folderName: 'SyncNote',
       folderId: session.folderId || null,
@@ -105,6 +127,9 @@ function getGoogleDriveStatus(userId) {
 
   return {
     connected: false,
+    authRequired: false,
+    syncState: 'DISABLED',
+    status: 'DISABLED',
     email: session?.email || null,
     folderName: 'SyncNote',
     folderId: null,
@@ -207,9 +232,12 @@ async function getValidDriveAccessToken(userId) {
 
   if (!session && GoogleDriveAuthModel) {
     const dbRecord = GoogleDriveAuthModel.get(userKey);
-    if (dbRecord && dbRecord.isConnected) {
+    if (dbRecord) {
       session = {
-        isConnected: true,
+        isConnected: dbRecord.isConnected,
+        authRequired: dbRecord.authRequired,
+        status: dbRecord.status,
+        authError: dbRecord.authError,
         email: dbRecord.email,
         accessToken: dbRecord.accessToken,
         refreshToken: dbRecord.refreshToken,
@@ -221,6 +249,10 @@ async function getValidDriveAccessToken(userId) {
   }
 
   if (!session || !session.accessToken) {
+    return null;
+  }
+
+  if (session.authRequired || session.status === 'AUTHENTICATION_REQUIRED') {
     return null;
   }
 
@@ -250,6 +282,9 @@ async function getValidDriveAccessToken(userId) {
         if (refreshRes.ok && refreshData.access_token) {
           console.log(`[Google Drive Token Refresh] Access token refreshed successfully for user ${userKey}`);
           session.accessToken = refreshData.access_token;
+          session.authRequired = false;
+          session.status = 'CONNECTED';
+          session.authError = null;
           userGoogleDriveAuths.set(userKey, session);
           if (GoogleDriveAuthModel) {
             GoogleDriveAuthModel.upsert({
@@ -257,9 +292,23 @@ async function getValidDriveAccessToken(userId) {
               email: session.email,
               accessToken: session.accessToken,
               refreshToken: session.refreshToken,
-              folderId: session.folderId
+              folderId: session.folderId,
+              status: 'CONNECTED',
+              authError: null
             });
           }
+        } else if (refreshRes.status === 400 || refreshRes.status === 401 || refreshData.error === 'invalid_grant') {
+          console.warn(`[Google Drive Token Refresh] Refresh token rejected (${refreshData.error || refreshRes.status}). Marking authentication required.`);
+          session.isConnected = false;
+          session.authRequired = true;
+          session.status = 'AUTHENTICATION_REQUIRED';
+          session.syncState = 'AUTHENTICATION REQUIRED';
+          session.authError = 'Google Drive authentication expired. Please reconnect Google Drive in Settings.';
+          userGoogleDriveAuths.set(userKey, session);
+          if (GoogleDriveAuthModel) {
+            GoogleDriveAuthModel.setAuthRequired(userKey, session.authError);
+          }
+          return null;
         }
       } catch (e) {
         console.warn('[Google Drive Token Refresh Warning]:', e.message);
@@ -306,9 +355,29 @@ function handleDriveApiError(resStatus, errorData, authInfo, operationName = 'Dr
     throw new Error('Google Drive permission is insufficient. Please reconnect Google Drive in Settings and grant SyncNote access to Google Drive.');
   }
 
-  const isUnauthorized = resStatus === 401 || googleReason === 'unauthorized' || googleReason === 'invalid_grant';
+  const isUnauthorized = resStatus === 401 || googleReason === 'unauthorized' || googleReason === 'invalid_grant' || /invalid_grant/i.test(rawMessage) || /authError/i.test(rawMessage);
   if (isUnauthorized) {
-    throw new Error('Google Drive authentication expired. Please reconnect Google Drive in Settings.');
+    const authMsg = 'Google Drive authentication expired. Please reconnect Google Drive in Settings.';
+    if (userKey && userKey !== 'N/A') {
+      let session = userGoogleDriveAuths.get(userKey);
+      if (!session) {
+        session = {};
+        userGoogleDriveAuths.set(userKey, session);
+      }
+      session.isConnected = false;
+      session.authRequired = true;
+      session.syncState = 'AUTHENTICATION REQUIRED';
+      session.status = 'AUTHENTICATION_REQUIRED';
+      session.authError = authMsg;
+      if (GoogleDriveAuthModel) {
+        GoogleDriveAuthModel.setAuthRequired(userKey, authMsg);
+      }
+    }
+    console.warn(`[Google Drive] Authentication required (HTTP ${resStatus}). Cloud sync stopped.`);
+    const err = new Error(authMsg);
+    err.isAuthRequired = true;
+    err.status = 401;
+    throw err;
   }
 
   const isRateLimit = resStatus === 429 || googleReason === 'rateLimitExceeded' || googleReason === 'userRateLimitExceeded';
@@ -350,6 +419,9 @@ async function getOrCreateSyncNoteFolder(authInfo) {
         handleDriveApiError(verifyRes.status, errData, authInfo, 'folder verification');
       }
     } catch (e) {
+      if (e.isAuthRequired || (e.message && e.message.includes('authentication expired'))) {
+        throw e;
+      }
       if (e.message && e.message.includes('Google Drive permission is insufficient')) {
         throw e;
       }
@@ -381,6 +453,9 @@ async function getOrCreateSyncNoteFolder(authInfo) {
       handleDriveApiError(searchRes.status, searchErr, authInfo, 'folder search');
     }
   } catch (e) {
+    if (e.isAuthRequired || (e.message && e.message.includes('authentication expired'))) {
+      throw e;
+    }
     if (e.message && e.message.includes('Google Drive permission is insufficient')) {
       throw e;
     }
@@ -418,23 +493,71 @@ async function getOrCreateSyncNoteFolder(authInfo) {
 }
 
 /**
- * Upload or Update Markdown file on Google Drive
+ * Upload or Update Markdown file on Google Drive with graceful Stale File ID Recovery
  */
-async function uploadFileToDriveAPI(authInfo, folderId, fileName, fileContent, existingFileId) {
+async function uploadFileToDriveAPI(authInfo, folderId, fileName, fileContent, existingFileId, noteId = null) {
   const { accessToken } = authInfo;
   if (!accessToken || accessToken.startsWith('drive_access_')) {
     throw new Error('Google Drive API access token missing or invalid. Please connect Google Drive in Settings.');
   }
 
   const boundary = '-------SyncNoteBoundary314159';
+  const start_delim = `--${boundary}\r\n`;
   const delimiter = `\r\n--${boundary}\r\n`;
   const close_delim = `\r\n--${boundary}--`;
 
+  let activeFileId = null;
+
+  // Step 1: Probe stored Google Drive file ID to verify it exists, is NOT trashed, and is genuine text/markdown
   if (existingFileId && !existingFileId.startsWith('gdrive_file_')) {
     try {
-      console.log(`[Google Drive Sync] Attempting update on existing Drive file ID: ${existingFileId}`);
+      const probeRes = await fetch(`https://www.googleapis.com/drive/v3/files/${existingFileId}?fields=id,name,mimeType,parents,trashed`, {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+
+      if (probeRes.ok) {
+        const fileInfo = await probeRes.json();
+        if (fileInfo && fileInfo.id && !fileInfo.trashed) {
+          if (fileInfo.mimeType === 'application/vnd.google-apps.document') {
+            console.log(`[Google Drive] Remote file ${existingFileId} is a Google Doc, not text/markdown. Invalidating stale ID.`);
+            if (noteId && authInfo.userKey) {
+              NoteModel.updateSyncMetadata(noteId, authInfo.userKey, { gdriveFileId: null });
+            }
+            activeFileId = null;
+          } else {
+            activeFileId = fileInfo.id;
+          }
+        } else {
+          console.log(`[Google Drive] Remote file missing or trashed: ${fileName} (stale ID: ${existingFileId})`);
+          console.log(`[Google Drive] Invalidating stale file ID`);
+          if (noteId && authInfo.userKey) {
+            NoteModel.updateSyncMetadata(noteId, authInfo.userKey, { gdriveFileId: null });
+          }
+        }
+      } else if (probeRes.status === 404) {
+        console.log(`[Google Drive] Remote file missing or trashed: ${fileName} (stale ID: ${existingFileId})`);
+        console.log(`[Google Drive] Invalidating stale file ID`);
+        if (noteId && authInfo.userKey) {
+          NoteModel.updateSyncMetadata(noteId, authInfo.userKey, { gdriveFileId: null });
+        }
+      } else if (probeRes.status === 401) {
+        const errData = await probeRes.json().catch(() => ({}));
+        handleDriveApiError(probeRes.status, errData, authInfo, 'file probe');
+      }
+    } catch (e) {
+      if (e.isAuthRequired || (e.message && e.message.includes('authentication expired'))) {
+        throw e;
+      }
+      console.warn('[Google Drive Sync] File probe notice:', e.message);
+    }
+  }
+
+  // Step 2: If active existing file is verified valid and active, update it
+  if (activeFileId) {
+    try {
+      console.log(`[Google Drive Sync] Attempting update on existing Drive file ID: ${activeFileId}`);
       const metadata = { name: fileName, mimeType: 'text/markdown' };
-      const body = delimiter +
+      const body = start_delim +
         'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
         JSON.stringify(metadata) +
         delimiter +
@@ -442,7 +565,7 @@ async function uploadFileToDriveAPI(authInfo, folderId, fileName, fileContent, e
         fileContent +
         close_delim;
 
-      const patchRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=multipart&fields=id,name,mimeType,parents`, {
+      const patchRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${activeFileId}?uploadType=multipart&fields=id,name,mimeType,parents`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${accessToken}`,
@@ -460,18 +583,65 @@ async function uploadFileToDriveAPI(authInfo, folderId, fileName, fileContent, e
         return patchData.id;
       }
 
-      if (patchRes.status === 403) {
+      if (patchRes.status === 401 || patchRes.status === 403) {
         handleDriveApiError(patchRes.status, patchData, authInfo, 'file update');
       }
     } catch (e) {
+      if (e.isAuthRequired || (e.message && e.message.includes('authentication expired'))) {
+        throw e;
+      }
       if (e.message && e.message.includes('permission is insufficient')) {
         throw e;
       }
-      console.warn('[Google Drive Sync] File update failed, falling back to create:', e.message);
+      console.warn('[Google Drive Sync] File update failed, searching for valid replacement in folder:', e.message);
+      activeFileId = null;
     }
   }
 
-  // Create new file
+  // Step 5: Search the SyncNote Drive folder for an existing matching valid file (excluding Google Docs)
+  if (!activeFileId) {
+    try {
+      const searchQ = encodeURIComponent(`name = '${fileName.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.document' and mimeType != 'application/vnd.google-apps.folder'`);
+      const searchRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${searchQ}&fields=files(id,name,mimeType,trashed)&spaces=drive`, {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        if (searchData.files && searchData.files.length > 0) {
+          const foundId = searchData.files[0].id;
+          console.log(`[Google Drive] Found matching existing text/markdown file in folder '${folderId}': ${foundId}. Relinking.`);
+
+          const metadata = { name: fileName, mimeType: 'text/markdown' };
+          const body = start_delim +
+            'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+            JSON.stringify(metadata) +
+            delimiter +
+            'Content-Type: text/markdown; charset=UTF-8\r\n\r\n' +
+            fileContent +
+            close_delim;
+
+          const patchRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${foundId}?uploadType=multipart&fields=id,name,mimeType,parents`, {
+            method: 'PATCH',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': `multipart/related; boundary="${boundary}"`
+            },
+            body: body
+          });
+          if (patchRes.ok) {
+            if (noteId && authInfo.userKey) {
+              NoteModel.updateSyncMetadata(noteId, authInfo.userKey, { gdriveFileId: foundId });
+            }
+            return foundId;
+          }
+        }
+      }
+    } catch (searchErr) {
+      console.warn('[Google Drive] Search matching file notice:', searchErr.message);
+    }
+  }
+
+  // Step 7: Create a new file on Google Drive in the SyncNote folder as text/markdown
   console.log(`[Google Drive Sync] Creating new file on Google Drive: '${fileName}' in folder '${folderId}'`);
   const metadata = {
     name: fileName,
@@ -479,7 +649,7 @@ async function uploadFileToDriveAPI(authInfo, folderId, fileName, fileContent, e
     mimeType: 'text/markdown'
   };
 
-  const body = delimiter +
+  const body = start_delim +
     'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
     JSON.stringify(metadata) +
     delimiter +
@@ -501,11 +671,10 @@ async function uploadFileToDriveAPI(authInfo, folderId, fileName, fileContent, e
     handleDriveApiError(createRes.status, createData, authInfo, 'file creation');
   }
 
-  console.log(`[Google Drive Sync] Drive API returned`);
-  console.log(`[Google Drive Sync] Drive file ID: ${createData.id}`);
-  console.log(`[Google Drive Sync] Drive file name: ${fileName}`);
-  console.log(`[Google Drive Sync] Drive parents: ${folderId}`);
-
+  console.log(`[Google Drive] Recreated remote file for '${fileName}' (new ID: ${createData.id})`);
+  if (noteId && authInfo.userKey) {
+    NoteModel.updateSyncMetadata(noteId, authInfo.userKey, { gdriveFileId: createData.id });
+  }
   return createData.id;
 }
 
@@ -533,10 +702,17 @@ async function verifyDriveFileAPI(authInfo, fileId, expectedFolderId) {
 
   const fileData = await res.json();
   if (!fileData || fileData.trashed) {
-    throw new Error(`Google Drive file '${fileId}' is trashed or non-existent.`);
+    const err = new Error(`Google Drive file '${fileId}' is trashed or non-existent.`);
+    err.isTrashed = true;
+    throw err;
+  }
+  if (fileData.mimeType === 'application/vnd.google-apps.document') {
+    const err = new Error(`Google Drive file '${fileId}' is a Google Doc, not text/markdown.`);
+    err.isGoogleDoc = true;
+    throw err;
   }
 
-  console.log(`[Google Drive Sync] Verification success for file ID: ${fileData.id}`);
+  console.log(`[Google Drive Sync] Verification success for file ID: ${fileData.id} (mimeType: ${fileData.mimeType})`);
   return true;
 }
 
@@ -554,13 +730,44 @@ async function fetchNotesFromGoogleDrive(userId) {
  */
 async function syncUserNotesWithGoogleDrive(userId) {
   const userKey = userId ? String(userId) : 'usr_local_default';
+  const driveStatus = getGoogleDriveStatus(userKey);
+  if (driveStatus.authRequired) {
+    console.warn(`[Google Drive Sync] Halting sync pass: Authentication required for user ${userKey}.`);
+    return {
+      success: false,
+      authRequired: true,
+      syncState: 'AUTHENTICATION REQUIRED',
+      error: driveStatus.error,
+      synced: 0,
+      failed: 0,
+      items: []
+    };
+  }
+
   const authInfo = await getValidDriveAccessToken(userKey);
 
   if (!authInfo) {
     throw new Error('Google Drive is not connected or token expired. Please connect Google Drive in Settings.');
   }
 
-  const folderId = await getOrCreateSyncNoteFolder(authInfo);
+  let folderId;
+  try {
+    folderId = await getOrCreateSyncNoteFolder(authInfo);
+  } catch (err) {
+    if (err.isAuthRequired || (err.message && err.message.includes('authentication expired'))) {
+      console.warn(`[Google Drive Sync] Pipeline stopped: Authentication required.`);
+      return {
+        success: false,
+        authRequired: true,
+        syncState: 'AUTHENTICATION REQUIRED',
+        error: err.message,
+        synced: 0,
+        failed: 0,
+        items: []
+      };
+    }
+    throw err;
+  }
 
   const results = {
     success: true,
@@ -669,6 +876,8 @@ async function syncUserNotesWithGoogleDrive(userId) {
                 results.synced++;
                 results.items.push({ id: localNote.id, title: localNote.title, state: 'PULLED', gdriveFileId: cloudFile.id });
               }
+            } else if (fileRes.status === 401) {
+              handleDriveApiError(fileRes.status, {}, authInfo, 'file media download');
             }
           } else {
             // New note on Cloud: Import into SQLite database & physical file
@@ -711,11 +920,27 @@ async function syncUserNotesWithGoogleDrive(userId) {
               results.imported++;
               results.synced++;
               results.items.push({ id: newNoteId, title: safeTitle, state: 'IMPORTED', gdriveFileId: cloudFile.id });
+            } else if (fileRes.status === 401) {
+              handleDriveApiError(fileRes.status, {}, authInfo, 'file media download');
             }
           }
         }
+      } else if (listRes.status === 401) {
+        handleDriveApiError(listRes.status, {}, authInfo, 'folder list');
       }
     } catch (pullErr) {
+      if (pullErr.isAuthRequired || (pullErr.message && pullErr.message.includes('authentication expired'))) {
+        console.warn(`[Google Drive Sync] Halting cloud pull: Authentication required.`);
+        return {
+          success: false,
+          authRequired: true,
+          syncState: 'AUTHENTICATION REQUIRED',
+          error: pullErr.message,
+          synced: results.synced,
+          failed: results.failed,
+          items: results.items
+        };
+      }
       console.warn(`[Google Drive Cloud Pull Warning] Cloud pull encountered non-fatal notice:`, pullErr.message);
     }
   }
@@ -757,12 +982,13 @@ async function syncUserNotesWithGoogleDrive(userId) {
         syncError: null
       });
 
-      const safeTitle = (note.title || 'Untitled Note').replace(/[^a-zA-Z0-9_\-\s]/g, '_').trim();
+      const baseTitle = (note.title || 'Untitled Note').replace(/\.md$/i, '').trim();
+      const safeTitle = baseTitle.replace(/[\/\\?%*:|"<>]/g, '_').trim() || 'Untitled Note';
       const fileName = `${safeTitle}.md`;
 
       console.log(`[Google Drive Sync] Pushing local note '${note.title}' to Drive...`);
 
-      const confirmedFileId = await uploadFileToDriveAPI(authInfo, folderId, fileName, currentContent, note.gdrive_file_id);
+      const confirmedFileId = await uploadFileToDriveAPI(authInfo, folderId, fileName, currentContent, note.gdrive_file_id, note.id);
       await verifyDriveFileAPI(authInfo, confirmedFileId, folderId);
 
       const now = new Date().toISOString();
@@ -779,11 +1005,22 @@ async function syncUserNotesWithGoogleDrive(userId) {
       }
 
       console.log(`[Google Drive Sync] Successfully synced note '${note.title}' to Drive.`);
+      SyncQueueModel.markSyncedForEntity('NOTE', note.id, userKey);
 
       results.synced++;
       results.items.push({ id: note.id, title: note.title, state: 'SYNCED', gdriveFileId: confirmedFileId });
 
     } catch (itemErr) {
+      if (itemErr.isAuthRequired || (itemErr.message && itemErr.message.includes('authentication expired'))) {
+        console.warn(`[Google Drive Sync] Halting sync pass: Authentication required.`);
+        NoteModel.updateSyncMetadata(note.id, userKey, {
+          syncState: 'SYNC_FAILED',
+          syncError: 'Google Drive authentication expired.'
+        });
+        results.failed++;
+        results.authRequired = true;
+        break; // STOP IMMEDIATELY! Do not retry remaining notes!
+      }
       console.error(`[Google Drive Sync FAILED] Note ${note.id} at stage: ${itemErr.message}`);
       NoteModel.updateSyncMetadata(note.id, userKey, {
         syncState: 'SYNC_FAILED',
@@ -801,6 +1038,12 @@ async function syncUserNotesWithGoogleDrive(userId) {
  */
 function getPendingGoogleSyncItems(userId) {
   const userKey = userId ? String(userId) : 'usr_local_default';
+  const driveStatus = getGoogleDriveStatus(userKey);
+  // If drive is in AUTHENTICATION REQUIRED or not connected, do not count pending items as active transmissions
+  if (!driveStatus.connected || driveStatus.authRequired) {
+    return [];
+  }
+
   const allNotes = NoteModel.getAll(userKey).filter(n => n.sync_mode === 'cloud' || n.sync_mode === 'google' || n.sync_mode === 'both');
 
   const pending = [];
@@ -848,6 +1091,15 @@ async function syncSingleNoteWithGoogleDrive(userId, noteId) {
 
   rejectGoogleUpload(note);
 
+  const driveStatus = getGoogleDriveStatus(userKey);
+  if (driveStatus.authRequired) {
+    NoteModel.updateSyncMetadata(note.id, userKey, {
+      syncState: 'SYNC_FAILED',
+      syncError: 'Google Drive authentication expired.'
+    });
+    throw new Error('Google Drive authentication expired. Please reconnect Google Drive in Settings.');
+  }
+
   // Transition state to SYNCING before starting network API operations
   NoteModel.updateSyncMetadata(note.id, userKey, {
     syncState: 'SYNCING',
@@ -872,10 +1124,11 @@ async function syncSingleNoteWithGoogleDrive(userId, noteId) {
 
     const currentContent = readNoteFile(note.file_path);
     const currentHash = calculateHash(currentContent);
-    const safeTitle = (note.title || 'Untitled Note').replace(/[^a-zA-Z0-9_\-\s]/g, '_').trim();
+    const baseTitle = (note.title || 'Untitled Note').replace(/\.md$/i, '').trim();
+    const safeTitle = baseTitle.replace(/[\/\\?%*:|"<>]/g, '_').trim() || 'Untitled Note';
     const fileName = `${safeTitle}.md`;
 
-    const confirmedFileId = await uploadFileToDriveAPI(authInfo, folderId, fileName, currentContent, note.gdrive_file_id);
+    const confirmedFileId = await uploadFileToDriveAPI(authInfo, folderId, fileName, currentContent, note.gdrive_file_id, note.id);
     console.log(`[Google Drive Sync] Drive API success`);
     console.log(`[Google Drive Sync] File ID: ${confirmedFileId}`);
     console.log(`[Google Drive Sync] Verifying Drive file...`);
@@ -898,6 +1151,7 @@ async function syncSingleNoteWithGoogleDrive(userId, noteId) {
 
     console.log(`[Google Drive Sync] SQLite metadata update success`);
     console.log(`[Google Drive Sync] Successfully synced single note '${note.title}'`);
+    SyncQueueModel.markSyncedForEntity('NOTE', note.id, userKey);
 
     const updatedNote = NoteModel.getById(note.id, userKey);
 
@@ -911,7 +1165,11 @@ async function syncSingleNoteWithGoogleDrive(userId, noteId) {
       syncedAt: now
     };
   } catch (err) {
-    console.error(`[Google Drive Sync FAILED] Single note '${note.title}' sync failed: ${err.message}`);
+    if (err.isAuthRequired || (err.message && err.message.includes('authentication expired'))) {
+      console.warn(`[Google Drive Sync] Note '${note.title}' sync halted: Authentication required.`);
+    } else {
+      console.error(`[Google Drive Sync FAILED] Single note '${note.title}' sync failed: ${err.message}`);
+    }
     NoteModel.updateSyncMetadata(note.id, userKey, {
       syncState: 'SYNC_FAILED',
       syncError: err.message
@@ -929,9 +1187,9 @@ async function checkGoogleDriveReachability(userId) {
 
   return {
     reachable: true,
-    connected: drive.connected || account.connected,
-    driveConnected: drive.connected,
-    accountConnected: account.connected,
+    connected: Boolean(drive.connected),
+    driveConnected: Boolean(drive.connected),
+    accountConnected: Boolean(account.connected),
     email: drive.email || account.email,
     folderName: 'SyncNote',
     checkedAt: new Date().toISOString()
@@ -951,5 +1209,8 @@ module.exports = {
   syncUserNotesWithGoogleDrive,
   syncSingleNoteWithGoogleDrive,
   getPendingGoogleSyncItems,
-  checkGoogleDriveReachability
+  checkGoogleDriveReachability,
+  uploadFileToDriveAPI,
+  verifyDriveFileAPI
 };
+

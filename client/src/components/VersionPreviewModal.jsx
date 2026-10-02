@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Eye, X, RotateCcw, Edit3, AlertTriangle, Loader2 } from 'lucide-react';
+import { Eye, X, RotateCcw, Edit3, AlertTriangle, Loader2, Hash, Clock } from 'lucide-react';
 import MarkdownRenderer from './MarkdownRenderer';
 import { formatRelativeTime, formatDateSafe } from '../utils/timeUtils';
 
@@ -39,11 +39,10 @@ export default function VersionPreviewModal({
 
   if (!isOpen) return null;
 
-  // Accept both versionData or versionContentData, nested or flat
   const payload = versionData || versionContentData || {};
   const versionObj = payload.version || payload;
   const versionNumber = versionObj.version_number ?? payload.version_number ?? '';
-  const message = versionObj.message ?? payload.message ?? 'Checkpoint';
+  const message = versionObj.message ?? payload.message ?? 'Checkpoint Snapshot';
   const createdAt = versionObj.created_at ?? payload.created_at;
   const contentHash = versionObj.content_hash ?? payload.content_hash ?? '';
   const content = payload.content !== undefined ? payload.content : (versionObj.content !== undefined ? versionObj.content : null);
@@ -53,25 +52,27 @@ export default function VersionPreviewModal({
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card version-preview-card" onClick={(e) => e.stopPropagation()} style={{ width: 'min(92vw, 700px)' }}>
+      <div className="modal-card version-preview-card" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="modal-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Eye size={18} style={{ color: 'var(--accent-primary)' }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div className="preview-icon-badge">
+              <Eye size={16} />
+            </div>
             <div>
               <h3 className="modal-title">
-                Historical Version {versionNumber !== '' ? `V${versionNumber}` : ''} (Read-Only)
+                Version V{versionNumber !== '' ? versionNumber : 'Snapshot'} (Read-Only)
               </h3>
-              <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                {message} • {formattedTime}{fullDate ? ` (${fullDate})` : ''}
-              </span>
+              <p className="diff-subtitle">
+                {message} · {formattedTime} {fullDate ? `(${fullDate})` : ''}
+              </p>
             </div>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div className="editor-tabs" style={{ background: 'var(--bg-input)' }}>
+            <div className="segmented-tab-control">
               <button 
-                className={`editor-tab-btn ${mode === 'preview' ? 'active' : ''}`}
+                className={`segmented-tab-btn ${mode === 'preview' ? 'active' : ''}`}
                 onClick={() => setMode('preview')}
                 type="button"
               >
@@ -79,7 +80,7 @@ export default function VersionPreviewModal({
                 <span>Preview</span>
               </button>
               <button 
-                className={`editor-tab-btn ${mode === 'raw' ? 'active' : ''}`}
+                className={`segmented-tab-btn ${mode === 'raw' ? 'active' : ''}`}
                 onClick={() => setMode('raw')}
                 type="button"
               >
@@ -95,37 +96,36 @@ export default function VersionPreviewModal({
 
         {/* Content View */}
         <div className="modal-body" style={{ padding: '16px' }}>
-          <div className="version-preview-body" style={{ minHeight: '180px', maxHeight: '60vh', overflowY: 'auto' }}>
+          <div className="version-preview-scroll-viewport">
             {isLoading ? (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '180px', gap: '8px', color: 'var(--text-muted)' }}>
-                <Loader2 size={18} className="spin-animation" />
-                <span>Loading version...</span>
+              <div className="preview-loading-state">
+                <Loader2 size={20} className="spin text-muted" />
+                <span>Loading historical version...</span>
               </div>
             ) : error ? (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '180px', gap: '8px', color: 'var(--accent-danger)' }}>
-                <AlertTriangle size={24} />
-                <span style={{ fontWeight: 600 }}>Unable to load this version</span>
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{error}</span>
+              <div className="preview-error-state">
+                <AlertTriangle size={24} className="text-danger" />
+                <span className="error-title">Unable to load this version</span>
+                <span className="error-sub">{error}</span>
               </div>
             ) : content === '' ? (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '180px', color: 'var(--text-muted)', fontSize: '0.88rem' }}>
-                <em>Empty note</em>
+              <div className="preview-empty-state">
+                <em>Empty note content in this version</em>
               </div>
             ) : mode === 'preview' ? (
               <MarkdownRenderer content={content || ''} />
             ) : (
               <textarea
-                className="editor-content-textarea"
+                className="raw-markdown-preview-textarea"
                 value={content || ''}
                 readOnly
-                style={{ height: '300px', resize: 'none', width: '100%', fontFamily: 'var(--font-mono)', fontSize: '0.85rem' }}
               />
             )}
           </div>
 
-          <div className="modal-footer" style={{ borderTop: '1px solid var(--border-subtle)', justifyContent: 'space-between', marginTop: '12px', paddingTop: '12px' }}>
+          <div className="modal-footer" style={{ borderTop: '1px solid var(--border-subtle)', justifyContent: 'space-between', marginTop: '14px', paddingTop: '12px' }}>
             <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-              {contentHash ? `Hash: ${contentHash.substring(0, 16)}...` : ''}
+              {contentHash ? `SHA256: ${contentHash.substring(0, 16)}...` : ''}
             </span>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button className="secondary-action-btn" onClick={onClose} type="button">
@@ -138,8 +138,7 @@ export default function VersionPreviewModal({
                   if (onRestore) onRestore(versionObj);
                 }}
                 disabled={isLoading || !!error}
-                title="Restore this historical version as a new checkpoint"
-                style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+                title="Restore this version as current"
                 type="button"
               >
                 <RotateCcw size={13} />

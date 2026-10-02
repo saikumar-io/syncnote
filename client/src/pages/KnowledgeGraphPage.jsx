@@ -6,7 +6,7 @@ export default function KnowledgeGraphPage({ notes = [], onCreateNote }) {
   const navigate = useNavigate();
 
   return (
-    <div className="knowledge-graph-page" style={{ width: '100%', height: 'calc(100vh - 48px)', position: 'relative' }}>
+    <div className="knowledge-graph-page" style={{ width: '100%', height: '100%', flex: 1, minHeight: 0, position: 'relative' }}>
       <KnowledgeGraph
         notes={notes}
         onSelectNote={(noteId) => navigate(`/notes/${noteId}`)}

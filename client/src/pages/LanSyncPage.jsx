@@ -27,7 +27,7 @@ export default function LanSyncPage() {
   const [unpairingDeviceId, setUnpairingDeviceId] = useState(null);
   const [deviceMessages, setDeviceMessages] = useState({});
 
-  // On mount: load paired devices, run discovery, check reachability, and poll for pending requests
+  // On mount: load paired devices, run discovery, and check reachability
   useEffect(() => {
     let isMounted = true;
 
@@ -40,24 +40,13 @@ export default function LanSyncPage() {
         if (sync.checkDevicesPresence) {
           await sync.checkDevicesPresence();
         }
-        if (sync.fetchPendingPairingRequests) {
-          await sync.fetchPendingPairingRequests();
-        }
       } catch (e) {}
     };
 
     init();
 
-    // Fast poll for pending incoming pairing requests so approval prompt appears promptly
-    const pendingInterval = setInterval(() => {
-      if (isMounted && sync.fetchPendingPairingRequests) {
-        sync.fetchPendingPairingRequests();
-      }
-    }, 2000);
-
     return () => {
       isMounted = false;
-      clearInterval(pendingInterval);
     };
   }, []);
 
@@ -587,10 +576,10 @@ export default function LanSyncPage() {
                           fontWeight: 600,
                           color: dev.isOnline ? 'var(--accent-emerald)' : 'var(--text-muted)'
                         }}>
-                          <span style={{ fontSize: '0.82rem', lineHeight: 1 }}>
-                            {dev.isOnline ? '🟢' : '⚪'}
+                          <span style={{ fontSize: '0.86rem', lineHeight: 1 }}>
+                            {dev.isOnline ? '●' : '○'}
                           </span>
-                          <span>{dev.isOnline ? 'Online' : 'Offline'}</span>
+                          <span>Paired · {dev.isOnline ? 'Online' : 'Offline'}</span>
                         </span>
 
                         <span style={{ color: 'var(--text-muted)' }}>•</span>

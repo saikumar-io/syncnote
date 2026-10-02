@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import MarkdownRenderer from './MarkdownRenderer';
 import EditorToolbar from './EditorToolbar';
 import CheckpointModal from './CheckpointModal';
@@ -6,6 +7,7 @@ import VersionHistoryDrawer from './VersionHistoryDrawer';
 import DiffViewerModal from './DiffViewerModal';
 import VersionPreviewModal from './VersionPreviewModal';
 import SyncModeModal from './SyncModeModal';
+import ContextualAiPanel from './ContextualAiPanel';
 import { NoteSyncBadge } from './NoteListColumn';
 import { formatRelativeTime } from '../utils/timeUtils';
 import { getBacklinksForNote } from '../utils/backlinksParser';
@@ -31,7 +33,10 @@ import {
   Link2,
   ArrowLeft,
   GitCommit,
-  AlertTriangle
+  AlertTriangle,
+  Sparkles,
+  Clock,
+  ChevronRight
 } from 'lucide-react';
 
 export default function MainContent({ 
@@ -64,7 +69,45 @@ export default function MainContent({
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [showSyncDrawer, setShowSyncDrawer] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const moreButtonRef = useRef(null);
+  const [moreMenuPos, setMoreMenuPos] = useState({ top: 0, right: 0 });
+
+  const toggleMoreMenu = (e) => {
+    e.stopPropagation();
+    if (!showMoreMenu && moreButtonRef.current) {
+      const rect = moreButtonRef.current.getBoundingClientRect();
+      const top = Math.min(rect.bottom + 6, window.innerHeight - 200);
+      const right = Math.max(12, window.innerWidth - rect.right);
+      setMoreMenuPos({ top, right });
+      setShowHistoryDrawer(false);
+      setShowSyncDrawer(false);
+    }
+    setShowMoreMenu(!showMoreMenu);
+  };
+
+  useEffect(() => {
+    if (!showMoreMenu) return;
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setShowMoreMenu(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showMoreMenu]);
+
+  const [showAiPanel, setShowAiPanel] = useState(() => {
+    return localStorage.getItem('syncnote_ai_panel_open') === 'true';
+  });
   const [copiedToast, setCopiedToast] = useState(false);
+
+  const toggleAiPanel = () => {
+    setShowAiPanel(prev => {
+      const next = !prev;
+      localStorage.setItem('syncnote_ai_panel_open', String(next));
+      return next;
+    });
+  };
 
   // Version Control States
   const [showCheckpointModal, setShowCheckpointModal] = useState(false);
@@ -104,12 +147,6 @@ export default function MainContent({
     if (sync && sync.refreshSyncStatus) {
       sync.refreshSyncStatus();
     }
-  };
-
-  const handleBadgeClick = () => {
-    if (!selectedNote) return;
-    const nextMode = currentNoteMode === 'local' ? 'cloud' : (currentNoteMode === 'cloud' ? 'lan' : 'local');
-    handleDirectModeChange(nextMode);
   };
 
   const sync = useSync();
@@ -176,8 +213,6 @@ export default function MainContent({
     const savingNotebookId = notebookIdRef.current;
     const currentReqId = ++latestRequestIdRef.current;
 
-    console.log(`[NoteAutosave] noteId: ${targetNoteId}, contentLength: ${savingContent ? savingContent.length : 0}, contentPreview: ${savingContent ? savingContent.substring(0, 30) : ''}, requestSequence: ${currentReqId}`);
-    
     try {
       setSavingStatus('Saving...');
       const updated = await onUpdateNote(targetNoteId, {
@@ -187,12 +222,10 @@ export default function MainContent({
       });
       
       if (currentReqId === latestRequestIdRef.current) {
-        // If contentRef has not changed while save was in flight, mark save complete
         if (contentRef.current === savingContent && titleRef.current === savingTitle && notebookIdRef.current === savingNotebookId) {
           pendingSaveRef.current = false;
           setSavingStatus('Saved locally');
         } else {
-          // User typed additional characters while save was in flight!
           pendingSaveRef.current = true;
           setSavingStatus('Saving...');
           scheduleAutosave(targetNoteId);
@@ -220,7 +253,7 @@ export default function MainContent({
     }, 750);
   }, [flushSave]);
 
-  // Handle note switching & unmounting: flush pending changes of previous note
+  // Handle note switching & unmounting
   useEffect(() => {
     const prevNoteId = noteIdRef.current;
     const isDifferentNote = selectedNote?.id && selectedNote.id !== prevNoteId;
@@ -291,7 +324,7 @@ export default function MainContent({
   const loadHistory = async (noteId) => {
     try {
       const historyData = await notesApi.getHistory(noteId);
-      setHistoryList(historyData);
+      setHistoryList(historyData || []);
     } catch (err) {
       console.error('Failed to load history:', err);
     }
@@ -412,7 +445,6 @@ export default function MainContent({
     scheduleAutosave(selectedNote.id);
   };
 
-  // Helper to insert Markdown syntax at active cursor in textarea
   const handleInsertSyntax = (tool) => {
     if (!textareaRef.current) return;
     const el = textareaRef.current;
@@ -448,7 +480,6 @@ export default function MainContent({
     }
   };
 
-  // Checkpoint Action Handlers
   const handleOpenCheckpointModal = () => {
     if (!selectedNote || selectedNote.id === 'draft') return;
     setCheckpointStatusMsg('');
@@ -482,7 +513,6 @@ export default function MainContent({
     }
   };
 
-  // Version History Action Handlers
   const handleViewChanges = async (version) => {
     try {
       const diffData = await notesApi.getVersionDiff(selectedNote.id, version.id);
@@ -514,8 +544,6 @@ export default function MainContent({
     if (!selectedNote || !version?.id) return;
     try {
       const currentReqId = ++latestRequestIdRef.current;
-      console.log(`[RestoreStart] requestedVersionId: ${version.id}, versionNumber: V${version.version_number}`);
-      
       const res = await notesApi.restoreVersion(selectedNote.id, version.id);
       const payload = res?.data || res;
       const restoredContent = payload?.content;
@@ -525,12 +553,7 @@ export default function MainContent({
         throw new Error('Invalid version payload returned from restore API');
       }
 
-      if (currentReqId !== latestRequestIdRef.current) {
-        console.warn(`[Restore] Stale restore response dropped for ${version.id}`);
-        return;
-      }
-
-      console.log(`[RestoreFinish] requested V${version.version_number} (${version.id}) -> new restored V${newVersion.version_number} (${newVersion.id}) set as CURRENT`);
+      if (currentReqId !== latestRequestIdRef.current) return;
 
       setEditorContent(restoredContent);
       contentRef.current = restoredContent;
@@ -561,16 +584,14 @@ export default function MainContent({
   // Empty state if no note selected
   if (!selectedNote) {
     return (
-      <main className="editor-pane" style={{ alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
-        <div style={{ maxWidth: '320px', color: 'var(--text-muted)' }}>
-          <FileText size={32} style={{ margin: '0 auto 12px auto', display: 'block', opacity: 0.3 }} />
-          <h3 style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
-            No Note Selected
-          </h3>
-          <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '14px' }}>
-            Click + New Note to start writing instantly.
-          </p>
-          <button className="new-note-btn" style={{ width: 'auto', margin: '0 auto' }} onClick={onCreateNote}>
+      <main className="editor-pane-empty">
+        <div className="empty-selection-card">
+          <div className="empty-icon-wrap">
+            <FileText size={32} />
+          </div>
+          <h3>No Note Selected</h3>
+          <p>Select a note from the file explorer or create a new note to start writing.</p>
+          <button className="primary-action-btn" onClick={onCreateNote}>
             <span>+ New Note</span>
           </button>
         </div>
@@ -579,98 +600,67 @@ export default function MainContent({
   }
 
   const isDraft = selectedNote.id === 'draft';
+  const wordCount = editorContent ? editorContent.split(/\s+/).filter(Boolean).length : 0;
+  const charCount = editorContent ? editorContent.length : 0;
 
   return (
-    <main className="editor-pane" style={{ position: 'relative' }}>
-      {/* Toast Notification Banner */}
+    <main className="editor-pane-root">
+      {/* Toast Notification */}
       {toastNotification && (
-        <div style={{
-          position: 'absolute',
-          top: '52px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          zIndex: 220,
-          background: 'var(--text-primary)',
-          color: 'var(--bg-app)',
-          padding: '6px 14px',
-          borderRadius: 'var(--radius-sm)',
-          fontSize: '0.78rem',
-          fontWeight: 600,
-          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '6px'
-        }}>
-          <Check size={14} style={{ color: 'var(--accent-emerald)' }} />
+        <div className="editor-floating-toast">
+          <Check size={14} className="toast-check-icon" />
           <span>{toastNotification}</span>
         </div>
       )}
 
       {/* Editor Header Bar */}
       <div className="editor-header-bar">
-        {/* Left: Edit | Preview Tabs & Formatting Toolbar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <div className="editor-tabs">
+        {/* Left: Edit / Preview Switcher & Formatting Dock */}
+        <div className="editor-header-left">
+          <div className="segmented-tab-control">
             <button 
-              className={`editor-tab-btn ${viewMode === 'edit' ? 'active' : ''}`}
+              className={`segmented-tab-btn ${viewMode === 'edit' ? 'active' : ''}`}
               onClick={() => setViewMode('edit')}
+              type="button"
             >
               <Edit3 size={13} />
               <span>Edit</span>
             </button>
             <button 
-              className={`editor-tab-btn ${viewMode === 'preview' ? 'active' : ''}`}
+              className={`segmented-tab-btn ${viewMode === 'preview' ? 'active' : ''}`}
               onClick={() => setViewMode('preview')}
+              type="button"
             >
               <Eye size={13} />
               <span>Preview</span>
             </button>
           </div>
 
-          {/* Minimal Formatting Toolbar (In Edit Mode) */}
           {viewMode === 'edit' && <EditorToolbar onInsertSyntax={handleInsertSyntax} />}
         </div>
 
-        {/* Right: Checkpoint Action, Notebook Selector & Action Drawers */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {/* Explicit Checkpoint Button */}
+        {/* Right Action Tools */}
+        <div className="editor-header-right">
+          {/* Checkpoint Button */}
           {!isDraft && (
             <button 
-              className="toolbar-btn"
+              className="checkpoint-action-btn"
               onClick={handleOpenCheckpointModal}
-              title="Create Version Checkpoint"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '5px',
-                fontSize: '0.74rem',
-                fontWeight: 600,
-                padding: '3px 9px',
-                background: 'rgba(99, 102, 241, 0.12)',
-                border: '1px solid rgba(99, 102, 241, 0.3)',
-                color: 'var(--accent-primary)'
-              }}
+              title="Create Version Snapshot"
+              type="button"
             >
               <GitCommit size={13} />
               <span>Checkpoint</span>
             </button>
           )}
 
-          {/* Notebook Dropdown */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
-            <BookOpen size={13} />
+          {/* Notebook Selector */}
+          <div className="notebook-selector-wrap">
+            <BookOpen size={12} className="nb-icon" />
             <select
               value={editorNotebookId || ''}
               onChange={handleNotebookChange}
-              style={{
-                background: 'var(--bg-input)',
-                color: 'var(--text-primary)',
-                border: '1px solid var(--border-subtle)',
-                padding: '2px 6px',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: '0.74rem',
-                outline: 'none'
-              }}
+              className="notebook-select"
             >
               <option value="">Unassigned</option>
               {notebooks.map((nb) => (
@@ -681,65 +671,31 @@ export default function MainContent({
             </select>
           </div>
 
-          {/* 1-Click Direct Sync Mode Selector */}
-          <div className="sync-mode-segmented-control">
-            <button
-              type="button"
-              className={`sync-mode-segment-btn ${currentNoteMode === 'local' ? 'active' : ''}`}
-              onClick={() => handleDirectModeChange('local')}
-              title="Store on this device only"
-            >
-              LOCAL
-            </button>
-            <button
-              type="button"
-              className={`sync-mode-segment-btn ${currentNoteMode === 'cloud' ? 'active' : ''}`}
-              onClick={() => handleDirectModeChange('cloud')}
-              title="Enable Google Drive Cloud Sync"
-            >
-              CLOUD
-            </button>
-            <button
-              type="button"
-              className={`sync-mode-segment-btn ${currentNoteMode === 'lan' ? 'active' : ''}`}
-              onClick={() => handleDirectModeChange('lan')}
-              title="Enable Encrypted P2P LAN Sync"
-            >
-              LAN
-            </button>
-            <button
-              type="button"
-              className={`sync-mode-segment-btn ${currentNoteMode === 'both' ? 'active' : ''}`}
-              onClick={() => handleDirectModeChange('both')}
-              title="Prefer LAN when available, fallback to Cloud"
-            >
-              BOTH
-            </button>
+          {/* 1-Click Sync Mode Pills */}
+          <div className="sync-mode-segmented-pills">
+            {['local', 'cloud', 'lan', 'both'].map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={`sync-pill-btn ${currentNoteMode === mode ? 'active' : ''}`}
+                onClick={() => handleDirectModeChange(mode)}
+                title={`Set note sync mode to ${mode.toUpperCase()}`}
+              >
+                {mode.toUpperCase()}
+              </button>
+            ))}
           </div>
 
-          {/* Sync Status Badge & Action */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          {/* Note Sync Badge & Manual Trigger */}
+          <div className="sync-status-indicator-group">
             <NoteSyncBadge note={selectedNote} />
             {currentNoteMode === 'cloud' && (
               <button
                 type="button"
-                className="toolbar-btn"
+                className="single-sync-btn"
                 onClick={handleSyncSingleNote}
                 disabled={isSyncingSingle || sync?.isSyncing}
-                title="Sync this note to Google Drive now"
-                style={{ 
-                  display: 'inline-flex', 
-                  alignItems: 'center', 
-                  gap: '4px', 
-                  fontSize: '0.68rem', 
-                  padding: '2px 7px', 
-                  borderRadius: '4px', 
-                  background: 'rgba(38, 132, 252, 0.14)', 
-                  color: '#2684fc', 
-                  border: '1px solid rgba(38, 132, 252, 0.3)', 
-                  cursor: (isSyncingSingle || sync?.isSyncing) ? 'wait' : 'pointer',
-                  fontWeight: 600
-                }}
+                title="Synchronize note with Google Drive"
               >
                 <RefreshCw size={11} className={(isSyncingSingle || sync?.isSyncing) ? 'spin' : ''} />
                 <span>{(isSyncingSingle || sync?.isSyncing) ? 'Syncing...' : 'Sync Now'}</span>
@@ -747,130 +703,167 @@ export default function MainContent({
             )}
           </div>
 
-          {/* Backlinks Inspector Toggle */}
+          {/* Knowledge Graph Button */}
           <button 
-            className={`toolbar-btn ${showBacklinks ? 'active' : ''}`}
-            onClick={() => setShowBacklinks(!showBacklinks)}
-            title="Toggle Backlinks Inspector"
-            style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.74rem', padding: '3px 7px' }}
-          >
-            <Link2 size={13} style={{ color: backlinks.length > 0 ? 'var(--accent-emerald)' : 'inherit' }} />
-            <span>{backlinks.length}</span>
-          </button>
-
-          {/* View Connections in Knowledge Graph */}
-          <button 
-            className="toolbar-btn"
+            className="toolbar-tool-btn"
             onClick={() => onOpenGraphView && onOpenGraphView(selectedNote.id)}
-            title="View Connections in Knowledge Graph"
-            style={{ color: 'var(--accent-primary)', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.74rem', padding: '3px 7px', background: 'rgba(99, 102, 241, 0.08)', border: '1px solid rgba(99, 102, 241, 0.2)' }}
+            title="View in Knowledge Graph"
+            type="button"
           >
             <Share2 size={13} />
-            <span>Graph</span>
           </button>
 
-          {/* Interactive Header Buttons */}
+          {/* Version History Drawer Trigger */}
           <button 
-            className={`toolbar-btn ${showHistoryDrawer ? 'active' : ''}`} 
+            className={`toolbar-tool-btn ${showHistoryDrawer ? 'active' : ''}`} 
             onClick={() => { 
               if (!isDraft) loadHistory(selectedNote.id);
               setShowHistoryDrawer(!showHistoryDrawer); 
               setShowSyncDrawer(false); 
               setShowMoreMenu(false); 
             }}
-            title="View Version History Graph"
+            title="Version History Timeline"
+            type="button"
           >
             <History size={13} />
           </button>
 
-          <button 
-            className={`toolbar-btn ${showSyncDrawer ? 'active' : ''}`} 
-            onClick={() => { setShowSyncDrawer(!showSyncDrawer); setShowHistoryDrawer(false); setShowMoreMenu(false); }}
-            title="Local Disk Sync Status"
+          {/* AI Panel Toggle Button */}
+          <button
+            className={`ai-toggle-btn ${showAiPanel ? 'active' : ''}`}
+            onClick={toggleAiPanel}
+            title={showAiPanel ? 'Hide AI Assistant' : 'Show AI & Knowledge Assistant'}
+            type="button"
           >
-            <RefreshCw size={13} />
+            <Sparkles size={13} />
+            <span>AI</span>
           </button>
 
+          {/* Direct Star / Pin Quick Action */}
           <button 
-            className={`toolbar-btn ${showMoreMenu ? 'active' : ''}`} 
-            onClick={() => { setShowMoreMenu(!showMoreMenu); setShowHistoryDrawer(false); setShowSyncDrawer(false); }}
-            title="More Options"
+            className={`toolbar-tool-btn star-tool-btn ${selectedNote?.is_favorite ? 'pinned active' : ''}`}
+            onClick={() => onToggleFavorite && onToggleFavorite(selectedNote)}
+            title={selectedNote?.is_favorite ? 'Pinned to Favorites (Click to unpin ★)' : 'Pin to Favorites (☆)'}
+            aria-label={selectedNote?.is_favorite ? 'Unpin note from favorites' : 'Pin note to favorites'}
+            type="button"
+          >
+            <Star 
+              size={14} 
+              style={{ 
+                color: selectedNote?.is_favorite ? '#eab308' : 'inherit',
+                fill: selectedNote?.is_favorite ? '#eab308' : 'none'
+              }} 
+            />
+          </button>
+
+          {/* More Actions Dropdown Trigger Button */}
+          <button 
+            ref={moreButtonRef}
+            className={`toolbar-tool-btn ${showMoreMenu ? 'active' : ''}`} 
+            onClick={toggleMoreMenu}
+            title="More Actions"
+            aria-label="More Note Actions"
+            type="button"
           >
             <MoreHorizontal size={13} />
           </button>
 
-          {!isDraft && (
-            <button 
-              onClick={() => onRequestDeleteNote(selectedNote)}
-              style={{ background: 'none', border: 'none', color: 'var(--accent-danger)', cursor: 'pointer', opacity: 0.8 }}
-              title="Delete note"
-            >
-              <Trash2 size={14} />
-            </button>
+          {/* High-Level Portal Context Menu: Always renders above all content and AI panel */}
+          {showMoreMenu && createPortal(
+            <>
+              <div 
+                className="portal-menu-backdrop" 
+                onClick={() => setShowMoreMenu(false)}
+                onContextMenu={(e) => { e.preventDefault(); setShowMoreMenu(false); }}
+              />
+              <div 
+                className="editor-dropdown-popover floating-portal-menu"
+                style={{
+                  position: 'fixed',
+                  top: `${moreMenuPos.top}px`,
+                  right: `${moreMenuPos.right}px`,
+                  zIndex: 'var(--z-dropdown, 1000)'
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button 
+                  className="dropdown-action-item" 
+                  onClick={() => { copyFilePath(); setShowMoreMenu(false); }}
+                  type="button"
+                >
+                  {copiedToast ? <Check size={13} className="text-success" /> : <Copy size={13} />}
+                  <span>{copiedToast ? 'Copied File Path!' : 'Copy Local Path'}</span>
+                </button>
+
+                <button 
+                  className="dropdown-action-item" 
+                  onClick={() => { onToggleFavorite && onToggleFavorite(selectedNote); setShowMoreMenu(false); }}
+                  type="button"
+                >
+                  <Star 
+                    size={13} 
+                    style={{ 
+                      color: selectedNote?.is_favorite ? '#eab308' : 'inherit',
+                      fill: selectedNote?.is_favorite ? '#eab308' : 'none'
+                    }} 
+                  />
+                  <span>{selectedNote?.is_favorite ? 'Unpin from Favorites' : 'Pin to Favorites'}</span>
+                </button>
+
+                <button 
+                  className="dropdown-action-item" 
+                  onClick={() => { onRequestMoveNotebook && onRequestMoveNotebook(selectedNote); setShowMoreMenu(false); }}
+                  type="button"
+                >
+                  <Folder size={13} />
+                  <span>Move Notebook...</span>
+                </button>
+
+                <div className="popover-divider" />
+
+                {!isDraft && (
+                  <button 
+                    className="dropdown-action-item danger" 
+                    onClick={() => { onRequestDeleteNote && onRequestDeleteNote(selectedNote); setShowMoreMenu(false); }}
+                    type="button"
+                  >
+                    <Trash2 size={13} />
+                    <span>Delete Note</span>
+                  </button>
+                )}
+              </div>
+            </>,
+            document.body
           )}
         </div>
       </div>
 
-      {/* Popover Drawer: Storage Sync Status */}
-      {showSyncDrawer && (
-        <div className="info-popover-drawer">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
-            <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--accent-emerald)' }}>● Local Storage Status</span>
-            <button style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }} onClick={() => setShowSyncDrawer(false)}>×</button>
-          </div>
-          <p style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
-            {isDraft ? 'Unsaved temporary draft' : 'Physical .md file synced to disk. SQLite metadata index & line diffs saved.'}
-          </p>
-        </div>
-      )}
-
-      {/* Popover Drawer: More Options Menu */}
-      {showMoreMenu && (
-        <div className="info-popover-drawer" style={{ right: '40px' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <div className="context-menu-item" onClick={() => { copyFilePath(); setShowMoreMenu(false); }}>
-              {copiedToast ? <Check size={13} style={{ color: 'var(--accent-emerald)' }} /> : <Copy size={13} />}
-              <span>{copiedToast ? 'Copied Path!' : 'Copy Disk File Path'}</span>
-            </div>
-
-            <div className="context-menu-item" onClick={() => { onToggleFavorite(selectedNote); setShowMoreMenu(false); }}>
-              <Star size={13} style={{ color: selectedNote.is_favorite ? 'var(--accent-warning)' : 'inherit' }} />
-              <span>{selectedNote.is_favorite ? 'Unfavorite Note' : 'Favorite Note'}</span>
-            </div>
-
-            <div className="context-menu-item" onClick={() => { onRequestMoveNotebook(selectedNote); setShowMoreMenu(false); }}>
-              <Folder size={13} />
-              <span>Move to Notebook</span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Main Workspace: Editor Canvas + Inline Backlinks + Side Inspector */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {/* Writing Canvas */}
-        <div className="editor-workspace">
-          {/* Session Recovery Banner */}
+      {/* Main Workspace Body: Editor + Contextual AI Right Panel */}
+      <div className="editor-split-body">
+        {/* Left / Center Writing Canvas */}
+        <div className="editor-canvas-container">
+          
+          {/* Recovery Notification Banner */}
           {selectedNote && 
            selectedNote.id !== 'draft' && 
            selectedNote.session_info?.has_uncheckpointed_changes && 
            dismissedRecoveryNoteId !== selectedNote.id &&
            !isRecoveryHandled(selectedNote) && (
-            <div className="session-recovery-banner">
-              <div className="recovery-message">
-                <AlertTriangle size={15} className="recovery-icon" />
-                <span>Uncheckpointed changes from previous session</span>
+            <div className="recovery-alert-card">
+              <div className="alert-message">
+                <AlertTriangle size={15} className="alert-icon" />
+                <span>Uncheckpointed changes from previous session detected on disk.</span>
               </div>
-              <div className="recovery-actions">
+              <div className="alert-actions">
                 <button 
-                  className="recovery-btn keep-btn"
+                  className="recovery-btn keep"
                   onClick={handleKeepChanges}
                   disabled={isProcessingRecovery}
                 >
                   Keep Changes
                 </button>
                 <button 
-                  className="recovery-btn discard-btn"
+                  className="recovery-btn discard"
                   onClick={handleDiscardChanges}
                   disabled={isProcessingRecovery}
                 >
@@ -880,178 +873,218 @@ export default function MainContent({
             </div>
           )}
 
-          {/* Conflict Resolution Banner */}
+          {/* Sync Conflict Banner */}
           {selectedNote && (selectedNote.sync_state === 'CONFLICT' || activeNoteConflict) && (
-            <div className="session-recovery-banner" style={{ background: 'rgba(239, 68, 68, 0.12)', borderBottom: '1px solid rgba(239, 68, 68, 0.3)' }}>
-              <div className="recovery-message">
-                <AlertTriangle size={15} style={{ color: '#ef4444' }} />
-                <span style={{ color: '#ef4444', fontWeight: 600 }}>Sync Conflict: Concurrent independent edits exist for this note. AI assistance available.</span>
+            <div className="conflict-alert-card">
+              <div className="alert-message">
+                <AlertTriangle size={15} className="conflict-icon" />
+                <span>Sync Conflict: Concurrent independent edits exist. Local AI assistant ready to reconcile.</span>
               </div>
-              <div className="recovery-actions">
-                <button
-                  className="btn-recovery btn-checkpoint"
-                  style={{ background: '#ef4444', color: '#ffffff' }}
-                  onClick={() => {
-                    if (openConflictModal) {
-                      openConflictModal(activeNoteConflict || selectedNote?.id);
-                    }
-                  }}
-                >
-                  Resolve Conflict with AI
-                </button>
-              </div>
+              <button
+                className="launch-ai-resolve-btn"
+                onClick={() => {
+                  if (openConflictModal) {
+                    openConflictModal(activeNoteConflict || selectedNote?.id);
+                  }
+                }}
+              >
+                <Sparkles size={13} />
+                <span>Resolve Conflict in Studio</span>
+              </button>
             </div>
           )}
 
-          {/* Derived Primary Path */}
-          <div className="editor-top-path-bar">
-            <div className="editor-primary-path">
-              {getNotePath(selectedNote, notebooks)}
-            </div>
+          {/* Breadcrumb Path Bar with Back button & Clickable crumbs */}
+          <div className="editor-breadcrumb-row" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
+            <button
+              type="button"
+              className="icon-btn-ghost back-nav-btn"
+              onClick={() => {
+                if (selectedNote?.notebook_id) {
+                  window.history.pushState(null, '', `/notes/folder/${selectedNote.notebook_id}`);
+                  window.dispatchEvent(new PopStateEvent('popstate'));
+                } else {
+                  window.history.pushState(null, '', '/notes');
+                  window.dispatchEvent(new PopStateEvent('popstate'));
+                }
+              }}
+              title="Back to Notes"
+              style={{
+                padding: '3px 8px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                fontSize: '0.78rem',
+                fontWeight: 600,
+                color: 'var(--text-secondary)',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--border-subtle)',
+                background: 'var(--bg-surface)',
+                cursor: 'pointer'
+              }}
+            >
+              <ArrowLeft size={13} />
+              <span>Back</span>
+            </button>
+            <span 
+              className="breadcrumb-path-text"
+              onClick={() => {
+                window.history.pushState(null, '', '/notes');
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }}
+              style={{ cursor: 'pointer' }}
+            >
+              Notes
+            </span>
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>/</span>
+            {selectedNote?.notebook_id && (
+              <>
+                <span
+                  className="breadcrumb-path-text"
+                  onClick={() => {
+                    window.history.pushState(null, '', `/notes/folder/${selectedNote.notebook_id}`);
+                    window.dispatchEvent(new PopStateEvent('popstate'));
+                  }}
+                  style={{ cursor: 'pointer' }}
+                >
+                  {notebooks.find(nb => nb.id === selectedNote.notebook_id)?.name || 'Folder'}
+                </span>
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>/</span>
+              </>
+            )}
+            <span className="breadcrumb-path-text" style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
+              {editorTitle || 'Untitled Note'}
+            </span>
           </div>
 
-          {/* Title Input */}
+          {/* Note Title Input */}
           <input
             type="text"
-            className="editor-title-input"
-            placeholder="Note Title..."
+            className="note-title-hero-input"
+            placeholder="Untitled Note..."
             value={editorTitle}
             onChange={handleTitleChange}
           />
 
-          {/* Subtitle Metadata */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '-8px' }}>
-            <span>Updated {formatRelativeTime(selectedNote.updated_at)}</span>
-            <span>•</span>
-            <span style={{ color: isDraft ? 'var(--accent-warning)' : 'var(--accent-emerald)' }}>
-              ● {savingStatus}
+          {/* Metadata Subheading */}
+          <div className="note-subheading-meta">
+            <span className="meta-time">
+              <Clock size={11} />
+              Updated {formatRelativeTime(selectedNote.updated_at)}
             </span>
+            <span className="meta-dot">·</span>
+            <span className={`save-status-indicator ${savingStatus.includes('locally') ? 'saved' : 'pending'}`}>
+              <span className="pulse-dot" />
+              {savingStatus}
+            </span>
+            <span className="meta-dot">·</span>
+            <span className="meta-words">{wordCount} words, {charCount} chars</span>
           </div>
 
-          {/* Content View: Textarea or Rendered Markdown */}
-          {viewMode === 'edit' ? (
-            <div style={{ position: 'relative', flex: 1, display: 'flex', flexDirection: 'column' }}>
-              <textarea
-                ref={textareaRef}
-                className="editor-content-textarea"
-                placeholder="Write in Markdown format (# Heading, **bold**, [[Note Link]])..."
-                value={editorContent}
-                onChange={handleContentChange}
-              />
+          {/* Editor Textarea or Markdown Preview */}
+          <div className="writing-canvas-viewport">
+            {viewMode === 'edit' ? (
+              <div className="textarea-relative-wrapper">
+                <textarea
+                  ref={textareaRef}
+                  className="markdown-source-textarea"
+                  placeholder="Type your notes in Markdown... Type [[ to link to other notes."
+                  value={editorContent}
+                  onChange={handleContentChange}
+                />
 
-              {/* WikiLink [[ Autocomplete Dropdown */}
-              {wikiSuggestOpen && (
-                <div className="wikilink-autocomplete-card">
-                  <div className="wikilink-card-header">
-                    <span>Link to Note:</span>
+                {/* [[ WikiLink Autocomplete Dropdown */}
+                {wikiSuggestOpen && (
+                  <div className="wikilink-floating-card">
+                    <div className="wikilink-card-header">
+                      <Link2 size={11} />
+                      <span>Link to Note:</span>
+                    </div>
+                    {allNotes
+                      .filter((n) => n.id !== selectedNote.id)
+                      .filter((n) => !wikiQuery || (n.title && n.title.toLowerCase().includes(wikiQuery.toLowerCase())))
+                      .slice(0, 6)
+                      .map((n) => (
+                        <div
+                          key={n.id}
+                          className="wikilink-suggestion-row"
+                          onClick={() => handleSelectWikiSuggestion(n.title)}
+                        >
+                          <FileText size={12} className="sug-icon" />
+                          <span className="sug-title">{n.title || 'Untitled Note'}</span>
+                        </div>
+                      ))}
                   </div>
-                  {allNotes
-                    .filter((n) => n.id !== selectedNote.id)
-                    .filter((n) => !wikiQuery || (n.title && n.title.toLowerCase().includes(wikiQuery.toLowerCase())))
-                    .slice(0, 6)
-                    .map((n) => (
-                      <div
-                        key={n.id}
-                        className="wikilink-item-option"
-                        onClick={() => handleSelectWikiSuggestion(n.title)}
-                      >
-                        <FileText size={13} className="option-icon" />
-                        <span className="option-title">{n.title || 'Untitled Note'}</span>
-                      </div>
-                    ))}
-                </div>
-              )}
-            </div>
-          ) : (
-            <MarkdownRenderer content={editorContent} onWikiLinkClick={onWikiLinkClick} />
-          )}
-
-          {/* Bottom Backlinks Section */}
-          <div className="editor-backlinks-section">
-            <div className="backlinks-section-title">Backlinks</div>
-            {backlinks.length === 0 ? (
-              <div className="no-backlinks-text">No backlinks yet</div>
+                )}
+              </div>
             ) : (
-              <div className="backlinks-list">
+              <MarkdownRenderer content={editorContent} onWikiLinkClick={onWikiLinkClick} />
+            )}
+          </div>
+
+          {/* Inline Backlinks Footer */}
+          {backlinks.length > 0 && (
+            <div className="editor-bottom-backlinks-card">
+              <div className="backlinks-header-row">
+                <div className="backlinks-title-wrap">
+                  <Link2 size={12} className="text-success" />
+                  <span>Linked References ({backlinks.length})</span>
+                </div>
+              </div>
+              <div className="backlinks-chips-row">
                 {backlinks.map((bl) => (
                   <button
                     key={bl.id}
-                    className="backlink-item-btn"
+                    className="backlink-chip-btn"
                     onClick={() => onNavigateToNote && onNavigateToNote(bl.id)}
-                    title={`Click to open ${bl.title}`}
+                    title={`Go to note: ${bl.title}`}
+                    type="button"
                   >
-                    <ArrowLeft size={12} />
+                    <ArrowLeft size={11} />
                     <span>{bl.title}</span>
                   </button>
                 ))}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
-        {/* Backlinks Inspector Drawer (Side Drawer) */}
-        {showBacklinks && (
-          <div className="backlinks-inspector-pane">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px', paddingBottom: '6px', borderBottom: '1px solid var(--border-subtle)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                <Link2 size={13} style={{ color: 'var(--accent-emerald)' }} />
-                <span>Linked References</span>
-              </div>
-              <span className="badge-count">{backlinks.length}</span>
-            </div>
-
-            {backlinks.length === 0 ? (
-              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                No notes link to <code className="md-inline-code">[[{selectedNote.title}]]</code> yet.
-              </p>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {backlinks.map((bl) => (
-                  <div 
-                    key={bl.id} 
-                    className="backlink-card"
-                    onClick={() => onNavigateToNote && onNavigateToNote(bl.id)}
-                  >
-                    <div style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                      <ArrowLeft size={11} style={{ color: 'var(--accent-primary)' }} />
-                      <span>{bl.title}</span>
-                    </div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
-                      "...{bl.snippet}..."
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        {/* Right: Contextual AI & Knowledge Panel */}
+        <ContextualAiPanel
+          selectedNote={selectedNote}
+          allNotes={allNotes}
+          notebooks={notebooks}
+          onNavigateToNote={onNavigateToNote}
+          onOpenConflictModal={openConflictModal}
+          activeConflict={activeNoteConflict}
+          isOpen={showAiPanel}
+          onClose={() => setShowAiPanel(false)}
+        />
       </div>
 
-      {/* Monospace Metadata Footer */}
-      <div className="editor-footer-meta">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span>ID: {selectedNote.id}</span>
+      {/* Monospace System Footer */}
+      <footer className="editor-system-footer">
+        <div className="footer-left">
+          <span className="system-pill">ID: {selectedNote.id}</span>
           {selectedNote.content_hash && (
-            <>
-              <span style={{ opacity: 0.5 }}>·</span>
-              <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <Hash size={11} />
-                sha256: {selectedNote.content_hash.substring(0, 10)}...
-              </span>
-            </>
+            <span className="system-pill">
+              <Hash size={10} />
+              sha256: {selectedNote.content_hash.substring(0, 12)}
+            </span>
           )}
-          <span style={{ opacity: 0.5 }}>·</span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--accent-primary)', fontWeight: 500 }}>
-            <GitBranch size={11} />
+          <span className="system-pill active">
+            <GitBranch size={10} />
             V{historyList.length > 0 ? historyList.length : 1}
           </span>
         </div>
-        <div>
-          {isDraft ? 'Draft (Unsaved)' : (selectedNote.file_path ? selectedNote.file_path.split(/[\\/]/).pop() : 'markdown.md')}
+        <div className="footer-right">
+          <span className="system-pill">
+            {isDraft ? 'Unsaved draft' : (selectedNote.file_path ? selectedNote.file_path.split(/[\\/]/).pop() : 'note.md')}
+          </span>
         </div>
-      </div>
+      </footer>
 
-      {/* Version Control Modals & Drawers */}
+      {/* Modals & Drawers */}
       <CheckpointModal
         isOpen={showCheckpointModal}
         onConfirm={handleCreateCheckpoint}

@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { useNavigate, Link } from '../utils/router';
 import SyncNoteLogo from '../components/SyncNoteLogo';
 import { authApi } from '../api/authApi';
-import { Eye, EyeOff, Lock, Mail, ArrowRight, AlertCircle, CheckCircle2, Loader2, WifiOff, ArrowLeft, KeyRound } from 'lucide-react';
+import { Eye, EyeOff, Lock, Mail, ArrowRight, AlertCircle, CheckCircle2, Loader2, WifiOff, ArrowLeft, KeyRound, Sparkles } from 'lucide-react';
 
 export default function LoginPage() {
   const { login, isOffline } = useAuth();
@@ -129,18 +129,26 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="auth-page-wrapper">
-      <div className="auth-card">
+    <div className="auth-page-root">
+      <div className="auth-ambient-glow" />
+      <div className="auth-card-container">
+        
         {/* Brand Header */}
-        <div className="auth-header">
+        <div className="auth-brand-header">
           <SyncNoteLogo showText={true} />
-          <h2 className="auth-title">Sign in to SyncNote</h2>
-          <p className="auth-subtitle">Sign in to your local workspace</p>
+          <h2 className="auth-headline">
+            {isForgotMode ? 'Reset Your Password' : 'Sign in to SyncNote'}
+          </h2>
+          <p className="auth-subheadline">
+            {isForgotMode 
+              ? 'Recover access to your local workspace' 
+              : 'Offline-first intelligent knowledge management platform'}
+          </p>
         </div>
 
         {/* Offline Warning Banner */}
         {isOffline && (
-          <div className="auth-error-banner" style={{ backgroundColor: 'rgba(245, 158, 11, 0.12)', borderColor: 'rgba(245, 158, 11, 0.3)', color: 'var(--accent-amber, #f59e0b)' }}>
+          <div className="auth-status-alert warning">
             <WifiOff size={15} />
             <span>You're offline. Sign in once while online to enable offline access on this device.</span>
           </div>
@@ -148,7 +156,7 @@ export default function LoginPage() {
 
         {/* Error Alert */}
         {errorMsg && (
-          <div className="auth-error-banner">
+          <div className="auth-status-alert danger">
             <AlertCircle size={15} />
             <span>{errorMsg}</span>
           </div>
@@ -156,38 +164,137 @@ export default function LoginPage() {
 
         {/* Success Alert */}
         {successMsg && (
-          <div className="auth-error-banner success">
+          <div className="auth-status-alert success">
             <CheckCircle2 size={15} />
             <span>{successMsg}</span>
           </div>
         )}
 
-        {isForgotMode ? (
-          <div className="auth-form">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
+        {!isForgotMode ? (
+          <>
+            {/* Standard Login Form */}
+            <form onSubmit={handleSubmit} className="auth-form-cluster">
+              <div className="auth-input-group">
+                <label className="auth-label">Email or Username</label>
+                <div className="auth-input-wrapper">
+                  <Mail size={15} className="input-symbol" />
+                  <input
+                    type="text"
+                    className="auth-text-field"
+                    placeholder="name@example.com or username"
+                    value={identifier}
+                    onChange={(e) => setIdentifier(e.target.value)}
+                    autoComplete="username"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="auth-input-group">
+                <div className="label-row-between">
+                  <label className="auth-label">Password</label>
+                  <button
+                    type="button"
+                    className="auth-link-button"
+                    onClick={() => {
+                      setIsForgotMode(true);
+                      setErrorMsg('');
+                      setSuccessMsg('');
+                    }}
+                  >
+                    Forgot password?
+                  </button>
+                </div>
+                <div className="auth-input-wrapper">
+                  <Lock size={15} className="input-symbol" />
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    className="auth-text-field"
+                    placeholder="Enter your password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoComplete="current-password"
+                    required
+                  />
+                  <button
+                    type="button"
+                    className="password-toggle-trigger"
+                    onClick={() => setShowPassword(!showPassword)}
+                    title={showPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+
               <button
-                type="button"
-                className="btn-secondary input-compact"
-                style={{ padding: '4px 8px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '4px' }}
-                onClick={() => { setIsForgotMode(false); setErrorMsg(''); setSuccessMsg(''); }}
+                type="submit"
+                className="auth-submit-button"
+                disabled={isSubmitting}
               >
-                <ArrowLeft size={13} />
-                <span>Back to Sign In</span>
+                {isSubmitting ? (
+                  <Loader2 size={16} className="spin" />
+                ) : (
+                  <>
+                    <span>Sign In</span>
+                    <ArrowRight size={15} />
+                  </>
+                )}
               </button>
-              <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>Reset Password</span>
+            </form>
+
+            <div className="auth-divider-line">
+              <span>OR CONTINUE WITH</span>
             </div>
 
+            {/* Google OAuth Login */}
+            <button
+              type="button"
+              className="auth-oauth-button"
+              onClick={handleGoogleLogin}
+              disabled={isOffline || isSubmitting}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" className="google-svg">
+                <path
+                  fill="#4285F4"
+                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                />
+                <path
+                  fill="#EA4335"
+                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                />
+              </svg>
+              <span>Continue with Google</span>
+            </button>
+
+            <div className="auth-footer-prompt">
+              <span>Don't have an account?</span>
+              <Link to="/register" className="auth-switch-link">
+                Create one now
+              </Link>
+            </div>
+          </>
+        ) : (
+          /* Password Recovery Flow */
+          <div className="auth-recovery-cluster">
             {forgotStep === 1 ? (
-              <form onSubmit={handleRequestRecovery}>
-                <div className="form-group" style={{ marginBottom: '14px' }}>
-                  <label className="input-label" htmlFor="forgot-email">Account Email</label>
-                  <div className="input-with-icon">
-                    <Mail size={15} className="input-icon" />
+              <form onSubmit={handleRequestRecovery} className="auth-form-cluster">
+                <div className="auth-input-group">
+                  <label className="auth-label">Account Email Address</label>
+                  <div className="auth-input-wrapper">
+                    <Mail size={15} className="input-symbol" />
                     <input
-                      id="forgot-email"
                       type="email"
-                      className="auth-input"
-                      placeholder="Enter your registered email"
+                      className="auth-text-field"
+                      placeholder="Enter registered email"
                       value={forgotEmail}
                       onChange={(e) => setForgotEmail(e.target.value)}
                       required
@@ -195,24 +302,24 @@ export default function LoginPage() {
                     />
                   </div>
                 </div>
+
                 <button
                   type="submit"
-                  className="btn-primary auth-submit-btn"
+                  className="auth-submit-button"
                   disabled={isSubmitting}
                 >
-                  {isSubmitting ? 'Generating Recovery Token...' : 'Continue to Reset Password'}
+                  {isSubmitting ? <Loader2 size={16} className="spin" /> : <span>Request Recovery Token</span>}
                 </button>
               </form>
             ) : (
-              <form onSubmit={handleResetPassword}>
-                <div className="form-group" style={{ marginBottom: '10px' }}>
-                  <label className="input-label" htmlFor="recovery-token">Recovery Token</label>
-                  <div className="input-with-icon">
-                    <KeyRound size={15} className="input-icon" />
+              <form onSubmit={handleResetPassword} className="auth-form-cluster">
+                <div className="auth-input-group">
+                  <label className="auth-label">Recovery Token</label>
+                  <div className="auth-input-wrapper">
+                    <KeyRound size={15} className="input-symbol" />
                     <input
-                      id="recovery-token"
                       type="text"
-                      className="auth-input"
+                      className="auth-text-field"
                       placeholder="Paste recovery token"
                       value={recoveryToken}
                       onChange={(e) => setRecoveryToken(e.target.value)}
@@ -220,189 +327,63 @@ export default function LoginPage() {
                     />
                   </div>
                 </div>
-                <div className="form-group" style={{ marginBottom: '10px' }}>
-                  <label className="input-label" htmlFor="reset-new-password">New Password</label>
-                  <div className="input-with-icon">
-                    <Lock size={15} className="input-icon" />
+
+                <div className="auth-input-group">
+                  <label className="auth-label">New Password</label>
+                  <div className="auth-input-wrapper">
+                    <Lock size={15} className="input-symbol" />
                     <input
-                      id="reset-new-password"
                       type="password"
-                      className="auth-input"
-                      placeholder="Min 6 characters"
+                      className="auth-text-field"
+                      placeholder="Minimum 6 characters"
                       value={resetNewPassword}
                       onChange={(e) => setResetNewPassword(e.target.value)}
                       required
                     />
                   </div>
                 </div>
-                <div className="form-group" style={{ marginBottom: '14px' }}>
-                  <label className="input-label" htmlFor="reset-confirm-password">Confirm Password</label>
-                  <div className="input-with-icon">
-                    <Lock size={15} className="input-icon" />
+
+                <div className="auth-input-group">
+                  <label className="auth-label">Confirm New Password</label>
+                  <div className="auth-input-wrapper">
+                    <Lock size={15} className="input-symbol" />
                     <input
-                      id="reset-confirm-password"
                       type="password"
-                      className="auth-input"
-                      placeholder="Re-enter new password"
+                      className="auth-text-field"
+                      placeholder="Re-enter password"
                       value={resetConfirmPassword}
                       onChange={(e) => setResetConfirmPassword(e.target.value)}
                       required
                     />
                   </div>
                 </div>
+
                 <button
                   type="submit"
-                  className="btn-primary auth-submit-btn"
+                  className="auth-submit-button"
                   disabled={isSubmitting}
                 >
-                  {isSubmitting ? 'Resetting Password...' : 'Save New Password & Sign In'}
+                  {isSubmitting ? <Loader2 size={16} className="spin" /> : <span>Reset Password & Sign In</span>}
                 </button>
               </form>
             )}
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="auth-form">
-            <div className="form-group">
-              <label className="input-label" htmlFor="login-identifier">
-                Email or Username
-              </label>
-              <div className="input-with-icon">
-                <Mail size={15} className="input-icon" />
-                <input
-                  id="login-identifier"
-                  type="text"
-                  className="auth-input"
-                  placeholder="user@syncnote.io or username"
-                  value={identifier}
-                  onChange={(e) => setIdentifier(e.target.value)}
-                  required
-                  autoFocus
-                />
-              </div>
-            </div>
-
-            <div className="form-group">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <label className="input-label" htmlFor="login-password" style={{ margin: 0 }}>
-                  Password
-                </label>
-                <button
-                  type="button"
-                  onClick={() => { setIsForgotMode(true); setErrorMsg(''); setSuccessMsg(''); }}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    padding: 0,
-                    fontSize: '0.74rem',
-                    color: 'var(--accent-primary, #3b82f6)',
-                    cursor: 'pointer',
-                    textDecoration: 'none'
-                  }}
-                >
-                  Forgot password?
-                </button>
-              </div>
-              <div className="input-with-icon" style={{ marginTop: '4px' }}>
-                <Lock size={15} className="input-icon" />
-                <input
-                  id="login-password"
-                  type={showPassword ? 'text' : 'password'}
-                  className="auth-input pr-10"
-                  placeholder="••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                />
-                <button
-                  type="button"
-                  className="password-toggle-btn"
-                  onClick={() => setShowPassword(!showPassword)}
-                  title={showPassword ? 'Hide password' : 'Show password'}
-                >
-                  {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                </button>
-              </div>
-            </div>
 
             <button
-              type="submit"
-              className="btn-primary auth-submit-btn"
-              disabled={isSubmitting || isOffline}
+              type="button"
+              className="auth-back-to-login"
+              onClick={() => {
+                setIsForgotMode(false);
+                setForgotStep(1);
+                setErrorMsg('');
+                setSuccessMsg('');
+              }}
             >
-              {isSubmitting ? (
-                <>
-                  <Loader2 size={16} className="spin-icon" />
-                  <span>Signing in...</span>
-                </>
-              ) : (
-                <>
-                  <span>Sign in</span>
-                  <ArrowRight size={15} />
-                </>
-              )}
+              <ArrowLeft size={14} />
+              <span>Back to Sign In</span>
             </button>
-          </form>
+          </div>
         )}
 
-        {/* Divider */}
-        <div style={{ display: 'flex', alignItems: 'center', margin: '16px 0', color: 'var(--text-muted)', fontSize: '0.74rem' }}>
-          <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
-          <span style={{ padding: '0 10px', textTransform: 'lowercase' }}>or</span>
-          <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
-        </div>
-
-        {/* Continue with Google Button */}
-        <button
-          type="button"
-          onClick={handleGoogleLogin}
-          disabled={isOffline}
-          className="btn-secondary"
-          style={{
-            width: '100%',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '10px',
-            padding: '9px 16px',
-            fontSize: '0.84rem',
-            fontWeight: 500,
-            borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--border-subtle)',
-            background: 'var(--bg-app)',
-            color: 'var(--text-primary)',
-            cursor: isOffline ? 'not-allowed' : 'pointer'
-          }}
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24">
-            <path
-              fill="#4285F4"
-              d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-            />
-            <path
-              fill="#34A853"
-              d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-            />
-            <path
-              fill="#FBBC05"
-              d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
-            />
-            <path
-              fill="#EA4335"
-              d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-            />
-          </svg>
-          <span>Continue with Google</span>
-        </button>
-
-        {/* Footer Link */}
-        <div className="auth-footer" style={{ marginTop: '16px' }}>
-          <p>
-            Don't have an account?{' '}
-            <Link to="/register" className="auth-link">
-              Create account
-            </Link>
-          </p>
-        </div>
       </div>
     </div>
   );

@@ -6,13 +6,15 @@ import ConflictResolverModal from '../components/ConflictResolverModal';
 const SyncContext = createContext(null);
 
 export function SyncProvider({ children }) {
-  const [syncStatus, setSyncStatus] = useState('SYNCED'); // 'SYNCED', 'SYNCING', 'OFFLINE', 'CONFLICT', 'FAILED'
+  const [syncStatus, setSyncStatus] = useState('DRIVE_DISCONNECTED'); // 'SYNCED', 'SYNCING', 'PENDING', 'DRIVE_DISCONNECTED', 'OFFLINE', 'CONFLICT', 'ERROR', 'AUTH_REQUIRED'
   const [isSyncing, setIsSyncing] = useState(false);
   const [internetConnected, setInternetConnected] = useState(true);
   const [lanAvailable, setLanAvailable] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [pendingGoogleCount, setPendingGoogleCount] = useState(0);
   const [pendingGoogleItems, setPendingGoogleItems] = useState([]);
+  const [isAllLocal, setIsAllLocal] = useState(false);
+  const [failedCount, setFailedCount] = useState(0);
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
   const [nearbyDevices, setNearbyDevices] = useState([]);
   const [pairedDevices, setPairedDevices] = useState([]);
@@ -24,13 +26,34 @@ export function SyncProvider({ children }) {
   const [wasOffline, setWasOffline] = useState(false);
 
   // Presence monitoring refs: track consecutive failures per device and guard concurrent checks
+  const isSyncingRef = useRef(false);
   const consecutiveFailuresRef = useRef({});
   const isCheckingPresenceRef = useRef(false);
+  const pairedDevicesRef = useRef([]);
+  const isAllLocalRef = useRef(false);
+  const syncConfigRef = useRef({
+    isAllLocal: true,
+    hasSyncEnabledNotes: false,
+    lanEnabled: false,
+    cloudEnabled: false
+  });
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    pairedDevicesRef.current = pairedDevices;
+  }, [pairedDevices]);
+
+  useEffect(() => {
+    isAllLocalRef.current = isAllLocal;
+  }, [isAllLocal]);
 
   // Separate Authoritative State for Google Login vs Google Drive Sync
   const [googleAccountStatus, setGoogleAccountStatus] = useState({ connected: false, email: null });
   const [googleDriveStatus, setGoogleDriveStatus] = useState({
     connected: false,
+    authRequired: false,
+    syncState: 'DISABLED',
+    error: null,
     email: null,
     folderName: 'SyncNote',
     folderId: null,
@@ -39,8 +62,9 @@ export function SyncProvider({ children }) {
   });
 
   // Fetch current backend health and authoritative Google Drive status
-  const refreshSyncStatus = useCallback(async () => {
+  const refreshSyncStatus = useCallback(async (overrideSyncing) => {
     try {
+      const activeSyncing = overrideSyncing !== undefined ? overrideSyncing : isSyncingRef.current;
       const health = await apiClient.get('/api/health').catch(() => null);
       let currentlyConnected = false;
       if (health && health.backend) {
@@ -50,61 +74,110 @@ export function SyncProvider({ children }) {
         setInternetConnected(false);
         setSyncStatus('OFFLINE');
         setWasOffline(true);
+        return;
       }
 
-      // 1. Fetch general sync status
-      const statusRes = await apiClient.get('/api/sync/status').catch(() => null);
-      if (statusRes) {
-        if (statusRes.googleAccount) setGoogleAccountStatus(statusRes.googleAccount);
-        setPendingCount(statusRes.pendingCount || 0);
-        if (statusRes.lastSyncedAt) {
-          setLastSyncedAt(statusRes.lastSyncedAt);
-        }
+      // 1. Concurrently fetch general sync status & canonical Google Drive status
+      const [statusRes, gdriveRes] = await Promise.all([
+        apiClient.get('/api/sync/status').catch(() => null),
+        apiClient.get('/api/sync/gdrive/status').catch(() => null)
+      ]);
+
+      if (statusRes && statusRes.googleAccount) {
+        setGoogleAccountStatus(statusRes.googleAccount);
       }
 
-      // 2. Fetch canonical Google Drive status endpoint (/api/sync/gdrive/status)
-      const gdriveRes = await apiClient.get('/api/sync/gdrive/status').catch(() => null);
-      if (gdriveRes) {
-        setGoogleDriveStatus({
-          connected: !!gdriveRes.connected,
-          email: gdriveRes.email || null,
-          folderName: gdriveRes.folderName || 'SyncNote',
-          folderId: gdriveRes.folderId || null,
-          pendingCount: gdriveRes.pendingCount || 0,
-          lastSyncedAt: gdriveRes.lastSyncAt || gdriveRes.lastSyncedAt || lastSyncedAt
-        });
-        setPendingGoogleCount(gdriveRes.pendingCount || 0);
-        if (gdriveRes.lastSyncAt) {
-          setLastSyncedAt(gdriveRes.lastSyncAt);
-        }
+      const pCount = statusRes?.pendingCount || 0;
+      setPendingCount(pCount);
+      const isAllLocalVal = Boolean(statusRes?.isAllLocal);
+      setIsAllLocal(isAllLocalVal);
+      const fCount = statusRes?.failedCount || 0;
+      setFailedCount(fCount);
+      if (statusRes?.lastSyncedAt) {
+        setLastSyncedAt(statusRes.lastSyncedAt);
+      }
+
+      const breakdown = statusRes?.breakdown || {};
+      const lanEnabled = (breakdown.lan || 0) > 0 || (breakdown.both || 0) > 0;
+      const cloudEnabled = (breakdown.google || 0) > 0 || (breakdown.both || 0) > 0;
+      syncConfigRef.current = {
+        isAllLocal: isAllLocalVal,
+        hasSyncEnabledNotes: Boolean(statusRes?.hasSyncEnabledNotes),
+        lanEnabled,
+        cloudEnabled
+      };
+
+      // 2. Canonical Drive connection and auth state from authoritative endpoint (/api/sync/gdrive/status)
+      // and /api/sync/status (same source of truth across UI and service)
+      const driveInfo = gdriveRes || statusRes?.googleDrive || {};
+      const isAuthReq = Boolean(
+        driveInfo.authRequired ||
+        driveInfo.syncState === 'AUTHENTICATION REQUIRED' ||
+        statusRes?.googleDrive?.authRequired ||
+        statusRes?.googleDrive?.syncState === 'AUTHENTICATION REQUIRED'
+      );
+      const isDriveConnected = Boolean(driveInfo.connected ?? statusRes?.googleDrive?.connected) && !isAuthReq;
+      const gState = driveInfo.syncState || (isAuthReq ? 'AUTHENTICATION REQUIRED' : isDriveConnected ? 'CONNECTED' : 'DISABLED');
+
+      const updatedDriveStatus = {
+        connected: isDriveConnected,
+        authRequired: isAuthReq,
+        syncState: gState,
+        error: driveInfo.error || null,
+        email: driveInfo.email || null,
+        folderName: driveInfo.folderName || 'SyncNote',
+        folderId: driveInfo.folderId || null,
+        pendingCount: driveInfo.pendingCount || 0,
+        lastSyncedAt: driveInfo.lastSyncAt || driveInfo.lastSyncedAt || lastSyncedAt
+      };
+      setGoogleDriveStatus(updatedDriveStatus);
+      setPendingGoogleCount(driveInfo.pendingCount || 0);
+      if (driveInfo.lastSyncAt) {
+        setLastSyncedAt(driveInfo.lastSyncAt);
       }
 
       // 3. Fetch canonical unresolved conflicts
+      let currentConflicts = [];
       try {
         const conflictRes = await apiClient.get('/api/conflicts').catch(() => null);
         if (conflictRes && Array.isArray(conflictRes.conflicts)) {
-          const newConflicts = conflictRes.conflicts;
-          setUnresolvedConflicts(prev => {
-            const prevCount = prev.length;
-            const newCount = newConflicts.length;
-            if (newCount > 0) {
-              setSyncStatus('CONFLICT');
-            } else if (prevCount > 0 || newCount === 0) {
-              // Conflicts were cleared externally (e.g., peer broadcast resolution)
-              setSyncStatus(prevStatus => prevStatus === 'CONFLICT' ? 'SYNCED' : prevStatus);
-              setActiveConflictModal(null);
-              if (prevCount > 0) {
-                window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
-              }
-            }
-            return newConflicts;
-          });
-          setActiveConflicts(newConflicts);
-          if (newConflicts.length === 0) {
+          currentConflicts = conflictRes.conflicts;
+          setUnresolvedConflicts(conflictRes.conflicts);
+          setActiveConflicts(conflictRes.conflicts);
+          if (conflictRes.conflicts.length === 0) {
             setActiveConflictModal(null);
           }
         }
       } catch (cErr) {}
+
+      // Authoritative Global Sync Status Determination:
+      // Must strictly distinguish between:
+      // 1. SYNCED: Google Drive is connected and all enabled synchronization targets are up to date.
+      // 2. SYNCING: A real synchronization operation is currently running.
+      // 3. PENDING: Actual synchronization operations are waiting.
+      // 4. DISCONNECTED: Google Drive is not connected/authenticated.
+      // 5. OFFLINE: Required network connection is unavailable.
+      // 6. ERROR: A synchronization operation failed.
+      // 7. AUTH_REQUIRED: Google Drive authentication expired.
+      //
+      // "pendingCount === 0" MUST NOT automatically mean "Synced".
+      if (!currentlyConnected) {
+        setSyncStatus('OFFLINE');
+      } else if (activeSyncing) {
+        setSyncStatus('SYNCING');
+      } else if (currentConflicts.length > 0) {
+        setSyncStatus('CONFLICT');
+      } else if (isAuthReq) {
+        setSyncStatus('AUTH_REQUIRED');
+      } else if (fCount > 0) {
+        setSyncStatus('ERROR');
+      } else if (pCount > 0) {
+        setSyncStatus('PENDING');
+      } else if (!isDriveConnected) {
+        setSyncStatus('DRIVE_DISCONNECTED');
+      } else {
+        setSyncStatus('SYNCED');
+      }
 
       // Check pending items if reconnecting
       if (currentlyConnected && wasOffline) {
@@ -134,16 +207,18 @@ export function SyncProvider({ children }) {
       // Immediately reset Google Drive state (preserving Google Account state)
       setGoogleDriveStatus({
         connected: false,
+        authRequired: false,
+        syncState: 'DISABLED',
+        error: null,
         email: null,
         folderName: 'SyncNote',
         folderId: null,
         pendingCount: 0,
-        lastSyncedAt: null,
-        syncing: false,
-        error: null
+        lastSyncedAt: null
       });
       setPendingGoogleCount(0);
-      await refreshSyncStatus();
+      setSyncStatus('DRIVE_DISCONNECTED');
+      await refreshSyncStatus(false);
     }
   }, [refreshSyncStatus]);
 
@@ -257,8 +332,21 @@ export function SyncProvider({ children }) {
 
   // Trigger manual Google Drive / Cloud push sync
   const triggerSync = useCallback(async () => {
-    if (isSyncing || syncStatus === 'SYNCING') return;
+    if (isSyncingRef.current || isSyncing || syncStatus === 'SYNCING') return;
 
+    if (googleDriveStatus?.authRequired || googleDriveStatus?.syncState === 'AUTHENTICATION REQUIRED') {
+      console.warn('[Google Drive] Cannot sync: Authentication required. Reconnect Google Drive in Settings.');
+      setSyncStatus('AUTH_REQUIRED');
+      return;
+    }
+
+    if (!googleDriveStatus?.connected) {
+      console.warn('[Google Drive] Cannot sync: Google Drive is disconnected. Connect Google Drive in Settings.');
+      setSyncStatus('DRIVE_DISCONNECTED');
+      return;
+    }
+
+    isSyncingRef.current = true;
     setSyncStatus('SYNCING');
     setIsSyncing(true);
     try {
@@ -272,8 +360,11 @@ export function SyncProvider({ children }) {
         setLastSyncedAt(syncedAt);
       }
 
-      setSyncStatus('SYNCED');
-      await refreshSyncStatus();
+      // Clear syncing flags BEFORE refreshing status
+      isSyncingRef.current = false;
+      setIsSyncing(false);
+
+      await refreshSyncStatus(false);
       
       // Dispatch real-time note update event for UI
       window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
@@ -281,17 +372,40 @@ export function SyncProvider({ children }) {
       return gdriveRes;
     } catch (err) {
       console.error('Trigger sync error:', err);
-      setSyncStatus('FAILED');
-      await refreshSyncStatus();
+      isSyncingRef.current = false;
+      setIsSyncing(false);
+      if (err?.message?.includes('401') || err?.message?.includes('authentication expired') || err?.status === 401) {
+        setSyncStatus('AUTH_REQUIRED');
+      } else if (err?.message?.includes('disconnected') || err?.status === 400) {
+        setSyncStatus('DRIVE_DISCONNECTED');
+      } else {
+        setSyncStatus('FAILED');
+      }
+      await refreshSyncStatus(false);
       throw err;
     } finally {
+      isSyncingRef.current = false;
       setIsSyncing(false);
     }
-  }, [isSyncing, syncStatus, refreshSyncStatus]);
+  }, [isSyncing, syncStatus, googleDriveStatus, refreshSyncStatus]);
 
   // Single Note Google Drive Sync
   const syncSingleNote = useCallback(async (noteId) => {
-    if (!noteId) return;
+    if (!noteId || isSyncingRef.current) return;
+
+    if (googleDriveStatus?.authRequired || googleDriveStatus?.syncState === 'AUTHENTICATION REQUIRED') {
+      console.warn('[Google Drive] Cannot sync note: Authentication required. Reconnect Google Drive in Settings.');
+      setSyncStatus('AUTH_REQUIRED');
+      throw new Error('Google Drive authentication expired. Reconnect Google Drive in Settings.');
+    }
+
+    if (!googleDriveStatus?.connected) {
+      console.warn('[Google Drive] Cannot sync note: Google Drive is disconnected.');
+      setSyncStatus('DRIVE_DISCONNECTED');
+      throw new Error('Google Drive is disconnected. Connect Google Drive in Settings to enable Cloud Synchronization for this note.');
+    }
+
+    isSyncingRef.current = true;
     setSyncStatus('SYNCING');
     setIsSyncing(true);
     try {
@@ -299,21 +413,31 @@ export function SyncProvider({ children }) {
       if (res && res.result && res.result.lastSyncAt) {
         setLastSyncedAt(res.result.lastSyncAt);
       }
-      await refreshSyncStatus();
-      setSyncStatus('SYNCED');
+      isSyncingRef.current = false;
+      setIsSyncing(false);
+      await refreshSyncStatus(false);
 
       // Dispatch real-time note update event for UI
       window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
 
       return res;
     } catch (err) {
-      setSyncStatus('FAILED');
-      await refreshSyncStatus();
+      isSyncingRef.current = false;
+      setIsSyncing(false);
+      if (err?.message?.includes('401') || err?.message?.includes('authentication expired') || err?.status === 401) {
+        setSyncStatus('AUTH_REQUIRED');
+      } else if (err?.message?.includes('disconnected') || err?.status === 400) {
+        setSyncStatus('DRIVE_DISCONNECTED');
+      } else {
+        setSyncStatus('FAILED');
+      }
+      await refreshSyncStatus(false);
       throw err;
     } finally {
+      isSyncingRef.current = false;
       setIsSyncing(false);
     }
-  }, [refreshSyncStatus]);
+  }, [googleDriveStatus, refreshSyncStatus]);
 
   // Fetch Pending Inbound Pairing Requests
   const fetchPendingPairingRequests = useCallback(async () => {
@@ -519,37 +643,46 @@ export function SyncProvider({ children }) {
     refreshSyncStatus();
     fetchPendingPairingRequests();
 
-    // 2. Load paired devices on startup and immediately probe presence
+    // 2. Load paired devices on startup and probe presence only if LAN sync is enabled
     const startupSequence = async () => {
       try {
         await fetchPairedDevices();
-        if (isMounted) {
+        if (isMounted && !syncConfigRef.current.isAllLocal && syncConfigRef.current.lanEnabled && pairedDevicesRef.current.length > 0) {
           await checkDevicesPresence();
         }
       } catch (e) {}
     };
     startupSequence();
 
-    // 3. Exactly ONE presence-monitoring scheduler: check every 5 seconds
+    // 3. Exactly ONE presence-monitoring scheduler: runs only when LAN sync is active
     const presenceInterval = setInterval(() => {
       if (isMounted) {
+        // Services must depend on actual configuration:
+        // If LOCAL ONLY or LAN sync disabled or no paired devices: STOP/SKIP LAN heartbeat requests.
+        if (syncConfigRef.current.isAllLocal || !syncConfigRef.current.lanEnabled || pairedDevicesRef.current.length === 0) {
+          return;
+        }
         checkDevicesPresence();
       }
-    }, 5000);
+    }, 15000);
 
-    // 4. Background refresh interval for cloud sync & pairing requests (10s)
+    // 4. Background refresh interval for cloud sync & pairing requests (15s)
     const backgroundSyncInterval = setInterval(() => {
       if (isMounted) {
         refreshSyncStatus();
-        fetchPendingPairingRequests();
+        if (syncConfigRef.current.lanEnabled) {
+          fetchPendingPairingRequests();
+        }
       }
-    }, 10000);
+    }, 15000);
 
     // 5. Update sync counts immediately when local notes are created, edited, or saved
     const handleNotesUpdated = () => {
       if (isMounted) {
         refreshSyncStatus();
-        checkDevicesPresence();
+        if (!syncConfigRef.current.isAllLocal && syncConfigRef.current.lanEnabled && pairedDevicesRef.current.length > 0) {
+          checkDevicesPresence();
+        }
       }
     };
     window.addEventListener('syncnote:notes-updated', handleNotesUpdated);
@@ -572,6 +705,8 @@ export function SyncProvider({ children }) {
     pendingCount,
     pendingGoogleCount,
     pendingGoogleItems,
+    isAllLocal,
+    failedCount,
     lastSyncedAt,
     nearbyDevices,
     pairedDevices,

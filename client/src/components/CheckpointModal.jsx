@@ -37,58 +37,57 @@ export default function CheckpointModal({ isOpen, onConfirm, onCancel, statusMes
 
   return (
     <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-card checkpoint-dialog-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <GitCommit size={16} style={{ color: 'var(--accent-primary)' }} />
-            <h3 className="modal-title">Create Checkpoint</h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
+            <div className="checkpoint-icon-badge">
+              <GitCommit size={16} />
+            </div>
+            <div>
+              <h3 className="modal-title">Create Checkpoint Snapshot</h3>
+              <p className="diff-subtitle">Record a permanent version snapshot into SQLite history</p>
+            </div>
           </div>
           <button className="icon-btn-ghost" onClick={onCancel} title="Close (Esc)" type="button">
             <X size={15} />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="modal-body">
-          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
-            Save a permanent version snapshot in history. Your current note content will be versioned into SQLite.
-          </p>
-
+        <form onSubmit={handleSubmit} className="modal-body" style={{ padding: '16px 20px' }}>
           {statusMessage && (
-            <div style={{ 
-              display: 'flex', 
-              alignItems: 'center', 
-              gap: '8px', 
-              padding: '8px 12px', 
-              borderRadius: 'var(--radius-sm)', 
-              background: 'rgba(234, 179, 8, 0.12)', 
-              border: '1px solid rgba(234, 179, 8, 0.3)', 
-              color: 'var(--accent-warning)', 
-              fontSize: '0.78rem'
-            }}>
+            <div className="checkpoint-alert-banner">
               <AlertCircle size={14} style={{ flexShrink: 0 }} />
               <span>{statusMessage}</span>
             </div>
           )}
 
-          <div className="form-group">
-            <label className="form-label">Message (optional)</label>
+          <div className="form-group" style={{ marginBottom: '16px' }}>
+            <label className="field-title" style={{ marginBottom: '6px', display: 'block', fontSize: '0.8rem' }}>
+              Commit / Checkpoint Message (Optional)
+            </label>
             <input
               type="text"
-              className="modal-input"
-              placeholder="Describe your changes..."
+              className="settings-text-input"
+              placeholder="e.g. Added section on distributed consensus protocols"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               autoFocus
+              style={{ width: '100%' }}
             />
           </div>
 
-          <div className="modal-footer">
-            <button type="button" className="secondary-action-btn" onClick={onCancel} disabled={isSubmitting}>
-              Cancel
-            </button>
-            <button type="submit" className="primary-action-btn" disabled={isSubmitting}>
-              {isSubmitting ? 'Creating...' : 'Create Checkpoint'}
-            </button>
+          <div className="modal-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+              Press <kbd>Enter</kbd> to save
+            </span>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button type="button" className="secondary-action-btn" onClick={onCancel} disabled={isSubmitting}>
+                Cancel
+              </button>
+              <button type="submit" className="primary-action-btn" disabled={isSubmitting}>
+                {isSubmitting ? 'Creating Snapshot...' : 'Save Checkpoint'}
+              </button>
+            </div>
           </div>
         </form>
       </div>

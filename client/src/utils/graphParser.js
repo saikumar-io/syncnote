@@ -29,9 +29,8 @@ export function parseKnowledgeGraph(notes = []) {
       notebook_id: note.notebook_id,
       file_path: note.file_path,
       degree: 0,
-      // Initial random placement in canvas viewport
-      x: (Math.random() - 0.5) * 500,
-      y: (Math.random() - 0.5) * 400,
+      x: 0,
+      y: 0,
       vx: 0,
       vy: 0
     });

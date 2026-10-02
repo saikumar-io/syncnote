@@ -88,6 +88,8 @@ const initDatabase = () => {
     );
   `);
 
+  try { db.exec("ALTER TABLE google_drive_auths ADD COLUMN status TEXT DEFAULT 'CONNECTED';"); } catch (e) {}
+  try { db.exec("ALTER TABLE google_drive_auths ADD COLUMN auth_error TEXT;"); } catch (e) {}
   try { db.exec("ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'local';"); } catch (e) {}
   try { db.exec("ALTER TABLE users ADD COLUMN provider_user_id TEXT;"); } catch (e) {}
 
@@ -109,6 +111,11 @@ const initDatabase = () => {
   }
   try {
     db.exec('ALTER TABLE notebooks ADD COLUMN updated_at DATETIME;');
+  } catch (e) {
+    // Column already exists
+  }
+  try {
+    db.exec('ALTER TABLE notebooks ADD COLUMN parent_id TEXT;');
   } catch (e) {
     // Column already exists
   }
@@ -194,9 +201,17 @@ const initDatabase = () => {
     // Column already exists
   }
 
+  // Add is_favorite column to notes if missing
+  try {
+    db.exec('ALTER TABLE notes ADD COLUMN is_favorite INTEGER DEFAULT 0;');
+  } catch (e) {
+    // Column already exists
+  }
+
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes(user_id);
     CREATE INDEX IF NOT EXISTS idx_notebooks_user_id ON notebooks(user_id);
+    CREATE INDEX IF NOT EXISTS idx_notes_is_favorite ON notes(is_favorite);
   `);
 
   // 3. Create version control tables
@@ -285,6 +300,14 @@ const initDatabase = () => {
     CREATE INDEX IF NOT EXISTS idx_lan_paired_user_id ON lan_paired_devices(user_id);
     CREATE INDEX IF NOT EXISTS idx_lan_pairing_req_status ON lan_pairing_requests(status);
   `);
+
+  try {
+    db.exec('ALTER TABLE sync_queue ADD COLUMN user_id TEXT;');
+  } catch (e) {}
+  try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sync_queue_user_id ON sync_queue(user_id);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sync_queue_user_status ON sync_queue(user_id, status);');
+  } catch (e) {}
 
   try {
     db.exec('ALTER TABLE versions ADD COLUMN is_auto INTEGER DEFAULT 0;');
@@ -593,10 +616,10 @@ const NotebookModel = {
     return stmtGlobal.get(id);
   },
 
-  create: (id, name, userId) => {
+  create: (id, name, userId, parentId = null) => {
     const now = new Date().toISOString();
-    const stmt = db.prepare('INSERT INTO notebooks (id, name, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)');
-    stmt.run(id, name || 'New Notebook', userId || 'usr_local_default', now, now);
+    const stmt = db.prepare('INSERT INTO notebooks (id, name, user_id, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+    stmt.run(id, name || 'New Notebook', userId || 'usr_local_default', parentId, now, now);
     return NotebookModel.getById(id, userId);
   },
 
@@ -636,39 +659,123 @@ const NoteModel = {
     return stmtGlobal.get(id);
   },
 
-  create: (id, title, filePath, notebookId, contentHash, currentVersionId, userId, syncMode = 'local') => {
+  findByNameInLocation: (title, notebookId, userId, excludeNoteId = null) => {
+    if (!title || typeof title !== 'string') return null;
     const safeUserId = userId || 'usr_local_default';
+    const trimmedTitle = title.trim();
+    if (!trimmedTitle) return null;
+
+    let query = `
+      SELECT * FROM notes 
+      WHERE LOWER(TRIM(title)) = LOWER(?) 
+        AND (user_id = ? OR (user_id = 'usr_local_default' AND ? != 'usr_local_default'))
+    `;
+    const params = [trimmedTitle, safeUserId, safeUserId];
+
+    if (notebookId && notebookId !== 'none') {
+      query += ` AND notebook_id = ?`;
+      params.push(notebookId);
+    } else {
+      query += ` AND (notebook_id IS NULL OR notebook_id = '' OR notebook_id = 'none')`;
+    }
+
+    if (excludeNoteId) {
+      query += ` AND id != ?`;
+      params.push(excludeNoteId);
+    }
+
+    query += ` LIMIT 1`;
+    return db.prepare(query).get(...params);
+  },
+
+  generateSuggestedTitle: (title, notebookId, userId) => {
+    const safeUserId = userId || 'usr_local_default';
+    const trimmed = (title || 'Untitled Note').trim();
+    const match = trimmed.match(/^(.*?)(?:\s*\((\d+)\))?$/);
+    const base = (match && match[1]) ? match[1].trim() : trimmed;
+
+    let index = 1;
+    while (index < 100) {
+      const candidate = `${base} (${index})`;
+      const exists = NoteModel.findByNameInLocation(candidate, notebookId, safeUserId);
+      if (!exists) {
+        return candidate;
+      }
+      index++;
+    }
+    return `${base} (${Date.now()})`;
+  },
+
+  create: (id, title, filePath, notebookId, contentHash, currentVersionId, userId, syncMode = 'local', isFavorite = 0) => {
+    const safeUserId = userId || 'usr_local_default';
+    const trimmedTitle = (title || 'Untitled Note').trim();
+
+    // Enforce uniqueness at database creation layer
+    const duplicate = NoteModel.findByNameInLocation(trimmedTitle, notebookId, safeUserId);
+    if (duplicate && duplicate.id !== id) {
+      const suggested = NoteModel.generateSuggestedTitle(trimmedTitle, notebookId, safeUserId);
+      const err = new Error(`A note named '${trimmedTitle}' already exists in this folder.`);
+      err.code = 'DUPLICATE_NOTE_NAME';
+      err.suggestedTitle = suggested;
+      throw err;
+    }
+
     const normalizeMode = (m) => (m === 'cloud' || m === 'google') ? 'cloud' : (m === 'lan' ? 'lan' : (m === 'both' ? 'both' : 'local'));
     const finalSyncMode = normalizeMode(syncMode);
+    const finalIsFavorite = isFavorite ? 1 : 0;
     const now = new Date().toISOString();
     const stmt = db.prepare(`
-      INSERT INTO notes (id, title, file_path, notebook_id, user_id, created_at, updated_at, current_version_id, content_hash, sync_mode)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO notes (id, title, file_path, notebook_id, user_id, created_at, updated_at, current_version_id, content_hash, sync_mode, is_favorite)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(id, title || 'Untitled Note', filePath, notebookId || null, safeUserId, now, now, currentVersionId, contentHash, finalSyncMode);
+    stmt.run(id, trimmedTitle, filePath, notebookId || null, safeUserId, now, now, currentVersionId, contentHash, finalSyncMode, finalIsFavorite);
     return NoteModel.getById(id, safeUserId);
   },
 
-  update: (id, title, filePath, notebookId, contentHash, currentVersionId, userId, syncMode) => {
+  update: (id, title, filePath, notebookId, contentHash, currentVersionId, userId, syncMode, isFavorite) => {
     const safeUserId = userId || 'usr_local_default';
     const now = new Date().toISOString();
     const existing = NoteModel.getById(id, safeUserId);
     if (!existing) return null;
 
     const normalizeMode = (m) => (m === 'cloud' || m === 'google') ? 'cloud' : (m === 'lan' ? 'lan' : (m === 'both' ? 'both' : 'local'));
-    const finalTitle = title !== undefined ? title : existing.title;
+    const finalTitle = title !== undefined ? title.trim() : existing.title;
     const finalFilePath = filePath !== undefined ? filePath : existing.file_path;
-    const finalNotebookId = notebookId !== undefined ? notebookId : existing.notebook_id;
+    const finalNotebookId = notebookId !== undefined ? (notebookId === 'none' ? null : notebookId) : existing.notebook_id;
     const finalHash = contentHash !== undefined ? contentHash : existing.content_hash;
     const finalVersion = currentVersionId !== undefined ? currentVersionId : existing.current_version_id;
     const finalSyncMode = syncMode !== undefined ? normalizeMode(syncMode) : existing.sync_mode;
+    const finalIsFavorite = isFavorite !== undefined ? (isFavorite ? 1 : 0) : (existing.is_favorite || 0);
+
+    // Enforce uniqueness if title or notebook is changing
+    if (finalTitle && (finalTitle.toLowerCase() !== (existing.title || '').toLowerCase() || finalNotebookId !== existing.notebook_id)) {
+      const duplicate = NoteModel.findByNameInLocation(finalTitle, finalNotebookId, safeUserId, id);
+      if (duplicate) {
+        const suggested = NoteModel.generateSuggestedTitle(finalTitle, finalNotebookId, safeUserId);
+        const err = new Error(`A note named '${finalTitle}' already exists in this folder.`);
+        err.code = 'DUPLICATE_NOTE_NAME';
+        err.suggestedTitle = suggested;
+        throw err;
+      }
+    }
 
     const stmt = db.prepare(`
       UPDATE notes 
-      SET title = ?, file_path = ?, notebook_id = ?, content_hash = ?, current_version_id = ?, sync_mode = ?, updated_at = ?
+      SET title = ?, file_path = ?, notebook_id = ?, content_hash = ?, current_version_id = ?, sync_mode = ?, is_favorite = ?, updated_at = ?
       WHERE id = ?
     `);
-    stmt.run(finalTitle, finalFilePath, finalNotebookId, finalHash, finalVersion, finalSyncMode, now, id);
+    stmt.run(finalTitle, finalFilePath, finalNotebookId, finalHash, finalVersion, finalSyncMode, finalIsFavorite, now, id);
+    return NoteModel.getById(id, safeUserId);
+  },
+
+  toggleFavorite: (id, userId, isFavorite) => {
+    const safeUserId = userId || 'usr_local_default';
+    const existing = NoteModel.getById(id, safeUserId);
+    if (!existing) return null;
+    const nextVal = isFavorite !== undefined ? (isFavorite ? 1 : 0) : (existing.is_favorite ? 0 : 1);
+    const now = new Date().toISOString();
+    const stmt = db.prepare('UPDATE notes SET is_favorite = ?, updated_at = ? WHERE id = ?');
+    stmt.run(nextVal, now, id);
     return NoteModel.getById(id, safeUserId);
   },
 
@@ -952,43 +1059,169 @@ const SessionModel = {
   }
 };
 
-// Sync Queue Helper Methods (Local-first offline queue with coalescing)
+// Sync Queue Helper Methods (Local-first offline queue with coalescing, user isolation, and stale cleanup)
 const SyncQueueModel = {
-  enqueue: ({ id, entityType, entityId, operation, payload }) => {
+  cleanupStale: (userId = null) => {
+    try {
+      const pendingItems = db.prepare("SELECT * FROM sync_queue WHERE status IN ('PENDING', 'FAILED')").all();
+      for (const item of pendingItems) {
+        if (item.entity_type === 'NOTE') {
+          const note = db.prepare("SELECT id, sync_mode, user_id FROM notes WHERE id = ?").get(item.entity_id);
+          if (note) {
+            if (!item.user_id && note.user_id) {
+              db.prepare("UPDATE sync_queue SET user_id = ? WHERE id = ?").run(note.user_id, item.id);
+            }
+            if (note.sync_mode === 'local') {
+              // Note is explicitly LOCAL: stale sync queue operation is no longer applicable
+              db.prepare("DELETE FROM sync_queue WHERE id = ?").run(item.id);
+            } else if ((note.sync_mode === 'cloud' || note.sync_mode === 'google') && note.sync_state === 'SYNCED') {
+              // Note is already synced to Google Drive with no other sync destination
+              db.prepare("DELETE FROM sync_queue WHERE id = ?").run(item.id);
+            }
+          } else {
+            // Note does not exist in database
+            // If it has no user_id or is an orphaned create/update, clean it up
+            if (item.operation !== 'DELETE_NOTE' || !item.user_id) {
+              db.prepare("DELETE FROM sync_queue WHERE id = ?").run(item.id);
+            }
+          }
+        } else if (item.entity_type === 'FOLDER') {
+          const nb = db.prepare("SELECT id, user_id FROM notebooks WHERE id = ?").get(item.entity_id);
+          if (nb) {
+            if (!item.user_id && nb.user_id) {
+              db.prepare("UPDATE sync_queue SET user_id = ? WHERE id = ?").run(nb.user_id, item.id);
+            }
+          } else {
+            // Orphaned folder operation for non-existent notebook
+            db.prepare("DELETE FROM sync_queue WHERE id = ?").run(item.id);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[SyncQueueModel.cleanupStale] Notice:', err.message);
+    }
+  },
+
+  enqueue: ({ id, entityType, entityId, operation, payload, userId }) => {
     const now = new Date().toISOString();
     const payloadStr = typeof payload === 'string' ? payload : JSON.stringify(payload);
     const queueId = id || `sq_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-    // Coalescing: If an existing pending update item exists for the exact entity & operation, update its payload!
-    if (operation === 'UPDATE_NOTE' || operation === 'UPDATE_FOLDER') {
+    let targetUserId = userId;
+    if (!targetUserId && typeof payload === 'object' && payload !== null && payload.user_id) {
+      targetUserId = payload.user_id;
+    }
+    if (!targetUserId) {
+      if (entityType === 'NOTE') {
+        const n = db.prepare('SELECT user_id, sync_mode FROM notes WHERE id = ?').get(entityId);
+        if (n) {
+          targetUserId = n.user_id;
+          // Never enqueue sync operations for LOCAL notes
+          if (n.sync_mode === 'local' && operation !== 'DELETE_NOTE') {
+            return null;
+          }
+        }
+      } else if (entityType === 'FOLDER') {
+        const f = db.prepare('SELECT user_id FROM notebooks WHERE id = ?').get(entityId);
+        if (f) targetUserId = f.user_id;
+      }
+    }
+    targetUserId = targetUserId || 'usr_local_default';
+
+    // If payload contains sync_mode === 'local', never enqueue unless it's a remote deletion
+    if (typeof payload === 'object' && payload !== null && payload.sync_mode === 'local' && operation !== 'DELETE_NOTE') {
+      return null;
+    }
+
+    // Deduplication / Coalescing:
+    // If an existing pending/failed operation exists for this entity, coalesce into it!
+    // Do not create duplicate pending operations for repeated edits.
+    if (operation === 'UPDATE_NOTE' || operation === 'UPDATE_FOLDER' || operation === 'CREATE_NOTE') {
       const existing = db.prepare(`
         SELECT * FROM sync_queue 
-        WHERE entity_type = ? AND entity_id = ? AND operation = ? AND status IN ('PENDING', 'FAILED')
+        WHERE entity_type = ? AND entity_id = ? 
+          AND (user_id = ? OR (user_id IS NULL AND ? = 'usr_local_default'))
+          AND status IN ('PENDING', 'FAILED', 'SYNCING')
+        ORDER BY created_at DESC
         LIMIT 1
-      `).get(entityType, entityId, operation);
+      `).get(entityType, entityId, targetUserId, targetUserId);
 
       if (existing) {
+        const effectiveOp = existing.operation === 'CREATE_NOTE' ? 'CREATE_NOTE' : operation;
         db.prepare(`
           UPDATE sync_queue 
-          SET payload = ?, created_at = ?, retry_count = 0, last_error = NULL, status = 'PENDING'
+          SET payload = ?, operation = ?, created_at = ?, retry_count = 0, last_error = NULL, status = 'PENDING', user_id = ?
           WHERE id = ?
-        `).run(payloadStr, now, existing.id);
+        `).run(payloadStr, effectiveOp, now, targetUserId, existing.id);
         return db.prepare('SELECT * FROM sync_queue WHERE id = ?').get(existing.id);
       }
     }
 
     const stmt = db.prepare(`
-      INSERT INTO sync_queue (id, entity_type, entity_id, operation, payload, created_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+      INSERT INTO sync_queue (id, entity_type, entity_id, operation, payload, created_at, status, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)
     `);
-    stmt.run(queueId, entityType, entityId, operation, payloadStr, now);
+    stmt.run(queueId, entityType, entityId, operation, payloadStr, now, targetUserId);
     return db.prepare('SELECT * FROM sync_queue WHERE id = ?').get(queueId);
   },
 
-  getPending: () => {
+  invalidateForEntity: (entityType, entityId, userId = null) => {
+    try {
+      if (userId && userId !== 'usr_local_default') {
+        db.prepare(`
+          DELETE FROM sync_queue 
+          WHERE entity_type = ? AND entity_id = ? 
+            AND user_id = ?
+            AND status IN ('PENDING', 'FAILED')
+        `).run(entityType, entityId, userId);
+      } else {
+        db.prepare(`
+          DELETE FROM sync_queue 
+          WHERE entity_type = ? AND entity_id = ? 
+            AND (user_id = 'usr_local_default' OR user_id IS NULL)
+            AND status IN ('PENDING', 'FAILED')
+        `).run(entityType, entityId);
+      }
+    } catch (err) {
+      console.warn(`[SyncQueueModel.invalidateForEntity] Notice: ${err.message}`);
+    }
+  },
+
+  markSyncedForEntity: (entityType, entityId, userId = null) => {
+    try {
+      if (userId && userId !== 'usr_local_default') {
+        db.prepare(`
+          DELETE FROM sync_queue 
+          WHERE entity_type = ? AND entity_id = ? 
+            AND user_id = ?
+        `).run(entityType, entityId, userId);
+      } else {
+        db.prepare(`
+          DELETE FROM sync_queue 
+          WHERE entity_type = ? AND entity_id = ? 
+            AND (user_id = 'usr_local_default' OR user_id IS NULL)
+        `).run(entityType, entityId);
+      }
+    } catch (err) {
+      console.warn(`[SyncQueueModel.markSyncedForEntity] Notice: ${err.message}`);
+    }
+  },
+
+  getPending: (userId = null) => {
+    SyncQueueModel.cleanupStale(userId);
+    if (userId && userId !== 'usr_local_default') {
+      const stmt = db.prepare(`
+        SELECT * FROM sync_queue 
+        WHERE user_id = ?
+          AND status IN ('PENDING', 'FAILED') AND retry_count < 10
+        ORDER BY created_at ASC
+      `);
+      return stmt.all(userId);
+    }
     const stmt = db.prepare(`
       SELECT * FROM sync_queue 
-      WHERE status IN ('PENDING', 'FAILED') AND retry_count < 10
+      WHERE (user_id = 'usr_local_default' OR user_id IS NULL)
+        AND status IN ('PENDING', 'FAILED') AND retry_count < 10
       ORDER BY created_at ASC
     `);
     return stmt.all();
@@ -1015,18 +1248,49 @@ const SyncQueueModel = {
     db.prepare("DELETE FROM sync_queue WHERE status = 'SYNCED'").run();
   },
 
-  getStats: () => {
-    const pending = db.prepare("SELECT COUNT(*) as count FROM sync_queue WHERE status IN ('PENDING', 'FAILED')").get();
-    const synced = db.prepare("SELECT COUNT(*) as count FROM sync_queue WHERE status = 'SYNCED'").get();
-    const lastSynced = db.prepare("SELECT MAX(synced_at) as last_synced FROM sync_queue WHERE status = 'SYNCED'").get();
+  getStats: (userId = null) => {
+    SyncQueueModel.cleanupStale(userId);
+    let pending, failed, synced, lastSynced;
+
+    if (userId && userId !== 'usr_local_default') {
+      pending = db.prepare(`
+        SELECT COUNT(*) as count FROM sync_queue 
+        WHERE user_id = ?
+          AND status = 'PENDING'
+      `).get(userId);
+      failed = db.prepare(`
+        SELECT COUNT(*) as count FROM sync_queue 
+        WHERE user_id = ?
+          AND status = 'FAILED' AND retry_count < 10
+      `).get(userId);
+      synced = db.prepare(`
+        SELECT COUNT(*) as count FROM sync_queue 
+        WHERE user_id = ?
+          AND status = 'SYNCED'
+      `).get(userId);
+      lastSynced = db.prepare(`
+        SELECT MAX(synced_at) as last_synced FROM sync_queue 
+        WHERE user_id = ?
+          AND status = 'SYNCED'
+      `).get(userId);
+    } else {
+      pending = db.prepare("SELECT COUNT(*) as count FROM sync_queue WHERE (user_id = 'usr_local_default' OR user_id IS NULL) AND status = 'PENDING'").get();
+      failed = db.prepare("SELECT COUNT(*) as count FROM sync_queue WHERE (user_id = 'usr_local_default' OR user_id IS NULL) AND status = 'FAILED' AND retry_count < 10").get();
+      synced = db.prepare("SELECT COUNT(*) as count FROM sync_queue WHERE (user_id = 'usr_local_default' OR user_id IS NULL) AND status = 'SYNCED'").get();
+      lastSynced = db.prepare("SELECT MAX(synced_at) as last_synced FROM sync_queue WHERE (user_id = 'usr_local_default' OR user_id IS NULL) AND status = 'SYNCED'").get();
+    }
 
     return {
       pendingCount: pending ? pending.count : 0,
+      failedCount: failed ? failed.count : 0,
       syncedCount: synced ? synced.count : 0,
       lastSyncedAt: lastSynced ? lastSynced.last_synced : null
     };
   }
 };
+
+// Immediate cleanup on load
+SyncQueueModel.cleanupStale();
 
 // LAN Device Pairing Helper Methods
 const LanPairingModel = {
@@ -1190,8 +1454,10 @@ const GoogleDriveAuthModel = {
   get: (userId) => {
     if (!userId) return null;
     try {
-      const row = db.prepare('SELECT * FROM google_drive_auths WHERE user_id = ? AND is_connected = 1').get(String(userId));
+      const row = db.prepare('SELECT * FROM google_drive_auths WHERE user_id = ?').get(String(userId));
       if (!row) return null;
+      const isConnected = Boolean(row.is_connected && row.status !== 'AUTHENTICATION_REQUIRED');
+      const authRequired = row.status === 'AUTHENTICATION_REQUIRED';
       return {
         userId: row.user_id,
         email: row.email,
@@ -1199,7 +1465,10 @@ const GoogleDriveAuthModel = {
         refreshToken: row.refresh_token,
         folderId: row.folder_id,
         folderName: row.folder_name,
-        isConnected: Boolean(row.is_connected),
+        isConnected,
+        authRequired,
+        status: row.status || (isConnected ? 'CONNECTED' : 'DISABLED'),
+        authError: row.auth_error || null,
         authorizedAt: row.authorized_at,
         updatedAt: row.updated_at
       };
@@ -1209,10 +1478,11 @@ const GoogleDriveAuthModel = {
     }
   },
 
-  upsert: ({ userId, email, accessToken, refreshToken, folderId, folderName }) => {
+  upsert: ({ userId, email, accessToken, refreshToken, folderId, folderName, status = 'CONNECTED', authError = null }) => {
     if (!userId) return null;
     const now = new Date().toISOString();
     const strUserId = String(userId);
+    const isConn = status === 'CONNECTED' ? 1 : 0;
     try {
       const existing = db.prepare('SELECT user_id FROM google_drive_auths WHERE user_id = ?').get(strUserId);
       if (existing) {
@@ -1223,15 +1493,17 @@ const GoogleDriveAuthModel = {
               refresh_token = COALESCE(?, refresh_token),
               folder_id = COALESCE(?, folder_id),
               folder_name = COALESCE(?, folder_name),
-              is_connected = 1,
+              is_connected = ?,
+              status = ?,
+              auth_error = ?,
               updated_at = ?
           WHERE user_id = ?
-        `).run(email || null, accessToken || null, refreshToken || null, folderId || null, folderName || null, now, strUserId);
+        `).run(email || null, accessToken || null, refreshToken || null, folderId || null, folderName || null, isConn, status, authError || null, now, strUserId);
       } else {
         db.prepare(`
-          INSERT INTO google_drive_auths (user_id, email, access_token, refresh_token, folder_id, folder_name, is_connected, authorized_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-        `).run(strUserId, email || null, accessToken || null, refreshToken || null, folderId || 'syncnote_gdrive_root_folder_id', folderName || 'SyncNote', now, now);
+          INSERT INTO google_drive_auths (user_id, email, access_token, refresh_token, folder_id, folder_name, is_connected, status, auth_error, authorized_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(strUserId, email || null, accessToken || null, refreshToken || null, folderId || 'syncnote_gdrive_root_folder_id', folderName || 'SyncNote', isConn, status, authError || null, now, now);
       }
 
       if (strUserId !== 'usr_local_default') {
@@ -1245,10 +1517,27 @@ const GoogleDriveAuthModel = {
     }
   },
 
+  updateStatus: (userId, status, authError = null) => {
+    if (!userId) return false;
+    const now = new Date().toISOString();
+    const isConn = status === 'CONNECTED' ? 1 : 0;
+    try {
+      db.prepare(`UPDATE google_drive_auths SET status = ?, auth_error = ?, is_connected = ?, updated_at = ? WHERE user_id = ?`).run(status, authError || null, isConn, now, String(userId));
+      return true;
+    } catch (err) {
+      console.warn('[GoogleDriveAuthModel.updateStatus error]:', err.message);
+      return false;
+    }
+  },
+
+  setAuthRequired: (userId, errorMsg = 'Google Drive authentication expired. Please reconnect Google Drive in Settings.') => {
+    return GoogleDriveAuthModel.updateStatus(userId, 'AUTHENTICATION_REQUIRED', errorMsg);
+  },
+
   disconnect: (userId) => {
     if (!userId) return false;
     try {
-      db.prepare(`UPDATE google_drive_auths SET is_connected = 0 WHERE user_id = ?`).run(String(userId));
+      db.prepare(`UPDATE google_drive_auths SET is_connected = 0, status = 'DISABLED', auth_error = null WHERE user_id = ?`).run(String(userId));
       return true;
     } catch (err) {
       return false;
@@ -1266,7 +1555,9 @@ const GoogleDriveAuthModel = {
           accessToken: defaultRow.access_token,
           refreshToken: defaultRow.refresh_token,
           folderId: defaultRow.folder_id,
-          folderName: defaultRow.folder_name
+          folderName: defaultRow.folder_name,
+          status: defaultRow.status || 'CONNECTED',
+          authError: defaultRow.auth_error || null
         });
         db.prepare(`DELETE FROM google_drive_auths WHERE user_id = 'usr_local_default'`).run();
         console.log(`[Google Drive Auth Migration] Migrated Drive connection from usr_local_default to user '${targetUserId}'.`);

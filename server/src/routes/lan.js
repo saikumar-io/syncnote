@@ -12,7 +12,8 @@ const {
   NotebookModel,
   VersionModel,
   SessionModel,
-  ConflictModel
+  ConflictModel,
+  SyncQueueModel
 } = require('../db/database');
 const { 
   writeNoteFile, 
@@ -1147,6 +1148,11 @@ router.post('/sync', async (req, res) => {
       localNotes = localNotes.filter(n => selectedNoteIds.includes(n.id));
     }
 
+    if (Array.isArray(appliedNotes)) {
+      appliedNotes.forEach(a => SyncQueueModel.markSyncedForEntity('NOTE', a.noteId || a.id, currentUserId));
+    }
+    localNotes.forEach(n => SyncQueueModel.markSyncedForEntity('NOTE', n.id, currentUserId));
+
     const localNotesWithContent = buildNotesWithResolutionMetadata(localNotes, currentUserId);
     const localNotebooks = NotebookModel.getAll(currentUserId);
 
@@ -1583,6 +1589,229 @@ router.post('/pair/check-status', async (req, res) => {
   }
 });
 
+// In-memory peer presence tracking with bounded retry backoff
+const peerPresenceRegistry = new Map();
+
+function getOrCreatePresenceEntry(deviceId) {
+  let reg = peerPresenceRegistry.get(deviceId);
+  if (!reg) {
+    reg = {
+      id: deviceId,
+      isOnline: false,
+      consecutiveFailures: 0,
+      nextAttemptAt: 0,
+      backoffIntervalMs: 0,
+      lastLoggedState: null
+    };
+    peerPresenceRegistry.set(deviceId, reg);
+  }
+  return reg;
+}
+
+peerPresenceRegistry.recordFailure = (deviceId, ip, port) => {
+  const reg = getOrCreatePresenceEntry(deviceId);
+  reg.consecutiveFailures = (reg.consecutiveFailures || 0) + 1;
+  reg.isOnline = false;
+  if (reg.consecutiveFailures >= 2) {
+    reg.backoffIntervalMs = Math.min(120000, 20000 * Math.pow(1.5, Math.min(reg.consecutiveFailures - 2, 4)));
+    reg.nextAttemptAt = Date.now() + reg.backoffIntervalMs;
+    if (reg.lastLoggedState !== 'OFFLINE') {
+      console.log(`[LAN] Peer ${ip} marked OFFLINE`);
+      console.log(`[LAN] Low-frequency retry scheduled for offline peer ${ip} in ${Math.round(reg.backoffIntervalMs / 1000)}s`);
+      reg.lastLoggedState = 'OFFLINE';
+    }
+  }
+};
+
+peerPresenceRegistry.recordSuccess = (deviceId, ip, port) => {
+  const reg = getOrCreatePresenceEntry(deviceId);
+  reg.consecutiveFailures = 0;
+  reg.isOnline = true;
+  reg.backoffIntervalMs = 0;
+  reg.nextAttemptAt = 0;
+  if (reg.lastLoggedState !== 'ONLINE') {
+    console.log(`[LAN] Peer ${ip} is ONLINE`);
+    reg.lastLoggedState = 'ONLINE';
+  }
+};
+
+peerPresenceRegistry.getPeerStatus = (deviceId, ip) => {
+  const reg = getOrCreatePresenceEntry(deviceId);
+  return {
+    isOnline: reg.isOnline,
+    inBackoff: !reg.isOnline && reg.consecutiveFailures >= 2 && Date.now() < reg.nextAttemptAt,
+    consecutiveFailures: reg.consecutiveFailures,
+    nextAttemptAt: reg.nextAttemptAt
+  };
+};
+
+peerPresenceRegistry.shouldProbePeer = (deviceId, ip) => {
+  const reg = getOrCreatePresenceEntry(deviceId);
+  if (reg.isOnline) return true;
+  if (reg.consecutiveFailures < 2) return true;
+  return Date.now() >= reg.nextAttemptAt;
+};
+
+
+async function checkDevicePresenceWithBackoff(d, localProfile, userId, force = false) {
+  const reg = getOrCreatePresenceEntry(d.id);
+
+  if (!d.device_ip || !d.public_key) {
+    return {
+      id: d.id,
+      deviceName: d.device_name,
+      deviceType: d.device_type || 'desktop',
+      deviceIp: d.device_ip,
+      devicePort: d.device_port || 5000,
+      status: d.status,
+      pairedAt: d.created_at,
+      isOnline: false,
+      lastSeen: d.last_seen,
+      error: 'Missing IP or public key',
+      notesToSync: null,
+      notebooksToSync: null,
+      isUpToDate: false,
+      publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
+      selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
+    };
+  }
+
+  // If peer is currently offline, has repeated failures, and is in backoff window:
+  // Do NOT initiate aggressive heartbeat request!
+  if (!force && !reg.isOnline && reg.consecutiveFailures >= 2 && Date.now() < reg.nextAttemptAt) {
+    return {
+      id: d.id,
+      deviceName: d.device_name,
+      deviceType: d.device_type || 'desktop',
+      deviceIp: d.device_ip,
+      devicePort: d.device_port || 5000,
+      status: d.status,
+      pairedAt: d.created_at,
+      isOnline: false,
+      lastSeen: d.last_seen,
+      inBackoff: true,
+      nextCheckInSeconds: Math.max(1, Math.round((reg.nextAttemptAt - Date.now()) / 1000)),
+      notesToSync: null,
+      notebooksToSync: null,
+      isUpToDate: false,
+      publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
+      selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
+    };
+  }
+
+  const quiet = reg.consecutiveFailures >= 1;
+  const peerPort = d.device_port || 5000;
+  const localManifest = getLocalSyncManifest(userId, d.id);
+
+  try {
+    const hbResult = await sendEncryptedLanHeartbeat(d.device_ip, peerPort, localProfile, d, localManifest, { quiet });
+
+    if (hbResult && hbResult.ok) {
+      const nowIso = new Date().toISOString();
+      LanPairingModel.updateLastSeen(d.id, d.device_ip, peerPort);
+
+      reg.consecutiveFailures = 0;
+      reg.isOnline = true;
+      reg.backoffIntervalMs = 0;
+      reg.nextAttemptAt = 0;
+
+      if (reg.lastLoggedState !== 'ONLINE') {
+        console.log(`[LAN] Peer ${d.device_ip} (${d.device_name}) is ONLINE`);
+        reg.lastLoggedState = 'ONLINE';
+      }
+
+      let notesToSync = hbResult.notesToSync ?? 0;
+      let notebooksToSync = hbResult.notebooksToSync ?? 0;
+      if (hbResult.remoteNotes || hbResult.remoteNotebooks) {
+        const comp = compareSyncManifests(localManifest, { notes: hbResult.remoteNotes || [], notebooks: hbResult.remoteNotebooks || [] });
+        notesToSync = comp.notesToSync;
+        notebooksToSync = comp.notebooksToSync;
+      }
+
+      return {
+        id: d.id,
+        deviceName: d.device_name,
+        deviceType: d.device_type || 'desktop',
+        deviceIp: d.device_ip,
+        devicePort: peerPort,
+        status: d.status,
+        pairedAt: d.created_at,
+        isOnline: true,
+        lastSeen: nowIso,
+        latencyMs: hbResult.latencyMs,
+        notesToSync,
+        notebooksToSync,
+        isUpToDate: notesToSync === 0 && notebooksToSync === 0,
+        publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
+        selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
+      };
+    } else {
+      reg.consecutiveFailures = (reg.consecutiveFailures || 0) + 1;
+      reg.isOnline = false;
+
+      if (reg.consecutiveFailures >= 2) {
+        reg.backoffIntervalMs = Math.min(120000, 20000 * Math.pow(1.5, Math.min(reg.consecutiveFailures - 2, 4)));
+        reg.nextAttemptAt = Date.now() + reg.backoffIntervalMs;
+
+        if (reg.lastLoggedState !== 'OFFLINE') {
+          console.log(`[LAN] Peer ${d.device_ip} (${d.device_name}) marked OFFLINE`);
+          console.log(`[LAN] Low-frequency retry scheduled for offline peer ${d.device_ip} in ${Math.round(reg.backoffIntervalMs / 1000)}s`);
+          reg.lastLoggedState = 'OFFLINE';
+        }
+      }
+
+      return {
+        id: d.id,
+        deviceName: d.device_name,
+        deviceType: d.device_type || 'desktop',
+        deviceIp: d.device_ip,
+        devicePort: peerPort,
+        status: d.status,
+        pairedAt: d.created_at,
+        isOnline: false,
+        lastSeen: d.last_seen,
+        error: hbResult?.error || 'Unreachable',
+        inBackoff: reg.consecutiveFailures >= 2,
+        notesToSync: null,
+        notebooksToSync: null,
+        isUpToDate: false,
+        publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
+        selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
+      };
+    }
+  } catch (err) {
+    reg.consecutiveFailures = (reg.consecutiveFailures || 0) + 1;
+    reg.isOnline = false;
+    if (reg.consecutiveFailures >= 2) {
+      reg.backoffIntervalMs = Math.min(120000, 20000 * Math.pow(1.5, Math.min(reg.consecutiveFailures - 2, 4)));
+      reg.nextAttemptAt = Date.now() + reg.backoffIntervalMs;
+      if (reg.lastLoggedState !== 'OFFLINE') {
+        console.log(`[LAN] Peer ${d.device_ip} (${d.device_name}) marked OFFLINE`);
+        console.log(`[LAN] Low-frequency retry scheduled for offline peer ${d.device_ip} in ${Math.round(reg.backoffIntervalMs / 1000)}s`);
+        reg.lastLoggedState = 'OFFLINE';
+      }
+    }
+    return {
+      id: d.id,
+      deviceName: d.device_name,
+      deviceType: d.device_type || 'desktop',
+      deviceIp: d.device_ip,
+      devicePort: peerPort,
+      status: d.status,
+      pairedAt: d.created_at,
+      isOnline: false,
+      lastSeen: d.last_seen,
+      error: err.message,
+      inBackoff: reg.consecutiveFailures >= 2,
+      notesToSync: null,
+      notebooksToSync: null,
+      isUpToDate: false,
+      publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
+      selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
+    };
+  }
+}
+
 /**
  * GET /api/lan/devices
  * List all trusted & paired LAN devices for the user with reachability status.
@@ -1593,51 +1822,9 @@ router.get('/devices', async (req, res) => {
     const userId = req.user ? req.user.id : 'usr_local_default';
     const localProfile = getPublicDeviceProfile();
     const devices = LanPairingModel.getPairedDevices(userId);
+    const force = req.query.force === 'true';
 
-    // Check reachability and lightweight sync comparison using authenticated heartbeat (~2s timeout)
-    const deviceStatuses = await Promise.all(devices.map(async (d) => {
-      let isOnline = false;
-      let notesToSync = 0;
-      let notebooksToSync = 0;
-
-      if (d.device_ip && d.public_key) {
-        try {
-          const localManifest = getLocalSyncManifest(userId, d.id);
-          const hb = await sendEncryptedLanHeartbeat(d.device_ip, d.device_port || 5000, localProfile, d, localManifest);
-          if (hb && hb.ok) {
-            isOnline = true;
-            LanPairingModel.updateLastSeen(d.id, d.device_ip, d.device_port || 5000);
-            if (hb.remoteNotes || hb.remoteNotebooks) {
-              const comp = compareSyncManifests(localManifest, { notes: hb.remoteNotes || [], notebooks: hb.remoteNotebooks || [] });
-              notesToSync = comp.notesToSync;
-              notebooksToSync = comp.notebooksToSync;
-            } else {
-              notesToSync = hb.notesToSync ?? 0;
-              notebooksToSync = hb.notebooksToSync ?? 0;
-            }
-          }
-        } catch (e) {
-          isOnline = false;
-        }
-      }
-
-      return {
-        id: d.id,
-        deviceName: d.device_name,
-        deviceType: d.device_type || 'desktop',
-        deviceIp: d.device_ip,
-        devicePort: d.device_port || 5000,
-        status: d.status,
-        pairedAt: d.created_at,
-        lastSeen: isOnline ? new Date().toISOString() : d.last_seen,
-        isOnline,
-        notesToSync: isOnline ? notesToSync : null,
-        notebooksToSync: isOnline ? notebooksToSync : null,
-        isUpToDate: isOnline ? (notesToSync === 0 && notebooksToSync === 0) : false,
-        publicKeyFingerprint: d.public_key ? d.public_key.substring(0, 16) + '...' : null,
-        selectedNoteIds: LanPairingModel.getDeviceSelectedNotes(d.id)
-      };
-    }));
+    const deviceStatuses = await Promise.all(devices.map(d => checkDevicePresenceWithBackoff(d, localProfile, userId, force)));
 
     return res.json({
       success: true,
@@ -1651,83 +1838,18 @@ router.get('/devices', async (req, res) => {
 
 /**
  * GET /api/lan/devices/presence
- * Automatic background presence checking for every paired device.
- * Runs lightweight authenticated encrypted heartbeat in parallel (~2s timeout).
+ * Automatic background presence checking for every paired device with bounded backoff.
  * Updates last_seen timestamp in database for online peers.
- * Calculates pending sync count (notesToSync, notebooksToSync) without downloading note contents.
+ * Never alters pairing state of offline peers.
  */
 router.get('/devices/presence', async (req, res) => {
   try {
     const userId = req.user ? req.user.id : 'usr_local_default';
     const devices = LanPairingModel.getPairedDevices(userId);
     const localProfile = getPublicDeviceProfile();
+    const force = req.query.force === 'true';
 
-    const presenceList = await Promise.all(devices.map(async (d) => {
-      if (!d.device_ip || !d.public_key) {
-        return {
-          id: d.id,
-          deviceName: d.device_name,
-          isOnline: false,
-          lastSeen: d.last_seen,
-          error: 'Missing IP or public key',
-          notesToSync: null,
-          notebooksToSync: null,
-          isUpToDate: false
-        };
-      }
-
-      try {
-        const peerPort = d.device_port || 5000;
-        const localManifest = getLocalSyncManifest(userId, d.id);
-        const hbResult = await sendEncryptedLanHeartbeat(d.device_ip, peerPort, localProfile, d, localManifest);
-
-        if (hbResult && hbResult.ok) {
-          const nowIso = new Date().toISOString();
-          LanPairingModel.updateLastSeen(d.id, d.device_ip, peerPort);
-          let notesToSync = hbResult.notesToSync ?? 0;
-          let notebooksToSync = hbResult.notebooksToSync ?? 0;
-
-          if (hbResult.remoteNotes || hbResult.remoteNotebooks) {
-            const comp = compareSyncManifests(localManifest, { notes: hbResult.remoteNotes || [], notebooks: hbResult.remoteNotebooks || [] });
-            notesToSync = comp.notesToSync;
-            notebooksToSync = comp.notebooksToSync;
-          }
-
-          return {
-            id: d.id,
-            deviceName: d.device_name,
-            isOnline: true,
-            lastSeen: nowIso,
-            latencyMs: hbResult.latencyMs,
-            notesToSync,
-            notebooksToSync,
-            isUpToDate: notesToSync === 0 && notebooksToSync === 0
-          };
-        } else {
-          return {
-            id: d.id,
-            deviceName: d.device_name,
-            isOnline: false,
-            lastSeen: d.last_seen,
-            error: hbResult?.error || 'Unreachable',
-            notesToSync: null,
-            notebooksToSync: null,
-            isUpToDate: false
-          };
-        }
-      } catch (err) {
-        return {
-          id: d.id,
-          deviceName: d.device_name,
-          isOnline: false,
-          lastSeen: d.last_seen,
-          error: err.message,
-          notesToSync: null,
-          notebooksToSync: null,
-          isUpToDate: false
-        };
-      }
-    }));
+    const presenceList = await Promise.all(devices.map(d => checkDevicePresenceWithBackoff(d, localProfile, userId, force)));
 
     return res.json({
       success: true,
@@ -1945,6 +2067,11 @@ router.post('/sync/outbound', async (req, res) => {
       { isInboundSync: false }
     );
 
+    eligibleNotes.forEach(n => SyncQueueModel.markSyncedForEntity('NOTE', n.id, currentUserId));
+    if (Array.isArray(appliedNotes)) {
+      appliedNotes.forEach(a => SyncQueueModel.markSyncedForEntity('NOTE', a.noteId || a.id, currentUserId));
+    }
+
     // Merge conflicts detected on both local node and peer node
     const combinedConflicts = [...localConflicts];
     if (Array.isArray(remoteData.conflicts)) {
@@ -2099,8 +2226,10 @@ async function broadcastResolvedNoteToPeers(noteId, resolvedVersionId, currentUs
 router.broadcastResolvedNoteToPeers = broadcastResolvedNoteToPeers;
 router.applyIncomingNotesAndNotebooks = applyIncomingNotesAndNotebooks;
 router.buildNotesWithResolutionMetadata = buildNotesWithResolutionMetadata;
+router.peerPresenceRegistry = peerPresenceRegistry;
 
 module.exports = router;
 module.exports.broadcastResolvedNoteToPeers = broadcastResolvedNoteToPeers;
 module.exports.applyIncomingNotesAndNotebooks = applyIncomingNotesAndNotebooks;
 module.exports.buildNotesWithResolutionMetadata = buildNotesWithResolutionMetadata;
+module.exports.peerPresenceRegistry = peerPresenceRegistry;

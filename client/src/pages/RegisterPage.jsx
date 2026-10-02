@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate, Link } from '../utils/router';
 import SyncNoteLogo from '../components/SyncNoteLogo';
-import { Eye, EyeOff, Lock, Mail, User, ArrowRight, AlertCircle, Loader2, CheckCircle2 } from 'lucide-react';
+import { Eye, EyeOff, Lock, Mail, User, ArrowRight, AlertCircle, Loader2 } from 'lucide-react';
 
 export default function RegisterPage() {
   const { register } = useAuth();
@@ -66,152 +66,152 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="auth-page-wrapper">
-      <div className="auth-card">
+    <div className="auth-page-root">
+      <div className="auth-ambient-glow" />
+      <div className="auth-card-container">
+        
         {/* Brand Header */}
-        <div className="auth-header">
+        <div className="auth-brand-header">
           <SyncNoteLogo showText={true} />
-          <h2 className="auth-title">Create your account</h2>
-          <p className="auth-subtitle">Set up your local SyncNote workspace</p>
+          <h2 className="auth-headline">Create your workspace</h2>
+          <p className="auth-subheadline">Set up your local-first SyncNote account</p>
         </div>
 
         {/* Global Error Banner */}
         {errorMsg && (
-          <div className="auth-error-banner">
+          <div className="auth-status-alert danger">
             <AlertCircle size={15} />
             <span>{errorMsg}</span>
           </div>
         )}
 
         {/* Registration Form */}
-        <form onSubmit={handleSubmit} className="auth-form">
-          <div className="form-group">
-            <label className="input-label" htmlFor="reg-username">
+        <form onSubmit={handleSubmit} className="auth-form-cluster">
+          <div className="auth-input-group">
+            <label className="auth-label" htmlFor="reg-username">
               Username
             </label>
-            <div className="input-with-icon">
-              <User size={15} className="input-icon" />
+            <div className="auth-input-wrapper">
+              <User size={15} className="input-symbol" />
               <input
                 id="reg-username"
                 type="text"
-                className={`auth-input ${fieldErrors.username ? 'error' : ''}`}
-                placeholder="alex_dev"
+                className={`auth-text-field ${fieldErrors.username ? 'error' : ''}`}
+                placeholder="developer_handle"
                 value={username}
                 onChange={(e) => {
                   setUsername(e.target.value);
-                  if (fieldErrors.username) setFieldErrors((prev) => ({ ...prev, username: '' }));
+                  if (fieldErrors.username) setFieldErrors(prev => ({ ...prev, username: null }));
                 }}
+                autoComplete="username"
                 required
-                autoFocus
               />
             </div>
-            {fieldErrors.username && <span className="field-error-text">{fieldErrors.username}</span>}
+            {fieldErrors.username && <span className="field-error-message">{fieldErrors.username}</span>}
           </div>
 
-          <div className="form-group">
-            <label className="input-label" htmlFor="reg-email">
+          <div className="auth-input-group">
+            <label className="auth-label" htmlFor="reg-email">
               Email Address
             </label>
-            <div className="input-with-icon">
-              <Mail size={15} className="input-icon" />
+            <div className="auth-input-wrapper">
+              <Mail size={15} className="input-symbol" />
               <input
                 id="reg-email"
                 type="email"
-                className={`auth-input ${fieldErrors.email ? 'error' : ''}`}
-                placeholder="alex@example.com"
+                className={`auth-text-field ${fieldErrors.email ? 'error' : ''}`}
+                placeholder="dev@example.com"
                 value={email}
                 onChange={(e) => {
                   setEmail(e.target.value);
-                  if (fieldErrors.email) setFieldErrors((prev) => ({ ...prev, email: '' }));
+                  if (fieldErrors.email) setFieldErrors(prev => ({ ...prev, email: null }));
                 }}
+                autoComplete="email"
                 required
               />
             </div>
-            {fieldErrors.email && <span className="field-error-text">{fieldErrors.email}</span>}
+            {fieldErrors.email && <span className="field-error-message">{fieldErrors.email}</span>}
           </div>
 
-          <div className="form-group">
-            <label className="input-label" htmlFor="reg-password">
+          <div className="auth-input-group">
+            <label className="auth-label" htmlFor="reg-password">
               Password
             </label>
-            <div className="input-with-icon">
-              <Lock size={15} className="input-icon" />
+            <div className="auth-input-wrapper">
+              <Lock size={15} className="input-symbol" />
               <input
                 id="reg-password"
                 type={showPassword ? 'text' : 'password'}
-                className={`auth-input pr-10 ${fieldErrors.password ? 'error' : ''}`}
-                placeholder="At least 6 characters"
+                className={`auth-text-field ${fieldErrors.password ? 'error' : ''}`}
+                placeholder="Min. 6 characters"
                 value={password}
                 onChange={(e) => {
                   setPassword(e.target.value);
-                  if (fieldErrors.password) setFieldErrors((prev) => ({ ...prev, password: '' }));
+                  if (fieldErrors.password) setFieldErrors(prev => ({ ...prev, password: null }));
                 }}
+                autoComplete="new-password"
                 required
               />
               <button
                 type="button"
-                className="password-toggle-btn"
+                className="password-toggle-trigger"
                 onClick={() => setShowPassword(!showPassword)}
                 title={showPassword ? 'Hide password' : 'Show password'}
               >
                 {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
               </button>
             </div>
-            {fieldErrors.password && <span className="field-error-text">{fieldErrors.password}</span>}
+            {fieldErrors.password && <span className="field-error-message">{fieldErrors.password}</span>}
           </div>
 
-          <div className="form-group">
-            <label className="input-label" htmlFor="reg-confirm-password">
+          <div className="auth-input-group">
+            <label className="auth-label" htmlFor="reg-confirm-password">
               Confirm Password
             </label>
-            <div className="input-with-icon">
-              <Lock size={15} className="input-icon" />
+            <div className="auth-input-wrapper">
+              <Lock size={15} className="input-symbol" />
               <input
                 id="reg-confirm-password"
                 type={showPassword ? 'text' : 'password'}
-                className={`auth-input ${fieldErrors.confirmPassword ? 'error' : ''}`}
+                className={`auth-text-field ${fieldErrors.confirmPassword ? 'error' : ''}`}
                 placeholder="Re-enter password"
                 value={confirmPassword}
                 onChange={(e) => {
                   setConfirmPassword(e.target.value);
-                  if (fieldErrors.confirmPassword) setFieldErrors((prev) => ({ ...prev, confirmPassword: '' }));
+                  if (fieldErrors.confirmPassword) setFieldErrors(prev => ({ ...prev, confirmPassword: null }));
                 }}
+                autoComplete="new-password"
                 required
               />
             </div>
             {fieldErrors.confirmPassword && (
-              <span className="field-error-text">{fieldErrors.confirmPassword}</span>
+              <span className="field-error-message">{fieldErrors.confirmPassword}</span>
             )}
           </div>
 
           <button
             type="submit"
-            className="btn-primary auth-submit-btn"
+            className="auth-submit-button"
             disabled={isSubmitting}
           >
             {isSubmitting ? (
-              <>
-                <Loader2 size={16} className="spin-icon" />
-                <span>Creating account...</span>
-              </>
+              <Loader2 size={16} className="spin" />
             ) : (
               <>
-                <span>Create Account</span>
+                <span>Create Workspace Account</span>
                 <ArrowRight size={15} />
               </>
             )}
           </button>
         </form>
 
-        {/* Footer Link */}
-        <div className="auth-footer">
-          <p>
-            Already have an account?{' '}
-            <Link to="/login" className="auth-link">
-              Log in
-            </Link>
-          </p>
+        <div className="auth-footer-prompt">
+          <span>Already have an account?</span>
+          <Link to="/login" className="auth-switch-link">
+            Sign in
+          </Link>
         </div>
+
       </div>
     </div>
   );

@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { SyncProvider, useSync } from './context/SyncContext';
 import AppLayout from './layouts/AppLayout';
 import NotesPage from './pages/NotesPage';
+import FavoritesPage from './pages/FavoritesPage';
 import NoteEditorPage from './pages/NoteEditorPage';
 import SingleNoteHistoryPage from './pages/SingleNoteHistoryPage';
 import KnowledgeGraphPage from './pages/KnowledgeGraphPage';
@@ -18,6 +19,7 @@ import CheckpointModal from './components/CheckpointModal';
 import DiffViewerModal from './components/DiffViewerModal';
 import VersionPreviewModal from './components/VersionPreviewModal';
 import DeleteModal from './components/DeleteModal';
+import MoveNoteModal from './components/MoveNoteModal';
 import UsernameOnboardingModal from './components/UsernameOnboardingModal';
 
 import { notesApi } from './api/notesApi';
@@ -47,6 +49,7 @@ export function AppContent() {
   const [diffModal, setDiffModal] = useState({ isOpen: false, data: null });
   const [previewModal, setPreviewModal] = useState({ isOpen: false, data: null });
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, item: null, type: 'note' });
+  const [moveModal, setMoveModal] = useState({ isOpen: false, note: null });
   const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState(false);
 
   // Theme Sync
@@ -132,19 +135,22 @@ export function AppContent() {
 
   // Actions
   const handleCreateNote = async (titleOrPayload = 'Untitled Note', notebookId = null) => {
+    let title = 'Untitled Note';
+    let content = '';
+    let nbId = notebookId;
+    let isExplicitTitle = false;
+
+    if (typeof titleOrPayload === 'object' && titleOrPayload !== null) {
+      title = titleOrPayload.title !== undefined ? titleOrPayload.title : 'Untitled Note';
+      content = titleOrPayload.content !== undefined ? titleOrPayload.content : '';
+      nbId = titleOrPayload.notebook_id !== undefined ? titleOrPayload.notebook_id : notebookId;
+      isExplicitTitle = Boolean(titleOrPayload.title && titleOrPayload.title.trim());
+    } else if (typeof titleOrPayload === 'string') {
+      title = titleOrPayload.trim() || 'Untitled Note';
+      isExplicitTitle = Boolean(titleOrPayload.trim());
+    }
+
     try {
-      let title = 'Untitled Note';
-      let content = '';
-      let nbId = notebookId;
-
-      if (typeof titleOrPayload === 'object' && titleOrPayload !== null) {
-        title = titleOrPayload.title !== undefined ? titleOrPayload.title : 'Untitled Note';
-        content = titleOrPayload.content !== undefined ? titleOrPayload.content : '';
-        nbId = titleOrPayload.notebook_id !== undefined ? titleOrPayload.notebook_id : notebookId;
-      } else if (typeof titleOrPayload === 'string') {
-        title = titleOrPayload.trim() || 'Untitled Note';
-      }
-
       const created = await notesApi.create({ title, content, notebook_id: nbId });
       if (created) {
         setNotes((prevNotes) => [created, ...prevNotes.filter((n) => n.id !== created.id)]);
@@ -157,7 +163,11 @@ export function AppContent() {
       }
       return created;
     } catch (err) {
+      if (!isExplicitTitle && (err.status === 409 || err.code === 'DUPLICATE_NOTE_NAME') && err.data?.suggestedTitle) {
+        return handleCreateNote({ title: err.data.suggestedTitle, content, notebook_id: nbId });
+      }
       console.error('Error creating note:', err);
+      throw err;
     }
   };
 
@@ -206,9 +216,35 @@ export function AppContent() {
   };
 
 
-  const handleToggleFavorite = async (id) => {
-    // Local preference toggle
-  };
+  const handleToggleFavorite = useCallback(async (noteOrId) => {
+    const id = typeof noteOrId === 'object' && noteOrId !== null ? noteOrId.id : noteOrId;
+    if (!id) return;
+    const targetNote = notes.find((n) => n.id === id);
+    if (!targetNote) return;
+
+    const currentFav = Boolean(targetNote.is_favorite);
+    const nextFav = currentFav ? 0 : 1;
+
+    // Optimistic UI state update: immediately reflect pinned / unpinned
+    setNotes((prevNotes) =>
+      prevNotes.map((n) => (n.id === id ? { ...n, is_favorite: nextFav } : n))
+    );
+
+    try {
+      const updated = await notesApi.toggleFavorite(id, nextFav);
+      if (updated) {
+        setNotes((prevNotes) =>
+          prevNotes.map((n) => (n.id === id ? { ...n, ...updated, is_favorite: updated.is_favorite } : n))
+        );
+      }
+    } catch (err) {
+      console.error('Failed to toggle favorite:', err);
+      // Revert optimistic update on error
+      setNotes((prevNotes) =>
+        prevNotes.map((n) => (n.id === id ? { ...n, is_favorite: currentFav ? 1 : 0 } : n))
+      );
+    }
+  }, [notes]);
 
   const handleConfirmCheckpoint = async (msg) => {
     if (!activeNote) return;
@@ -306,10 +342,10 @@ export function AppContent() {
     }
   };
 
-  const handleCreateNotebook = async (name) => {
+  const handleCreateNotebook = async (name, parentId = null) => {
     try {
       if (!name || !name.trim()) return;
-      const created = await notebooksApi.create(name.trim());
+      const created = await notebooksApi.create(name.trim(), parentId);
       if (created) {
         await loadNotebooks();
       }
@@ -337,6 +373,12 @@ export function AppContent() {
   const getPageTitle = () => {
     const p = location.pathname;
     if (p === '/notes') return 'Notes Explorer';
+    if (p.startsWith('/notes/folder/')) {
+      const folderId = p.split('/')[3];
+      const folder = notebooks.find(nb => nb.id === folderId);
+      return folder ? folder.name : 'Folder Explorer';
+    }
+    if (p === '/favorites') return 'Favorites';
     if (p.startsWith('/notes/') && p.endsWith('/history')) {
       return activeNote ? `${activeNote.title} · History` : 'Note History';
     }
@@ -385,7 +427,12 @@ export function AppContent() {
       setGlobalSearchQuery={setGlobalSearchQuery}
       pageTitle={getPageTitle()}
       notes={notes}
+      notebooks={notebooks}
+      activeNote={activeNote}
       onCreateNote={handleCreateNote}
+      onCreateNotebook={handleCreateNotebook}
+      onDeleteNotebook={handleDeleteNotebook}
+      onToggleFavorite={handleToggleFavorite}
     >
       <Routes>
         <Route 
@@ -409,6 +456,35 @@ export function AppContent() {
           } 
         />
         <Route 
+          path="/notes/folder/:folderId" 
+          element={
+            <NotesPage 
+              notes={notes}
+              notebooks={notebooks}
+              onCreateNote={handleCreateNote}
+              onUpdateNote={handleUpdateNote}
+              onToggleFavorite={handleToggleFavorite}
+              onRequestDeleteNote={requestDeleteNote}
+              searchQuery={globalSearchQuery}
+              onCreateNotebook={handleCreateNotebook}
+              onDeleteNotebook={handleDeleteNotebook}
+            />
+          } 
+        />
+        <Route 
+          path="/favorites" 
+          element={
+            <FavoritesPage 
+              notes={notes}
+              notebooks={notebooks}
+              onCreateNote={handleCreateNote}
+              onUpdateNote={handleUpdateNote}
+              onToggleFavorite={handleToggleFavorite}
+              onRequestDeleteNote={requestDeleteNote}
+            />
+          } 
+        />
+        <Route 
           path="/notes/:noteId" 
           element={
             <NoteEditorPage 
@@ -425,6 +501,7 @@ export function AppContent() {
               onDiscardRecovery={handleDiscardRecovery}
               onToggleFavorite={handleToggleFavorite}
               onRequestDeleteNote={requestDeleteNote}
+              onRequestMoveNotebook={(note) => setMoveModal({ isOpen: true, note })}
             />
           } 
         />
@@ -473,7 +550,7 @@ export function AppContent() {
         />
         <Route 
           path="/about" 
-          element={<AboutPage />} 
+          redirect="/settings" 
         />
       </Routes>
 
@@ -510,6 +587,18 @@ export function AppContent() {
         itemType="Note"
         onConfirm={confirmDelete}
         onCancel={() => setDeleteModal({ isOpen: false, item: null, type: 'note' })}
+      />
+
+      <MoveNoteModal
+        isOpen={moveModal.isOpen}
+        note={moveModal.note}
+        notebooks={notebooks}
+        onClose={() => setMoveModal({ isOpen: false, note: null })}
+        onMoveNote={async (noteId, targetNotebookId) => {
+          await handleUpdateNote(noteId, { notebook_id: targetNotebookId });
+          await loadNotes();
+          await loadNotebooks();
+        }}
       />
 
       <UsernameOnboardingModal

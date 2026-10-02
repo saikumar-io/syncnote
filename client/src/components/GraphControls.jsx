@@ -26,22 +26,22 @@ export default function GraphControls({
       <div style={{ height: '16px', width: '1px', background: 'var(--border-subtle)' }} />
 
       {/* Zoom + */}
-      <button className="graph-ctrl-btn" onClick={onZoomIn} title="Zoom In (+)">
+      <button className="graph-ctrl-btn" onClick={onZoomIn} title="Zoom In (+)" aria-label="Zoom In" type="button">
         <ZoomIn size={14} />
       </button>
 
       {/* Zoom - */}
-      <button className="graph-ctrl-btn" onClick={onZoomOut} title="Zoom Out (-)">
+      <button className="graph-ctrl-btn" onClick={onZoomOut} title="Zoom Out (-)" aria-label="Zoom Out" type="button">
         <ZoomOut size={14} />
       </button>
 
       {/* Fit Graph */}
-      <button className="graph-ctrl-btn" onClick={onFitGraph} title="Fit Graph View">
+      <button className="graph-ctrl-btn" onClick={onFitGraph} title="Fit Graph (Fit all nodes into view)" aria-label="Fit Graph" type="button">
         <Maximize2 size={14} />
       </button>
 
       {/* Reset */}
-      <button className="graph-ctrl-btn" onClick={onResetView} title="Reset Position & Zoom">
+      <button className="graph-ctrl-btn" onClick={onResetView} title="Reset View (Center & Zoom 100%)" aria-label="Reset View" type="button">
         <RefreshCw size={14} />
       </button>
     </div>

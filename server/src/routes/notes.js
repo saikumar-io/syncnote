@@ -144,8 +144,20 @@ router.post('/', async (req, res) => {
     }
     const finalTitle = (typeof title === 'string' && title.trim().length > 0) ? title.trim() : 'Untitled Note';
     const finalContent = typeof content === 'string' ? content : '';
-    const finalNotebookId = notebook_id || null;
+    const finalNotebookId = (notebook_id && notebook_id !== 'none') ? notebook_id : null;
     const finalSyncMode = ['local', 'google', 'cloud', 'lan', 'both'].includes(sync_mode) ? (sync_mode === 'google' ? 'cloud' : sync_mode) : 'local';
+
+    // Enforce uniqueness before touching disk or creating note
+    const duplicate = NoteModel.findByNameInLocation(finalTitle, finalNotebookId, req.user.id);
+    if (duplicate) {
+      const suggestedTitle = NoteModel.generateSuggestedTitle(finalTitle, finalNotebookId, req.user.id);
+      return res.status(409).json({
+        status: 'error',
+        code: 'DUPLICATE_NOTE_NAME',
+        message: `A note named '${finalTitle}' already exists in this folder.`,
+        suggestedTitle
+      });
+    }
 
     const nbName = getNotebookName(finalNotebookId, req.user.id);
     const filePath = getNoteFilePath(finalTitle, nbName);
@@ -175,22 +187,40 @@ router.post('/', async (req, res) => {
     SessionModel.upsert(id, v1Id, contentHash, 'clean', req.user.id);
     const sessionInfo = getNoteSessionInfo(newMeta, finalContent, req.user.id);
 
+    let gdriveSyncSuccess = false;
     // If sync_mode === 'google' or 'cloud' or 'both', attempt Google Drive sync upload
     if (finalSyncMode === 'google' || finalSyncMode === 'cloud' || finalSyncMode === 'both') {
       try {
-        await uploadNoteToGoogleDrive(req.user.id, newMeta, finalContent);
+        const gRes = await uploadNoteToGoogleDrive(req.user.id, newMeta, finalContent);
+        if (gRes && gRes.success) {
+          gdriveSyncSuccess = true;
+        }
       } catch (gErr) {
         console.warn(`[Note POST] Google Drive sync note notice: ${gErr.message}`);
       }
     }
 
-    // Enqueue for Sync Engine
-    SyncQueueModel.enqueue({
-      entityType: 'NOTE',
-      entityId: id,
-      operation: 'CREATE_NOTE',
-      payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode }
-    });
+    if (finalSyncMode === 'cloud' || finalSyncMode === 'google') {
+      if (gdriveSyncSuccess) {
+        SyncQueueModel.markSyncedForEntity('NOTE', id, req.user.id);
+      } else {
+        SyncQueueModel.enqueue({
+          entityType: 'NOTE',
+          entityId: id,
+          operation: 'CREATE_NOTE',
+          payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode },
+          userId: req.user.id
+        });
+      }
+    } else if (finalSyncMode !== 'local') {
+      SyncQueueModel.enqueue({
+        entityType: 'NOTE',
+        entityId: id,
+        operation: 'CREATE_NOTE',
+        payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode },
+        userId: req.user.id
+      });
+    }
 
     res.status(201).json({ 
       status: 'success', 
@@ -198,6 +228,14 @@ router.post('/', async (req, res) => {
       data: { ...newMeta, content: finalContent, session_info: sessionInfo } 
     });
   } catch (error) {
+    if (error.code === 'DUPLICATE_NOTE_NAME') {
+      return res.status(409).json({
+        status: 'error',
+        code: 'DUPLICATE_NOTE_NAME',
+        message: error.message,
+        suggestedTitle: error.suggestedTitle
+      });
+    }
     console.error('Error creating note:', error);
     res.status(500).json({ status: 'error', message: 'Failed to create note' });
   }
@@ -210,13 +248,14 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    let { title, content, notebook_id, sync_mode, current_version_id } = req.body || {};
+    let { title, content, notebook_id, sync_mode, current_version_id, is_favorite } = req.body || {};
 
     if (typeof title === 'object' && title !== null) {
       notebook_id = title.notebook_id !== undefined ? title.notebook_id : notebook_id;
       content = title.content !== undefined ? title.content : content;
       sync_mode = title.sync_mode !== undefined ? title.sync_mode : sync_mode;
       current_version_id = title.current_version_id !== undefined ? title.current_version_id : current_version_id;
+      is_favorite = title.is_favorite !== undefined ? title.is_favorite : is_favorite;
       title = title.title;
     }
 
@@ -225,10 +264,25 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'Note not found or access denied' });
     }
 
-    const finalTitle = (typeof title === 'string') ? title : existing.title;
+    const finalTitle = (typeof title === 'string') ? title.trim() : existing.title;
     const finalContent = (typeof content === 'string') ? content : readNoteFile(existing.file_path);
-    const finalNotebookId = notebook_id !== undefined ? notebook_id : existing.notebook_id;
+    const finalNotebookId = notebook_id !== undefined ? (notebook_id === 'none' ? null : notebook_id) : existing.notebook_id;
     const finalSyncMode = sync_mode !== undefined ? (['local', 'google', 'cloud', 'lan', 'both'].includes(sync_mode) ? (sync_mode === 'google' ? 'cloud' : sync_mode) : existing.sync_mode) : existing.sync_mode;
+    const finalIsFavorite = is_favorite !== undefined ? (is_favorite ? 1 : 0) : (existing.is_favorite || 0);
+
+    // Enforce uniqueness if renaming or moving folder
+    if (finalTitle && (finalTitle.toLowerCase() !== existing.title.toLowerCase() || finalNotebookId !== existing.notebook_id)) {
+      const duplicate = NoteModel.findByNameInLocation(finalTitle, finalNotebookId, req.user.id, id);
+      if (duplicate) {
+        const suggestedTitle = NoteModel.generateSuggestedTitle(finalTitle, finalNotebookId, req.user.id);
+        return res.status(409).json({
+          status: 'error',
+          code: 'DUPLICATE_NOTE_NAME',
+          message: `A note named '${finalTitle}' already exists in this folder.`,
+          suggestedTitle
+        });
+      }
+    }
 
     let latestVersion = VersionModel.getLatestForNote(id, req.user.id);
     let finalVersion = current_version_id !== undefined
@@ -270,30 +324,57 @@ router.put('/:id', async (req, res) => {
 
     const newHash = calculateHash(finalContent);
 
-    const updatedMeta = NoteModel.update(id, finalTitle, targetFilePath, finalNotebookId, newHash, finalVersion, req.user.id, finalSyncMode);
+    const updatedMeta = NoteModel.update(id, finalTitle, targetFilePath, finalNotebookId, newHash, finalVersion, req.user.id, finalSyncMode, finalIsFavorite);
 
     const isClean = latestVersion ? (newHash === latestVersion.content_hash) : (finalContent.trim().length === 0);
     SessionModel.upsert(id, finalVersion, newHash, 'clean', req.user.id);
     const sessionInfo = getNoteSessionInfo(updatedMeta, finalContent, req.user.id);
 
-    // If note is or became cloud or both mode, sync upload to Google Drive
-    if (finalSyncMode === 'cloud' || finalSyncMode === 'google' || finalSyncMode === 'both') {
-      try {
-        await uploadNoteToGoogleDrive(req.user.id, updatedMeta, finalContent);
-      } catch (gErr) {
-        console.warn(`[Note PUT] Google Drive sync note notice: ${gErr.message}`);
+    // Handle sync queue and cloud upload based on sync_mode
+    if (finalSyncMode === 'local') {
+      // Invalidate any stale sync queue operations for this note since it is now LOCAL-only
+      SyncQueueModel.invalidateForEntity('NOTE', id, req.user.id);
+    } else {
+      let gdriveSyncSuccess = false;
+      // If note is or became cloud or both mode, sync upload to Google Drive
+      if (finalSyncMode === 'cloud' || finalSyncMode === 'google' || finalSyncMode === 'both') {
+        try {
+          const gRes = await uploadNoteToGoogleDrive(req.user.id, updatedMeta, finalContent);
+          if (gRes && gRes.success) {
+            gdriveSyncSuccess = true;
+          }
+        } catch (gErr) {
+          console.warn(`[Note PUT] Google Drive sync note notice: ${gErr.message}`);
+        }
+      }
+
+      if (finalSyncMode === 'cloud' || finalSyncMode === 'google') {
+        if (gdriveSyncSuccess) {
+          // Success! Clear any pending operation for this note immediately
+          SyncQueueModel.markSyncedForEntity('NOTE', id, req.user.id);
+        } else {
+          // Sync failed or pending: enqueue for retry
+          SyncQueueModel.enqueue({
+            entityType: 'NOTE',
+            entityId: id,
+            operation: 'UPDATE_NOTE',
+            payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode },
+            userId: req.user.id
+          });
+        }
+      } else {
+        // Mode is 'lan' or 'both'
+        SyncQueueModel.enqueue({
+          entityType: 'NOTE',
+          entityId: id,
+          operation: 'UPDATE_NOTE',
+          payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode },
+          userId: req.user.id
+        });
       }
     }
 
     const freshNoteMeta = NoteModel.getById(id, req.user.id) || updatedMeta;
-
-    // Enqueue for Sync Engine (Coalesced update operation)
-    SyncQueueModel.enqueue({
-      entityType: 'NOTE',
-      entityId: id,
-      operation: 'UPDATE_NOTE',
-      payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode }
-    });
 
     res.json({ 
       status: 'success', 
@@ -301,8 +382,35 @@ router.put('/:id', async (req, res) => {
       data: { ...freshNoteMeta, content: finalContent, session_info: sessionInfo } 
     });
   } catch (error) {
+    if (error.code === 'DUPLICATE_NOTE_NAME') {
+      return res.status(409).json({
+        status: 'error',
+        code: 'DUPLICATE_NOTE_NAME',
+        message: error.message,
+        suggestedTitle: error.suggestedTitle
+      });
+    }
     console.error('Error updating note:', error);
     res.status(500).json({ status: 'error', message: 'Failed to update note' });
+  }
+});
+
+/**
+ * @route   PUT /api/notes/:id/favorite
+ * @desc    Toggle or set favorite / pinned status for note
+ */
+router.put('/:id/favorite', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_favorite } = req.body || {};
+    const updated = NoteModel.toggleFavorite(id, req.user.id, is_favorite);
+    if (!updated) {
+      return res.status(404).json({ status: 'error', message: 'Note not found or access denied' });
+    }
+    res.json({ status: 'success', data: updated });
+  } catch (error) {
+    console.error('Error toggling favorite:', error);
+    res.status(500).json({ status: 'error', message: 'Failed to toggle favorite' });
   }
 });
 
@@ -322,13 +430,19 @@ router.delete('/:id', (req, res) => {
     deleteNoteFile(existing.file_path);
     NoteModel.delete(id, req.user.id);
 
-    // Enqueue for Sync Engine
-    SyncQueueModel.enqueue({
-      entityType: 'NOTE',
-      entityId: id,
-      operation: 'DELETE_NOTE',
-      payload: { id }
-    });
+    // Invalidate any existing sync operations for this note
+    SyncQueueModel.invalidateForEntity('NOTE', id, req.user.id);
+
+    // Only enqueue DELETE_NOTE for sync engine if the deleted note was sync-enabled (not local)
+    if (existing.sync_mode !== 'local') {
+      SyncQueueModel.enqueue({
+        entityType: 'NOTE',
+        entityId: id,
+        operation: 'DELETE_NOTE',
+        payload: { id, sync_mode: existing.sync_mode },
+        userId: req.user.id
+      });
+    }
 
     res.json({ 
       status: 'success', 

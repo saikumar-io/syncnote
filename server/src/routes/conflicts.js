@@ -16,7 +16,8 @@ router.get('/status', async (req, res) => {
   try {
     const userId = req.user ? req.user.id : 'usr_local_default';
     const unresolved = ConflictModel.getUnresolved(userId);
-    const ollamaHealth = await checkOllamaHealth();
+    const force = req.query.force === 'true';
+    const ollamaHealth = await checkOllamaHealth(force);
 
     return res.json({
       status: 'ok',

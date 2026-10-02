@@ -11,10 +11,16 @@ export default function CreateNoteModal({
 }) {
   const [title, setTitle] = useState('');
   const [selectedNotebookId, setSelectedNotebookId] = useState('none');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [suggestedTitle, setSuggestedTitle] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setTitle('');
+      setErrorMessage('');
+      setSuggestedTitle('');
+      setIsSubmitting(false);
       setSelectedNotebookId(defaultNotebookId || 'none');
       document.body.style.overflow = 'hidden';
     } else {
@@ -39,13 +45,34 @@ export default function CreateNoteModal({
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    const trimmedTitle = title.trim() || 'Untitled Note';
     const finalNotebookId = selectedNotebookId === 'none' ? null : selectedNotebookId;
-    onCreate({ title: title.trim() || 'Untitled Note', notebook_id: finalNotebookId });
-    setTitle('');
-    setSelectedNotebookId('none');
-    onClose();
+    setErrorMessage('');
+    setSuggestedTitle('');
+    setIsSubmitting(true);
+
+    try {
+      if (onCreate) {
+        await onCreate({ title: trimmedTitle, notebook_id: finalNotebookId });
+      }
+      setTitle('');
+      setSelectedNotebookId('none');
+      onClose();
+    } catch (err) {
+      const errData = err.data || {};
+      if (err.status === 409 || errData.code === 'DUPLICATE_NOTE_NAME') {
+        setErrorMessage(errData.message || `A note named '${trimmedTitle}' already exists in this folder.`);
+        if (errData.suggestedTitle) {
+          setSuggestedTitle(errData.suggestedTitle);
+        }
+      } else {
+        setErrorMessage(err.message || 'Failed to create note');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   // Dynamically map notebooks array from application state/API
@@ -77,6 +104,51 @@ export default function CreateNoteModal({
         </div>
 
         <form onSubmit={handleSubmit} className="modal-body">
+          {errorMessage && (
+            <div 
+              className="duplicate-note-error-callout"
+              style={{
+                backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                borderRadius: '6px',
+                padding: '10px 12px',
+                color: '#ef4444',
+                fontSize: '0.84rem',
+                marginBottom: '14px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px'
+              }}
+            >
+              <div>{errorMessage}</div>
+              {suggestedTitle && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '2px' }}>
+                  <span style={{ color: 'var(--text-secondary, #94a3b8)', fontSize: '0.8rem' }}>Suggested name:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTitle(suggestedTitle);
+                      setErrorMessage('');
+                      setSuggestedTitle('');
+                    }}
+                    style={{
+                      background: 'rgba(59, 130, 246, 0.15)',
+                      border: '1px solid rgba(59, 130, 246, 0.35)',
+                      borderRadius: '4px',
+                      padding: '2px 8px',
+                      color: '#3b82f6',
+                      fontSize: '0.8rem',
+                      cursor: 'pointer',
+                      fontWeight: 500
+                    }}
+                  >
+                    Use "{suggestedTitle}"
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="form-group">
             <label className="form-label">Note Name</label>
             <input
@@ -84,7 +156,13 @@ export default function CreateNoteModal({
               className="modal-input"
               placeholder="e.g. Database Management Systems"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                if (errorMessage) {
+                  setErrorMessage('');
+                  setSuggestedTitle('');
+                }
+              }}
               autoFocus
             />
           </div>
@@ -94,16 +172,22 @@ export default function CreateNoteModal({
             <CustomSelect
               value={selectedNotebookId}
               options={notebookOptions}
-              onChange={setSelectedNotebookId}
+              onChange={(val) => {
+                setSelectedNotebookId(val);
+                if (errorMessage) {
+                  setErrorMessage('');
+                  setSuggestedTitle('');
+                }
+              }}
             />
           </div>
 
           <div className="modal-footer">
-            <button type="button" className="secondary-action-btn" onClick={onClose}>
+            <button type="button" className="secondary-action-btn" onClick={onClose} disabled={isSubmitting}>
               Cancel
             </button>
-            <button type="submit" className="primary-action-btn">
-              Create Note
+            <button type="submit" className="primary-action-btn" disabled={isSubmitting}>
+              {isSubmitting ? 'Creating...' : 'Create Note'}
             </button>
           </div>
         </form>

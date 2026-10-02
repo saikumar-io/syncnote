@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Edit2, Star, Trash2, Folder, RefreshCw, ChevronRight, FileText, History, Check } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Edit2, Star, Trash2, Folder, RefreshCw, ChevronRight, FileText, History, Check, Copy } from 'lucide-react';
 
 export default function NoteContextMenu({
   note,
@@ -23,10 +24,19 @@ export default function NoteContextMenu({
         onClose();
       }
     };
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
     if (isOpen) {
       document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('keydown', handleKeyDown);
     }
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [isOpen, onClose]);
 
   if (!isOpen || !note) return null;
@@ -40,25 +50,41 @@ export default function NoteContextMenu({
     }
   };
 
-  return (
-    <div
-      ref={menuRef}
-      className="context-menu-popover"
-      style={{ top: position.y, left: position.x }}
-      onClick={(e) => e.stopPropagation()}
-    >
-      {onOpen && (
-        <div
-          className="context-menu-item"
-          onClick={() => {
-            onClose();
-            onOpen(note);
-          }}
-        >
-          <FileText size={13} />
-          <span>Open</span>
-        </div>
-      )}
+  const posX = position ? position.x : 0;
+  const posY = position ? position.y : 0;
+  const clampedX = Math.max(12, Math.min(posX, window.innerWidth - 220));
+  const clampedY = Math.max(12, Math.min(posY, window.innerHeight - 340));
+
+  return createPortal(
+    <>
+      <div 
+        className="portal-menu-backdrop" 
+        onClick={onClose}
+        onContextMenu={(e) => { e.preventDefault(); onClose(); }}
+      />
+      <div
+        ref={menuRef}
+        className="context-menu-popover floating-portal-menu"
+        style={{
+          position: 'fixed',
+          top: `${clampedY}px`,
+          left: `${clampedX}px`,
+          zIndex: 'var(--z-dropdown, 1000)'
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {onOpen && (
+          <div
+            className="context-menu-item"
+            onClick={() => {
+              onClose();
+              onOpen(note);
+            }}
+          >
+            <FileText size={13} />
+            <span>Open</span>
+          </div>
+        )}
 
       <div
         className="context-menu-item"
@@ -79,10 +105,29 @@ export default function NoteContextMenu({
             onFavorite(note);
           }}
         >
-          <Star size={13} style={{ color: note.is_favorite ? 'var(--accent-warning)' : 'inherit' }} />
-          <span>{note.is_favorite ? 'Unfavorite' : 'Favorite'}</span>
+          <Star 
+            size={13} 
+            style={{ 
+              color: note.is_favorite ? '#eab308' : 'inherit',
+              fill: note.is_favorite ? '#eab308' : 'none'
+            }} 
+          />
+          <span>{note.is_favorite ? 'Unpin from Favorites' : 'Pin to Favorites'}</span>
         </div>
       )}
+
+      <div
+        className="context-menu-item"
+        onClick={() => {
+          onClose();
+          if (note?.file_path) {
+            navigator.clipboard.writeText(note.file_path);
+          }
+        }}
+      >
+        <Copy size={13} />
+        <span>Copy Local Path</span>
+      </div>
 
       <div
         className="context-menu-item"
@@ -173,5 +218,7 @@ export default function NoteContextMenu({
         <span>Delete</span>
       </div>
     </div>
-  );
+  </>,
+  document.body
+);
 }

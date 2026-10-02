@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { useNavigate } from '../utils/router';
+import { useNavigate, useParams } from '../utils/router';
 import { 
   FileText, 
   Folder, 
@@ -9,16 +9,15 @@ import {
   MoreVertical, 
   Grid, 
   List, 
-  ChevronRight,
-  Trash2,
-  FolderPlus,
-  FolderInput,
-  Edit2,
-  Copy,
-  RefreshCw,
-  CheckSquare,
-  Square,
-  X
+  ChevronRight, 
+  ArrowLeft,
+  Trash2, 
+  FolderPlus, 
+  FolderInput, 
+  Edit2, 
+  Copy, 
+  CheckSquare, 
+  X 
 } from 'lucide-react';
 import { formatRelativeTime } from '../utils/timeUtils';
 import { getNotePath, getNotebookPath } from '../utils/pathUtils';
@@ -32,17 +31,21 @@ import { NoteSyncBadge } from '../components/NoteListColumn';
 export default function NotesPage({ 
   notes = [], 
   notebooks = [], 
+  folderId: propFolderId,
   onCreateNote, 
   onToggleFavorite, 
-  onRequestDeleteNote,
-  searchQuery = '',
-  onCreateNotebook,
-  onDeleteNotebook,
-  onUpdateNote
+  onRequestDeleteNote, 
+  searchQuery = '', 
+  onCreateNotebook, 
+  onDeleteNotebook, 
+  onUpdateNote 
 }) {
   const navigate = useNavigate();
+  const params = useParams();
 
-  const [currentFolderId, setCurrentFolderId] = useState(null); // null = root
+  // Active folder is determined by route param or prop (null = root)
+  const currentFolderId = propFolderId !== undefined ? propFolderId : (params.folderId || null);
+
   const [localSearch, setLocalSearch] = useState('');
   const [activeMenuKey, setActiveMenuKey] = useState(null); // 'folder-id' or 'note-id'
 
@@ -66,10 +69,10 @@ export default function NotesPage({
 
   // Modals state
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [moveNoteTarget, setMoveNoteTarget] = useState(null); // note to move
-  const [deleteNotebookTarget, setDeleteNotebookTarget] = useState(null); // folder to delete
-  const [dragOverFolderId, setDragOverFolderId] = useState(null); // folder ID being hovered over
-  
+  const [moveNoteTarget, setMoveNoteTarget] = useState(null);
+  const [deleteNotebookTarget, setDeleteNotebookTarget] = useState(null);
+  const [dragOverFolderId, setDragOverFolderId] = useState(null);
+
   // Multi-select & Sync Mode states
   const [selectedNoteIds, setSelectedNoteIds] = useState([]);
   const [syncModeModalState, setSyncModeModalState] = useState({ isOpen: false, note: null, targetMode: null });
@@ -98,9 +101,39 @@ export default function NotesPage({
     );
   };
 
+  // Current folder object
   const currentFolder = useMemo(() => {
+    if (!currentFolderId) return null;
     return notebooks.find((nb) => nb.id === currentFolderId) || null;
   }, [notebooks, currentFolderId]);
+
+  // Clickable Breadcrumbs Chain (Hierarchy)
+  const breadcrumbChain = useMemo(() => {
+    if (!currentFolderId) return [];
+    const chain = [];
+    let curr = notebooks.find((nb) => nb.id === currentFolderId);
+    const visited = new Set();
+    while (curr && !visited.has(curr.id)) {
+      visited.add(curr.id);
+      chain.unshift(curr);
+      if (curr.parent_id) {
+        curr = notebooks.find((nb) => nb.id === curr.parent_id);
+      } else {
+        break;
+      }
+    }
+    return chain;
+  }, [notebooks, currentFolderId]);
+
+  // Back button handler
+  const handleGoBack = () => {
+    if (breadcrumbChain.length > 1) {
+      const parentFolder = breadcrumbChain[breadcrumbChain.length - 2];
+      navigate(`/notes/folder/${parentFolder.id}`);
+    } else {
+      navigate('/notes');
+    }
+  };
 
   // Combined Search filter
   const activeSearch = (localSearch || searchQuery).trim().toLowerCase();
@@ -133,16 +166,15 @@ export default function NotesPage({
     });
   }, [folderNotes, sortBy]);
 
-  // Favorites
-  const favoriteNotes = useMemo(() => {
-    if (currentFolderId || activeSearch) return [];
-    return notes.filter((n) => n.is_favorite);
-  }, [notes, currentFolderId, activeSearch]);
-
-  // Root level folders
+  // Folders to display at this level
   const displayFolders = useMemo(() => {
-    if (currentFolderId || activeSearch) return [];
-    return notebooks;
+    if (activeSearch) return [];
+    if (!currentFolderId) {
+      // Root folders: any folder with no parent_id
+      return notebooks.filter((nb) => !nb.parent_id);
+    }
+    // Subfolders: child folders whose parent_id matches currentFolderId
+    return notebooks.filter((nb) => nb.parent_id === currentFolderId);
   }, [notebooks, currentFolderId, activeSearch]);
 
   // Count notes inside a folder
@@ -150,7 +182,7 @@ export default function NotesPage({
     return notes.filter((n) => n.notebook_id === folderId).length;
   };
 
-  // Shared note move handler (used by both Context Menu and Drag & Drop)
+  // Shared note move handler
   const handleMoveNote = (noteId, targetNotebookId) => {
     if (onUpdateNote) {
       onUpdateNote(noteId, { notebook_id: targetNotebookId });
@@ -178,13 +210,8 @@ export default function NotesPage({
   const handleRenameNotebook = (folder) => {
     const newName = prompt('Enter new notebook name:', folder.name || '');
     if (newName && newName.trim() && newName.trim() !== folder.name) {
-      if (onUpdateNote) {
-        // We re-use the notebooks API via App.jsx; call notebooksApi.rename via onRenameNotebook if provided
-      }
-      // Direct: call the API and reload (handled via notebooksApi in App.jsx)
       import('../api/notebooksApi').then(({ notebooksApi }) => {
         notebooksApi.rename(folder.id, newName.trim()).then(() => {
-          // Fire notes-updated so App.jsx reloads notebooks
           window.dispatchEvent(new CustomEvent('syncnote:notes-updated'));
         }).catch(err => {
           console.error('[Notebook Rename Error]', err);
@@ -197,12 +224,14 @@ export default function NotesPage({
 
   // Safe Notebook Deletion
   const handleDeleteNotebookClick = (folder) => {
-    // Always show confirmation modal (even for empty notebooks, for safety)
     setDeleteNotebookTarget(folder);
   };
 
   const confirmDeleteNotebookWithNotes = (folderId) => {
     if (onDeleteNotebook) onDeleteNotebook(folderId);
+    if (currentFolderId === folderId) {
+      navigate('/notes');
+    }
   };
 
   // Drag & Drop handlers
@@ -234,24 +263,61 @@ export default function NotesPage({
       {/* Top Header & Search Bar */}
       <div className="page-header-bar">
         <div>
-          {/* Breadcrumb Navigation */}
-          <div className="breadcrumb-nav-bar">
+          {/* Breadcrumb Navigation Bar */}
+          <div className="breadcrumb-nav-bar" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            {currentFolder && (
+              <button 
+                type="button"
+                className="icon-btn-ghost back-nav-btn"
+                onClick={handleGoBack}
+                title="Go back"
+                style={{
+                  marginRight: '6px',
+                  padding: '4px 8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  fontSize: '0.8rem',
+                  fontWeight: 600,
+                  color: 'var(--text-secondary)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--border-subtle)',
+                  background: 'var(--bg-surface)'
+                }}
+              >
+                <ArrowLeft size={13} />
+                <span>Back</span>
+              </button>
+            )}
+
             <span 
               className={`breadcrumb-item ${!currentFolder ? 'active' : ''}`}
-              onClick={() => setCurrentFolderId(null)}
+              onClick={() => navigate('/notes')}
+              style={{ cursor: currentFolder ? 'pointer' : 'default' }}
             >
               Notes
             </span>
-            {currentFolder && (
-              <>
-                <ChevronRight size={13} className="breadcrumb-separator" />
-                <span className="breadcrumb-item active">
-                  {currentFolder.name}
-                </span>
-              </>
-            )}
+
+            {breadcrumbChain.map((crumb, idx) => {
+              const isLast = idx === breadcrumbChain.length - 1;
+              return (
+                <React.Fragment key={crumb.id}>
+                  <ChevronRight size={13} className="breadcrumb-separator" />
+                  <span 
+                    className={`breadcrumb-item ${isLast ? 'active' : ''}`}
+                    onClick={() => !isLast && navigate(`/notes/folder/${crumb.id}`)}
+                    style={{ cursor: isLast ? 'default' : 'pointer' }}
+                  >
+                    {crumb.name}
+                  </span>
+                </React.Fragment>
+              );
+            })}
           </div>
-          <p className="page-subheading">Your workspace file explorer</p>
+
+          <p className="page-subheading">
+            {currentFolder ? `Folder: ${currentFolder.name}` : 'Your workspace file explorer'}
+          </p>
         </div>
 
         <div className="page-header-actions">
@@ -261,7 +327,7 @@ export default function NotesPage({
             <input
               type="text"
               className="header-search-input"
-              placeholder="Search notes..."
+              placeholder={currentFolder ? `Search in ${currentFolder.name}...` : 'Search notes...'}
               value={localSearch}
               onChange={(e) => setLocalSearch(e.target.value)}
             />
@@ -293,18 +359,20 @@ export default function NotesPage({
             </button>
           </div>
 
-          {/* Create Folder Button (Secondary Action) */}
-          {onCreateNotebook && !currentFolderId && (
+          {/* Create Folder Button */}
+          {onCreateNotebook && (
             <button 
               className="secondary-action-btn"
               onClick={() => {
-                const name = prompt('Enter new notebook name:');
-                if (name && name.trim()) onCreateNotebook(name.trim());
+                const name = prompt(currentFolder ? `Enter new subfolder name inside "${currentFolder.name}":` : 'Enter new notebook name:');
+                if (name && name.trim()) {
+                  onCreateNotebook(name.trim(), currentFolderId);
+                }
               }}
-              title="New Notebook"
+              title={currentFolder ? 'New Subfolder' : 'New Notebook'}
             >
               <FolderPlus size={14} />
-              <span>New Notebook</span>
+              <span>{currentFolder ? 'New Subfolder' : 'New Notebook'}</span>
             </button>
           )}
 
@@ -348,51 +416,15 @@ export default function NotesPage({
       {/* Main File Explorer Viewport */}
       <div className="file-explorer-viewport">
 
-        {/* 1. FAVORITES SECTION */}
-        {favoriteNotes.length > 0 && (
-          <div className="explorer-section">
-            <div className="explorer-section-header">
-              <div className="section-title-group">
-                <Star size={13} className="section-header-icon star" />
-                <span className="section-title-text">Favorites</span>
-              </div>
-              <span className="section-count-badge">{favoriteNotes.length}</span>
-            </div>
-
-            <div className={viewMode === 'grid' ? 'wide-tile-grid' : 'file-list-view'}>
-              {favoriteNotes.map((note) => (
-                <NoteTile 
-                  key={`fav-${note.id}`}
-                  note={note}
-                  notebooks={notebooks}
-                  viewMode={viewMode}
-                  isSelected={selectedNoteIds.includes(note.id)}
-                  onToggleSelect={(e) => toggleSelectNote(e, note.id)}
-                  onRequestSyncModeChange={handleRequestSyncModeChange}
-                  onOpen={() => navigate(`/notes/${note.id}`)}
-                  onToggleFavorite={() => onToggleFavorite(note)}
-                  onRename={() => handleRenameNote(note)}
-                  onDuplicate={() => handleDuplicateNote(note)}
-                  onMoveNote={() => setMoveNoteTarget(note)}
-                  onDelete={() => onRequestDeleteNote(note)}
-                  isMenuOpen={activeMenuKey === `fav-${note.id}`}
-                  onToggleMenu={(e) => {
-                    e.stopPropagation();
-                    setActiveMenuKey(activeMenuKey === `fav-${note.id}` ? null : `fav-${note.id}`);
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* 2. FOLDERS / NOTEBOOKS SECTION */}
+        {/* 1. FOLDERS / SUBFOLDERS SECTION */}
         {displayFolders.length > 0 && (
           <div className="explorer-section">
             <div className="explorer-section-header">
               <div className="section-title-group">
                 <Folder size={13} className="section-header-icon folder" />
-                <span className="section-title-text">Folders / Notebooks</span>
+                <span className="section-title-text">
+                  {currentFolder ? 'Subfolders' : 'Folders / Notebooks'}
+                </span>
               </div>
               <span className="section-count-badge">{displayFolders.length}</span>
             </div>
@@ -409,7 +441,7 @@ export default function NotesPage({
                     noteCount={count}
                     viewMode={viewMode}
                     isDragOver={isDragOver}
-                    onOpen={() => setCurrentFolderId(folder.id)}
+                    onOpen={() => navigate(`/notes/folder/${folder.id}`)}
                     onRename={() => { handleRenameNotebook(folder); setActiveMenuKey(null); }}
                     onDelete={() => handleDeleteNotebookClick(folder)}
                     onDragOver={(e) => handleDragOverFolder(e, folder.id)}
@@ -427,7 +459,7 @@ export default function NotesPage({
           </div>
         )}
 
-        {/* 3. NOTES SECTION */}
+        {/* 2. NOTES SECTION */}
         <div className="explorer-section">
           <div className="explorer-section-header">
             <div className="section-title-group">
@@ -442,7 +474,7 @@ export default function NotesPage({
           {sortedNotes.length === 0 ? (
             <div className="empty-file-tile-box">
               <FileText size={32} className="empty-icon" />
-              <h3>No notes in this notebook yet.</h3>
+              <h3>{currentFolder ? 'No notes in this folder yet.' : 'No notes in root workspace.'}</h3>
               <p>Create your first note to start writing in Markdown.</p>
               <button 
                 className="primary-action-btn" 
@@ -498,9 +530,9 @@ export default function NotesPage({
       <CreateNoteModal
         isOpen={isCreateModalOpen}
         onClose={() => setIsCreateModalOpen(false)}
-        onCreate={(data) => {
+        onCreate={async (data) => {
           if (onCreateNote) {
-            onCreateNote(data.title, data.notebook_id);
+            return await onCreateNote(data.title, data.notebook_id || currentFolderId);
           }
         }}
         notebooks={notebooks}
@@ -652,7 +684,21 @@ function NoteTile({
           <h4 className="wide-tile-title" title={note.title || 'Untitled Note'}>
             {note.title || 'Untitled Note'}
           </h4>
-          {note.is_favorite && <Star size={11} className="fav-pin-icon" />}
+          <button 
+            type="button"
+            className={`tile-star-btn ${note.is_favorite ? 'pinned' : ''}`}
+            onClick={(e) => { e.stopPropagation(); onToggleFavorite && onToggleFavorite(note); }}
+            title={note.is_favorite ? 'Pinned to Favorites (Click to unpin ★)' : 'Pin to Favorites (☆)'}
+            aria-label={note.is_favorite ? 'Unpin note from favorites' : 'Pin note to favorites'}
+          >
+            <Star 
+              size={12} 
+              style={{ 
+                color: note.is_favorite ? '#eab308' : 'var(--text-muted)',
+                fill: note.is_favorite ? '#eab308' : 'none'
+              }} 
+            />
+          </button>
         </div>
         <div className="wide-tile-subtext" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           <span>Updated {formatRelativeTime(note.updated_at)}</span>
@@ -689,6 +735,19 @@ function NoteTile({
               <FolderInput size={13} />
               <span>Move</span>
             </button>
+            <button 
+              className="dropdown-item-btn" 
+              onClick={(e) => {
+                e.stopPropagation();
+                if (note?.file_path) {
+                  navigator.clipboard.writeText(note.file_path);
+                }
+                onToggleMenu && onToggleMenu(e);
+              }}
+            >
+              <Copy size={13} />
+              <span>Copy Local Path</span>
+            </button>
             <button className="dropdown-item-btn" onClick={onDuplicate}>
               <Copy size={13} />
               <span>Duplicate</span>
@@ -716,8 +775,14 @@ function NoteTile({
             </button>
             <div style={{ borderTop: '1px solid var(--border-subtle)', margin: '4px 0' }} />
             <button className="dropdown-item-btn" onClick={onToggleFavorite}>
-              <Star size={13} />
-              <span>{note.is_favorite ? 'Unpin' : 'Pin'}</span>
+              <Star 
+                size={13} 
+                style={{ 
+                  color: note.is_favorite ? '#eab308' : 'inherit',
+                  fill: note.is_favorite ? '#eab308' : 'none'
+                }} 
+              />
+              <span>{note.is_favorite ? 'Unpin from Favorites' : 'Pin to Favorites'}</span>
             </button>
             <button className="dropdown-item-btn danger" onClick={onDelete}>
               <Trash2 size={13} />

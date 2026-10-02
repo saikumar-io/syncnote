@@ -8,8 +8,8 @@ export const notebooksApi = {
     return data?.data || [];
   },
 
-  async create(name) {
-    const data = await apiClient.post(API_BASE, { name });
+  async create(name, parent_id = null) {
+    const data = await apiClient.post(API_BASE, { name, parent_id });
     return data?.data;
   },
 

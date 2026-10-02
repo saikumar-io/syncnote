@@ -71,3 +71,5 @@ app.listen(PORT, HOST, () => {
   // Start background LAN UDP discovery service
   startLanDiscoveryService();
 });
+
+module.exports = app;

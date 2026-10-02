@@ -23,10 +23,15 @@ function httpRequest(options, postData = null, timeoutMs = 5000) {
   const targetPort = options.port || 5000;
   const targetPath = options.path || '/';
   const method = options.method || 'GET';
+  const quiet = Boolean(options.quiet);
 
-  console.log(`[LAN Transport] Connecting to ${cleanHostname}:${targetPort}${targetPath} via ${method} (timeout: ${timeoutMs}ms)...`);
+  if (!quiet) {
+    console.log(`[LAN Transport] Connecting to ${cleanHostname}:${targetPort}${targetPath} via ${method} (timeout: ${timeoutMs}ms)...`);
+  }
 
   return new Promise((resolve, reject) => {
+    let isTimedOut = false;
+
     const req = http.request({
       ...options,
       hostname: cleanHostname,
@@ -35,7 +40,9 @@ function httpRequest(options, postData = null, timeoutMs = 5000) {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        console.log(`[LAN Transport Success] Connected to ${cleanHostname}:${targetPort}${targetPath} (HTTP ${res.statusCode})`);
+        if (!quiet) {
+          console.log(`[LAN Transport Success] Connected to ${cleanHostname}:${targetPort}${targetPath} (HTTP ${res.statusCode})`);
+        }
         try {
           const parsed = JSON.parse(data);
           resolve({ status: res.statusCode, data: parsed });
@@ -46,13 +53,18 @@ function httpRequest(options, postData = null, timeoutMs = 5000) {
     });
 
     req.on('error', (err) => {
-      console.warn(`[LAN Transport Failure] Connection error to ${cleanHostname}:${targetPort}${targetPath}: ${err.message}`);
+      if (!isTimedOut && !quiet) {
+        console.warn(`[LAN Transport Failure] Connection error to ${cleanHostname}:${targetPort}${targetPath}: ${err.message}`);
+      }
       reject(err);
     });
 
     req.on('timeout', () => {
+      isTimedOut = true;
       req.destroy();
-      console.warn(`[LAN Transport Timeout] Connection timed out after ${timeoutMs}ms to ${cleanHostname}:${targetPort}${targetPath}`);
+      if (!quiet) {
+        console.warn(`[LAN Transport Timeout] Connection timed out after ${timeoutMs}ms to ${cleanHostname}:${targetPort}${targetPath}`);
+      }
       reject(new Error(`Connection timeout after ${timeoutMs}ms to ${cleanHostname}:${targetPort}`));
     });
 
@@ -283,11 +295,12 @@ async function sendEncryptedLanUnpair(remoteIp, remotePort = 5000, localProfile,
  * Heartbeat timeout: 2000ms.
  * Does NOT sync notes, versions, notebooks, or touch database.
  */
-async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfile, remoteDevice, localMetadata = {}) {
+async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfile, remoteDevice, localMetadata = {}, options = {}) {
   if (!remoteDevice.public_key) {
     return { ok: false, error: 'Missing public key' };
   }
 
+  const quiet = Boolean(options && options.quiet);
   const startTime = Date.now();
   try {
     const sessionKey = deriveSharedSessionKey(remoteDevice.public_key);
@@ -315,6 +328,7 @@ async function sendEncryptedLanHeartbeat(remoteIp, remotePort = 5000, localProfi
       port: remotePort,
       path: '/api/lan/heartbeat',
       method: 'POST',
+      quiet,
       headers: {
         'Content-Type': 'application/json'
       }

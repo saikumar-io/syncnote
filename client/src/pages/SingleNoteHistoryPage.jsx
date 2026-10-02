@@ -7,19 +7,27 @@ import {
   FileText, 
   CheckCircle2, 
   ChevronLeft, 
-  ChevronRight
+  ChevronRight,
+  GitCommit,
+  Hash,
+  Laptop,
+  FileDiff,
+  Clock,
+  Sparkles
 } from 'lucide-react';
-import { Link } from '../utils/router';
-import { formatRelativeTime } from '../utils/timeUtils';
+import { Link, useNavigate } from '../utils/router';
+import { formatRelativeTime, formatDateSafe } from '../utils/timeUtils';
 import { notesApi } from '../api/notesApi';
 
 export default function SingleNoteHistoryPage({ noteId, notes, onViewChanges, onViewVersion, onRestoreVersion }) {
   const [history, setHistory] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [activeMenuId, setActiveMenuId] = useState(null);
+  const [confirmRestoreVersion, setConfirmRestoreVersion] = useState(null);
 
   const scrollContainerRef = useRef(null);
   const note = notes.find((n) => n.id === noteId) || null;
+  const navigate = useNavigate();
 
   useEffect(() => {
     let isMounted = true;
@@ -29,7 +37,6 @@ export default function SingleNoteHistoryPage({ noteId, notes, onViewChanges, on
       try {
         const data = await notesApi.getHistory(noteId);
         if (isMounted) {
-          // Sort version history sequentially V1 -> V2 -> V3 -> V4...
           const sorted = [...(data || [])].sort((a, b) => a.version_number - b.version_number);
           setHistory(sorted);
         }
@@ -44,7 +51,6 @@ export default function SingleNoteHistoryPage({ noteId, notes, onViewChanges, on
     return () => { isMounted = false; };
   }, [noteId]);
 
-  // Enforce scrollLeft = 0 (V1 first) when history finishes loading
   useEffect(() => {
     if (!isLoading && history.length > 0 && scrollContainerRef.current) {
       scrollContainerRef.current.scrollLeft = 0;
@@ -53,145 +59,181 @@ export default function SingleNoteHistoryPage({ noteId, notes, onViewChanges, on
 
   const scrollLeft = () => {
     if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollBy({ left: -260, behavior: 'smooth' });
+      scrollContainerRef.current.scrollBy({ left: -280, behavior: 'smooth' });
     }
   };
 
   const scrollRight = () => {
     if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollBy({ left: 260, behavior: 'smooth' });
+      scrollContainerRef.current.scrollBy({ left: 280, behavior: 'smooth' });
     }
+  };
+
+  const handleExecuteRestore = (ver) => {
+    if (onRestoreVersion) {
+      onRestoreVersion(ver);
+    }
+    setConfirmRestoreVersion(null);
   };
 
   return (
     <div className="single-note-history-page page-container" onClick={() => setActiveMenuId(null)}>
-      {/* Top Header Navigation */}
-      <div className="page-nav-header">
-        <Link to={`/notes/${noteId}`} className="back-link-btn">
+      {/* Top Breadcrumb Header */}
+      <div className="history-top-header">
+        <Link to={`/notes/${noteId}`} className="history-back-link">
           <ArrowLeft size={14} />
-          <span>Back to Editor</span>
+          <span>Back to Note Editor</span>
         </Link>
+        <span className="history-header-divider">/</span>
+        <span className="history-header-title">Version History Timeline</span>
       </div>
 
-      {/* Note Header Title */}
-      <div className="single-history-title-section">
-        <div className="title-row">
-          <FileText size={18} className="title-icon" />
-          <h2 className="page-heading">{note ? note.title : 'Note History'}</h2>
+      {/* Note Hero Section */}
+      <div className="history-hero-section">
+        <div className="hero-title-row">
+          <div className="hero-icon-wrap">
+            <GitCommit size={20} />
+          </div>
+          <div>
+            <h2 className="hero-heading">{note ? note.title : 'Note History'}</h2>
+            <p className="hero-subtext">
+              Linear Git-inspired version control graph for <span className="mono-badge">{note ? `${note.title}.md` : noteId}</span>
+            </p>
+          </div>
         </div>
-        <p className="page-subheading">
-          Horizontal linear version map for <span className="mono-tag">{note ? `${note.title}.md` : noteId}</span>
-        </p>
+
+        <div className="hero-stats-row">
+          <div className="stat-pill">
+            <History size={12} />
+            <span>{history.length} Checkpoints Recorded</span>
+          </div>
+          {note?.content_hash && (
+            <div className="stat-pill">
+              <Hash size={12} />
+              <span>sha256: {note.content_hash.substring(0, 10)}...</span>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* HORIZONTAL VERSION MAP CONTAINER */}
-      <div className="horizontal-history-wrapper">
-        <div className="horizontal-history-header">
-          <span className="history-map-label">Linear Version Map</span>
-          <div className="scroll-controls">
-            <button className="icon-btn-ghost scroll-btn" onClick={scrollLeft} title="Scroll Left (V1)">
+      {/* Horizontal Linear Version Graph Viewport */}
+      <div className="history-timeline-outer-card">
+        <div className="timeline-dock-header">
+          <div className="dock-title-group">
+            <GitCommit size={14} className="text-primary" />
+            <span className="dock-label">Checkpoint Track (Chronological V1 → Latest)</span>
+          </div>
+          <div className="dock-scroll-controls">
+            <button className="icon-btn-ghost dock-btn" onClick={scrollLeft} title="Scroll Left (V1)">
               <ChevronLeft size={16} />
             </button>
-            <button className="icon-btn-ghost scroll-btn" onClick={scrollRight} title="Scroll Right (Latest)">
+            <button className="icon-btn-ghost dock-btn" onClick={scrollRight} title="Scroll Right (Latest)">
               <ChevronRight size={16} />
             </button>
           </div>
         </div>
 
         {isLoading ? (
-          <div className="loading-state">
-            <span>Loading version map...</span>
+          <div className="timeline-loading-state">
+            <History size={24} className="spin text-muted" />
+            <span>Loading version history checkpoints...</span>
           </div>
         ) : history.length === 0 ? (
-          <div className="empty-state-box">
+          <div className="timeline-empty-state">
             <History size={32} className="empty-icon" />
-            <p>No checkpoints created for this note yet.</p>
+            <h3>No Checkpoints Yet</h3>
+            <p>Save checkpoints in the editor to track historical changes and enable rollback.</p>
           </div>
         ) : (
-          <div className="horizontal-map-scroll-viewport" ref={scrollContainerRef}>
-            <div className="horizontal-timeline-track">
+          <div className="timeline-scroll-viewport" ref={scrollContainerRef}>
+            <div className="timeline-linear-track">
               {history.map((ver, idx) => {
                 const isCurrent = ver.id === note?.current_version_id;
                 const isLast = idx === history.length - 1;
-                const isMenuOpen = activeMenuId === ver.id;
 
                 return (
                   <React.Fragment key={ver.id}>
-                    {/* Compact Version Card */}
-                    <div 
-                      className={`horizontal-version-card ${isCurrent ? 'current' : ''}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveMenuId(isMenuOpen ? null : ver.id);
-                      }}
-                    >
-                      <div className="card-top-row">
-                        <span className="version-number-tag">● V{ver.version_number}</span>
+                    {/* Visual Checkpoint Card */}
+                    <div className={`timeline-checkpoint-node ${isCurrent ? 'current-active' : ''}`}>
+                      <div className="node-top-bar">
+                        <span className="node-version-badge">● V{ver.version_number}</span>
                         {isCurrent && (
-                          <span className="current-badge">
+                          <span className="current-live-badge">
                             <CheckCircle2 size={10} />
                             <span>CURRENT</span>
                           </span>
                         )}
                       </div>
 
-                      <span className="card-version-time">
-                        {formatRelativeTime(ver.created_at)}
-                      </span>
+                      <p className="node-message-text" title={ver.message || 'Snapshot'}>
+                        {ver.message || 'Snapshot checkpoint'}
+                      </p>
 
-                      {/* Popover Action Menu */}
-                      {isMenuOpen && (
-                        <div className="card-action-popover" onClick={(e) => e.stopPropagation()}>
-                          {onViewVersion && (
-                            <button 
-                              className="dropdown-item-btn"
-                              onClick={() => {
-                                setActiveMenuId(null);
-                                onViewVersion(ver);
-                              }}
-                              type="button"
-                            >
-                              <Eye size={13} />
-                              <span>View Version</span>
-                            </button>
-                          )}
+                      <div className="node-meta-cluster">
+                        <span className="node-time" title={formatDateSafe(ver.created_at)}>
+                          <Clock size={10} />
+                          {formatRelativeTime(ver.created_at)}
+                        </span>
+                        {ver.device_id && (
+                          <span className="node-device" title={`Device: ${ver.device_id}`}>
+                            <Laptop size={10} />
+                            {ver.device_id === 'local_device' ? 'Local Machine' : ver.device_id.substring(0, 12)}
+                          </span>
+                        )}
+                      </div>
 
-                          {onViewChanges && (
-                            <button 
-                              className="dropdown-item-btn"
-                              onClick={() => {
-                                setActiveMenuId(null);
-                                onViewChanges(ver);
-                              }}
-                              type="button"
-                            >
-                              <Eye size={13} />
-                              <span>View Changes</span>
-                            </button>
-                          )}
-
-                          {onRestoreVersion && !isCurrent && (
-                            <button 
-                              className="dropdown-item-btn restore"
-                              onClick={() => {
-                                setActiveMenuId(null);
-                                onRestoreVersion(ver);
-                              }}
-                              type="button"
-                            >
-                              <RotateCcw size={13} />
-                              <span>Restore Version</span>
-                            </button>
-                          )}
+                      {ver.content_hash && (
+                        <div className="node-hash-row">
+                          <Hash size={10} />
+                          <span>{ver.content_hash.substring(0, 8)}</span>
                         </div>
                       )}
+
+                      {/* Action Buttons */}
+                      <div className="node-action-bar">
+                        {onViewChanges && (
+                          <button
+                            type="button"
+                            className="node-action-btn"
+                            onClick={() => onViewChanges(ver)}
+                            title="View line diff changes in this checkpoint"
+                          >
+                            <FileDiff size={12} />
+                            <span>Diff</span>
+                          </button>
+                        )}
+
+                        {onViewVersion && (
+                          <button
+                            type="button"
+                            className="node-action-btn"
+                            onClick={() => onViewVersion(ver)}
+                            title="Preview historical version"
+                          >
+                            <Eye size={12} />
+                            <span>Preview</span>
+                          </button>
+                        )}
+
+                        {onRestoreVersion && !isCurrent && (
+                          <button
+                            type="button"
+                            className="node-action-btn restore"
+                            onClick={() => setConfirmRestoreVersion(ver)}
+                            title="Rollback note to this version"
+                          >
+                            <RotateCcw size={12} />
+                            <span>Restore</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
 
-                    {/* Horizontal Connector Arrow */}
+                    {/* Connector Arrow */}
                     {!isLast && (
-                      <div className="horizontal-connector-arrow">
-                        <div className="arrow-line" />
-                        <div className="arrow-head">▶</div>
+                      <div className="timeline-connector-element">
+                        <div className="connector-wire" />
+                        <span className="connector-arrowhead">▶</span>
                       </div>
                     )}
                   </React.Fragment>
@@ -201,6 +243,46 @@ export default function SingleNoteHistoryPage({ noteId, notes, onViewChanges, on
           </div>
         )}
       </div>
+
+      {/* Rollback Confirmation Modal */}
+      {confirmRestoreVersion && (
+        <div className="modal-backdrop" onClick={() => setConfirmRestoreVersion(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '440px' }}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <RotateCcw size={16} style={{ color: 'var(--accent-primary)' }} />
+                <h3 className="modal-title">Confirm Rollback</h3>
+              </div>
+            </div>
+
+            <div className="modal-body">
+              <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>
+                Restore note content to <strong style={{ color: 'var(--text-primary)' }}>Version V{confirmRestoreVersion.version_number}</strong> ({confirmRestoreVersion.message || 'Snapshot'})?
+              </p>
+              <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '8px' }}>
+                A new version checkpoint will be recorded so your history remains complete and non-destructive.
+              </p>
+
+              <div className="modal-footer" style={{ marginTop: '16px' }}>
+                <button
+                  type="button"
+                  className="secondary-action-btn"
+                  onClick={() => setConfirmRestoreVersion(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="primary-action-btn"
+                  onClick={() => handleExecuteRestore(confirmRestoreVersion)}
+                >
+                  Confirm Restore
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

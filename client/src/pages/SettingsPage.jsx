@@ -11,18 +11,23 @@ import {
   ShieldCheck, 
   Palette, 
   FileCode, 
-  BookOpen, 
   RefreshCw,
-  ChevronDown,
-  ChevronRight,
   LogOut,
   CheckCircle2,
   AlertCircle,
   Wifi,
-  WifiOff,
-  Laptop,
+  HardDrive,
+  Copy,
+  Check,
+  Sparkles,
+  Command,
+  HelpCircle,
   ArrowRight,
-  Link2
+  ExternalLink,
+  Laptop,
+  Folder,
+  Sliders,
+  Type
 } from 'lucide-react';
 
 export function GoogleDriveIcon({ size = 18 }) {
@@ -39,13 +44,32 @@ export function GoogleDriveIcon({ size = 18 }) {
 }
 
 export default function SettingsPage({ theme, setTheme }) {
-  const { user, device, isOffline, logout, refreshUser } = useAuth();
+  const { user, device, logout, refreshUser } = useAuth();
   const sync = useSync();
   const navigate = useNavigate();
-  const [syncingNow, setSyncingNow] = useState(false);
 
-  // Accordion state: default 'account' expanded
-  const [expandedSection, setExpandedSection] = useState('account');
+  // Active Category Section: 'general' | 'editor' | 'appearance' | 'sync' | 'ai' | 'storage' | 'shortcuts' | 'about'
+  const [activeTab, setActiveTab] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const search = window.location.search;
+      const hash = window.location.hash;
+      if (search.includes('tab=about') || hash.includes('about')) return 'about';
+      if (search.includes('tab=sync') || hash.includes('sync')) return 'sync';
+    }
+    return 'general';
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const search = window.location.search;
+      const hash = window.location.hash;
+      if (search.includes('tab=sync') || hash.includes('sync')) {
+        setActiveTab('sync');
+      } else if (search.includes('tab=about') || hash.includes('about')) {
+        setActiveTab('about');
+      }
+    }
+  }, []);
 
   // Password change state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -60,7 +84,30 @@ export default function SettingsPage({ theme, setTheme }) {
   const [profileSubmitting, setProfileSubmitting] = useState(false);
   const [profileMsg, setProfileMsg] = useState({ type: '', text: '' });
 
-  // Read authoritative sync state directly from SyncContext
+  // Storage and AI metrics
+  const [storagePath, setStoragePath] = useState(null);
+  const [copiedStorage, setCopiedStorage] = useState(false);
+  const [ollamaStatus, setOllamaStatus] = useState(null);
+  const [conflictMetrics, setConflictMetrics] = useState(null);
+  const [syncingNow, setSyncingNow] = useState(false);
+
+  // Editor preferences
+  const [editorFontSize, setEditorFontSize] = useState(() => localStorage.getItem('syncnote_font_size') || 'medium');
+  const [accentColor, setAccentColor] = useState(() => localStorage.getItem('syncnote_accent_color') || '#0070f3');
+
+  const handleFontSizeChange = (size) => {
+    setEditorFontSize(size);
+    localStorage.setItem('syncnote_font_size', size);
+    document.documentElement.setAttribute('data-font-size', size);
+  };
+
+  const handleAccentChange = (color) => {
+    setAccentColor(color);
+    localStorage.setItem('syncnote_accent_color', color);
+    document.documentElement.style.setProperty('--accent-primary', color);
+  };
+
+  // Authoritative sync state
   const googleAccountStatus = sync?.googleAccountStatus || { connected: false, email: null };
   const googleDriveStatus = sync?.googleDriveStatus || { connected: false, email: null, folderName: 'SyncNote' };
 
@@ -70,11 +117,26 @@ export default function SettingsPage({ theme, setTheme }) {
     }
     if (user?.username) setUsernameInput(user.username);
     if (device?.device_name) setDeviceNameInput(device.device_name);
-  }, [user, device, sync?.refreshSyncStatus]);
 
-  const toggleSection = (sectionId) => {
-    setExpandedSection((prev) => (prev === sectionId ? null : sectionId));
-  };
+    // Fetch dynamic storage location and AI status
+    apiClient.get('/api/health')
+      .then((data) => {
+        if (data && data.notes_dir) setStoragePath(data.notes_dir);
+      })
+      .catch(() => {});
+
+    apiClient.get('/api/conflicts/status')
+      .then((data) => {
+        if (data && data.ollama) setOllamaStatus(data.ollama);
+      })
+      .catch(() => {});
+
+    apiClient.get('/api/conflicts/metrics')
+      .then((data) => {
+        if (data && data.metrics) setConflictMetrics(data.metrics.summary);
+      })
+      .catch(() => {});
+  }, [user, device, sync?.refreshSyncStatus]);
 
   const hasPassword = Boolean(user?.hasPassword ?? user?.has_password);
 
@@ -84,11 +146,7 @@ export default function SettingsPage({ theme, setTheme }) {
       setPwdMsg({ type: 'error', text: 'Please enter your current password.' });
       return;
     }
-    if (!newPassword) {
-      setPwdMsg({ type: 'error', text: 'Please enter a new password.' });
-      return;
-    }
-    if (newPassword.length < 6) {
+    if (!newPassword || newPassword.length < 6) {
       setPwdMsg({ type: 'error', text: 'New password must be at least 6 characters long.' });
       return;
     }
@@ -106,14 +164,14 @@ export default function SettingsPage({ theme, setTheme }) {
         setPwdMsg({ type: 'success', text: 'Password updated successfully!' });
       } else {
         await authApi.setPassword({ newPassword, confirmPassword });
-        setPwdMsg({ type: 'success', text: 'Password configured successfully! You can now sign in with email and password or Google.' });
+        setPwdMsg({ type: 'success', text: 'Password configured successfully!' });
       }
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       await refreshUser();
     } catch (err) {
-      setPwdMsg({ type: 'error', text: err.message || (hasPassword ? 'Failed to update password.' : 'Failed to set password.') });
+      setPwdMsg({ type: 'error', text: err.message || 'Failed to update password.' });
     } finally {
       setPwdSubmitting(false);
     }
@@ -127,7 +185,7 @@ export default function SettingsPage({ theme, setTheme }) {
     try {
       await authApi.updateProfile({ username: usernameInput, deviceName: deviceNameInput });
       await refreshUser();
-      setProfileMsg({ type: 'success', text: 'Profile updated successfully!' });
+      setProfileMsg({ type: 'success', text: 'Profile saved successfully!' });
     } catch (err) {
       setProfileMsg({ type: 'error', text: err.message || 'Failed to update profile.' });
     } finally {
@@ -140,144 +198,197 @@ export default function SettingsPage({ theme, setTheme }) {
     navigate('/login');
   };
 
+  const copyPath = () => {
+    if (storagePath) {
+      navigator.clipboard.writeText(storagePath);
+      setCopiedStorage(true);
+      setTimeout(() => setCopiedStorage(false), 2000);
+    }
+  };
+
+  const accentOptions = [
+    { name: 'Electric Blue', color: '#0070f3' },
+    { name: 'Indigo Purple', color: '#6366f1' },
+    { name: 'Emerald Cyan', color: '#10b981' },
+    { name: 'Amber Gold', color: '#f59e0b' },
+    { name: 'Rose Coral', color: '#f43f5e' }
+  ];
+
   return (
-    <div className="settings-page-container page-container" style={{ maxWidth: '720px', margin: '0 auto', padding: '24px 16px' }}>
-      <div className="page-header-bar" style={{ marginBottom: '24px' }}>
-        <div>
-          <h1 className="page-heading">Settings</h1>
-          <p className="page-subheading">Configure workspace preferences, security credentials, and synchronization</p>
+    <div className="settings-page-wrapper">
+      {/* Settings Navigation Sidebar */}
+      <aside className="settings-nav-pane">
+        <div className="settings-pane-header">
+          <Sliders size={16} className="settings-header-icon" />
+          <h2 className="settings-header-title">Settings</h2>
         </div>
-      </div>
 
-      <div className="settings-accordion-list" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <nav className="settings-menu-list">
+          <button
+            type="button"
+            className={`settings-menu-item ${activeTab === 'general' ? 'active' : ''}`}
+            onClick={() => setActiveTab('general')}
+          >
+            <User size={15} />
+            <span>GENERAL</span>
+          </button>
+
+          <button
+            type="button"
+            className={`settings-menu-item ${activeTab === 'editor' ? 'active' : ''}`}
+            onClick={() => setActiveTab('editor')}
+          >
+            <FileCode size={15} />
+            <span>EDITOR</span>
+          </button>
+
+          <button
+            type="button"
+            className={`settings-menu-item ${activeTab === 'appearance' ? 'active' : ''}`}
+            onClick={() => setActiveTab('appearance')}
+          >
+            <Palette size={15} />
+            <span>APPEARANCE</span>
+          </button>
+
+          <button
+            type="button"
+            className={`settings-menu-item ${activeTab === 'sync' ? 'active' : ''}`}
+            onClick={() => setActiveTab('sync')}
+          >
+            <RefreshCw size={15} />
+            <span>SYNC</span>
+          </button>
+
+          <button
+            type="button"
+            className={`settings-menu-item ${activeTab === 'ai' ? 'active' : ''}`}
+            onClick={() => setActiveTab('ai')}
+          >
+            <Sparkles size={15} />
+            <span>AI / OLLAMA</span>
+          </button>
+
+          <button
+            type="button"
+            className={`settings-menu-item ${activeTab === 'storage' ? 'active' : ''}`}
+            onClick={() => setActiveTab('storage')}
+          >
+            <HardDrive size={15} />
+            <span>STORAGE</span>
+          </button>
+
+          <button
+            type="button"
+            className={`settings-menu-item ${activeTab === 'shortcuts' ? 'active' : ''}`}
+            onClick={() => setActiveTab('shortcuts')}
+          >
+            <Command size={15} />
+            <span>KEYBOARD SHORTCUTS</span>
+          </button>
+
+          <button
+            type="button"
+            className={`settings-menu-item ${activeTab === 'about' ? 'active' : ''}`}
+            onClick={() => setActiveTab('about')}
+            title="About SyncNote"
+          >
+            <HelpCircle size={15} />
+            <span>ABOUT SYNCNOTE</span>
+          </button>
+        </nav>
+      </aside>
+
+      {/* Settings Main Content Area */}
+      <main className="settings-content-viewport">
         
-        {/* 1. Account */}
-        <div className="settings-accordion-card">
-          <button
-            type="button"
-            className="settings-accordion-header"
-            onClick={() => toggleSection('account')}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <User size={16} className="accordion-icon" />
-              <span className="accordion-title">Account</span>
+        {/* 1. GENERAL / ACCOUNT SECTION */}
+        {activeTab === 'general' && (
+          <div className="settings-section-container">
+            <div className="section-title-wrap">
+              <h3 className="section-heading">General Settings</h3>
+              <p className="section-subtext">Manage your workspace identity, machine profile, and credentials</p>
             </div>
-            {expandedSection === 'account' ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          </button>
 
-          {expandedSection === 'account' && (
-            <div className="settings-accordion-body">
-              {user ? (
-                <form onSubmit={handleProfileUpdate} className="settings-form-block">
-                  {profileMsg.text && (
-                    <div className={`auth-error-banner ${profileMsg.type === 'success' ? 'success' : ''}`}>
-                      {profileMsg.type === 'success' ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
-                      <span>{profileMsg.text}</span>
-                    </div>
-                  )}
+            {profileMsg.text && (
+              <div className={`settings-banner ${profileMsg.type}`}>
+                {profileMsg.type === 'success' ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
+                <span>{profileMsg.text}</span>
+              </div>
+            )}
 
-                  <div className="setting-item-row">
-                    <div>
-                      <div className="setting-label">Username</div>
-                      <div className="setting-description">Your unique handle</div>
-                    </div>
-                    <input
-                      type="text"
-                      className="auth-input input-compact"
-                      style={{ width: '220px' }}
-                      value={usernameInput}
-                      onChange={(e) => setUsernameInput(e.target.value)}
-                      required
-                    />
-                  </div>
+            <form onSubmit={handleProfileUpdate} className="settings-card-group">
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Username</label>
+                  <span className="field-hint">Your unique workspace identifier</span>
+                </div>
+                <input
+                  type="text"
+                  className="settings-text-input"
+                  value={usernameInput}
+                  onChange={(e) => setUsernameInput(e.target.value)}
+                  required
+                />
+              </div>
 
-                  <div className="setting-item-row">
-                    <div>
-                      <div className="setting-label">Email Address</div>
-                      <div className="setting-description">Associated account email</div>
-                    </div>
-                    <span className="setting-value-tag">{user.email}</span>
-                  </div>
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Email Address</label>
+                  <span className="field-hint">Account recovery and Google Drive link</span>
+                </div>
+                <span className="readonly-badge">{user?.email || 'No email attached'}</span>
+              </div>
 
-                  <div className="setting-item-row">
-                    <div>
-                      <div className="setting-label">Device Name</div>
-                      <div className="setting-description">Identifier for this machine</div>
-                    </div>
-                    <input
-                      type="text"
-                      className="auth-input input-compact"
-                      style={{ width: '220px' }}
-                      value={deviceNameInput}
-                      onChange={(e) => setDeviceNameInput(e.target.value)}
-                    />
-                  </div>
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Device Name</label>
+                  <span className="field-hint">Human-readable label for P2P LAN sync discovery</span>
+                </div>
+                <input
+                  type="text"
+                  className="settings-text-input"
+                  value={deviceNameInput}
+                  onChange={(e) => setDeviceNameInput(e.target.value)}
+                />
+              </div>
 
-                  <div style={{ display: 'flex', justifyContent: 'flex-start', marginTop: '12px' }}>
-                    <button
-                      type="submit"
-                      className="btn-secondary"
-                      disabled={profileSubmitting}
-                    >
-                      {profileSubmitting ? 'Saving...' : 'Save Profile Changes'}
-                    </button>
-                  </div>
-                </form>
-              ) : (
-                <div className="setting-value-tag">Not signed in</div>
-              )}
-            </div>
-          )}
-        </div>
+              <div className="settings-card-actions">
+                <button type="submit" className="primary-action-btn" disabled={profileSubmitting}>
+                  {profileSubmitting ? 'Saving Changes...' : 'Save Profile Changes'}
+                </button>
+              </div>
+            </form>
 
-        {/* 2. Security */}
-        <div className="settings-accordion-card">
-          <button
-            type="button"
-            className="settings-accordion-header"
-            onClick={() => toggleSection('security')}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <ShieldCheck size={16} className="accordion-icon" />
-              <span className="accordion-title">
-                {hasPassword ? 'Security · Change Password' : 'Security · Set Password'}
-              </span>
-            </div>
-            {expandedSection === 'security' ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          </button>
+            {/* Security Subcard */}
+            <div className="settings-card-group" style={{ marginTop: '24px' }}>
+              <div className="subcard-header">
+                <ShieldCheck size={16} />
+                <h4 className="subcard-title">{hasPassword ? 'Change Password' : 'Set Password'}</h4>
+              </div>
 
-          {expandedSection === 'security' && (
-            <div className="settings-accordion-body">
               {!hasPassword && (
-                <div style={{
-                  padding: '10px 14px',
-                  marginBottom: '16px',
-                  borderRadius: 'var(--radius-sm)',
-                  backgroundColor: 'rgba(59, 130, 246, 0.08)',
-                  border: '1px solid rgba(59, 130, 246, 0.25)',
-                  color: 'var(--text-primary)',
-                  fontSize: '0.82rem',
-                  lineHeight: '1.4'
-                }}>
-                  <strong>Google Account Linked:</strong> You signed in using Google OAuth and do not currently have a password. Set a password below to enable signing in with your email address alongside Google.
+                <div className="settings-info-alert">
+                  <strong>Google Account Linked:</strong> You signed in via Google OAuth. Set a password to also allow email/password login.
                 </div>
               )}
 
-              <form onSubmit={handlePasswordChange} className="settings-form-block">
-                {pwdMsg.text && (
-                  <div className={`auth-error-banner ${pwdMsg.type === 'success' ? 'success' : ''}`}>
-                    {pwdMsg.type === 'success' ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
-                    <span>{pwdMsg.text}</span>
-                  </div>
-                )}
+              {pwdMsg.text && (
+                <div className={`settings-banner ${pwdMsg.type}`}>
+                  {pwdMsg.type === 'success' ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
+                  <span>{pwdMsg.text}</span>
+                </div>
+              )}
 
+              <form onSubmit={handlePasswordChange}>
                 {hasPassword && (
-                  <div className="form-group" style={{ marginBottom: '12px' }}>
-                    <label className="input-label">Current Password</label>
+                  <div className="settings-form-row">
+                    <div className="field-meta">
+                      <label className="field-title">Current Password</label>
+                    </div>
                     <input
                       type="password"
-                      className="auth-input input-compact"
-                      placeholder="Enter current password"
+                      className="settings-text-input"
                       value={currentPassword}
                       onChange={(e) => setCurrentPassword(e.target.value)}
                       required
@@ -285,321 +396,495 @@ export default function SettingsPage({ theme, setTheme }) {
                   </div>
                 )}
 
-                <div className="form-group" style={{ marginBottom: '12px' }}>
-                  <label className="input-label">New Password</label>
+                <div className="settings-form-row">
+                  <div className="field-meta">
+                    <label className="field-title">New Password</label>
+                    <span className="field-hint">Minimum 6 characters</span>
+                  </div>
                   <input
                     type="password"
-                    className="auth-input input-compact"
-                    placeholder="New password (min 6 chars)"
+                    className="settings-text-input"
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     required
                   />
                 </div>
 
-                <div className="form-group" style={{ marginBottom: '16px' }}>
-                  <label className="input-label">Confirm New Password</label>
+                <div className="settings-form-row">
+                  <div className="field-meta">
+                    <label className="field-title">Confirm Password</label>
+                  </div>
                   <input
                     type="password"
-                    className="auth-input input-compact"
-                    placeholder="Re-enter new password"
+                    className="settings-text-input"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     required
                   />
                 </div>
 
-                <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
-                  <button
-                    type="submit"
-                    className="btn-primary"
-                    disabled={pwdSubmitting}
-                  >
-                    {pwdSubmitting
-                      ? (hasPassword ? 'Updating...' : 'Setting Password...')
-                      : (hasPassword ? 'Change Password' : 'Set Password')}
+                <div className="settings-card-actions">
+                  <button type="submit" className="secondary-action-btn" disabled={pwdSubmitting}>
+                    {pwdSubmitting ? 'Updating...' : (hasPassword ? 'Change Password' : 'Set Password')}
                   </button>
                 </div>
               </form>
+            </div>
 
-              <hr className="settings-divider" style={{ marginTop: '20px' }} />
+            {/* Sign Out Card */}
+            <div className="settings-danger-card" style={{ marginTop: '24px' }}>
+              <div className="danger-left">
+                <span className="danger-title">Sign Out of Session</span>
+                <span className="danger-hint">Safely end active session on this device. Local files remain intact.</span>
+              </div>
+              <button type="button" className="danger-action-btn" onClick={handleLogout}>
+                <LogOut size={14} />
+                <span>Log Out</span>
+              </button>
+            </div>
+          </div>
+        )}
 
-              <div className="setting-item-row" style={{ marginTop: '12px' }}>
-                <div>
-                  <div className="setting-label text-danger">Sign Out</div>
-                  <div className="setting-description">End active session on this device</div>
+        {/* 2. EDITOR SECTION */}
+        {activeTab === 'editor' && (
+          <div className="settings-section-container">
+            <div className="section-title-wrap">
+              <h3 className="section-heading">Editor Preferences</h3>
+              <p className="section-subtext">Configure Markdown writing canvas, line spacing, and auto-persistence</p>
+            </div>
+
+            <div className="settings-card-group">
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Editor Font Size</label>
+                  <span className="field-hint">Adjust comfortable typography scale</span>
                 </div>
-                <button type="button" className="btn-danger" onClick={handleLogout}>
-                  <LogOut size={14} style={{ marginRight: '6px' }} />
-                  Log Out
-                </button>
+                <div className="segmented-font-selector">
+                  {['small', 'medium', 'large'].map((size) => (
+                    <button
+                      key={size}
+                      type="button"
+                      className={`font-select-btn ${editorFontSize === size ? 'active' : ''}`}
+                      onClick={() => handleFontSizeChange(size)}
+                    >
+                      {size.charAt(0).toUpperCase() + size.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Autosave Engine</label>
+                  <span className="field-hint">Debounced 750ms background file flush with integrity hash</span>
+                </div>
+                <span className="status-badge-emerald">Active (Local File I/O)</span>
+              </div>
+
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Bi-Directional WikiLinks</label>
+                  <span className="field-hint">Type [[Note Title]] to auto-link and update knowledge graph</span>
+                </div>
+                <span className="status-badge-blue">Enabled</span>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* 3. Appearance */}
-        <div className="settings-accordion-card">
-          <button
-            type="button"
-            className="settings-accordion-header"
-            onClick={() => toggleSection('appearance')}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <Palette size={16} className="accordion-icon" />
-              <span className="accordion-title">Appearance</span>
+        {/* 3. APPEARANCE SECTION */}
+        {activeTab === 'appearance' && (
+          <div className="settings-section-container">
+            <div className="section-title-wrap">
+              <h3 className="section-heading">Appearance & Themes</h3>
+              <p className="section-subtext">Customize interface brightness and brand accent colors</p>
             </div>
-            {expandedSection === 'appearance' ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          </button>
 
-          {expandedSection === 'appearance' && (
-            <div className="settings-accordion-body">
-              <div className="setting-item-row">
-                <div>
-                  <div className="setting-label">Theme Mode</div>
-                  <div className="setting-description">Toggle Dark / Light interface theme</div>
+            <div className="settings-card-group">
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Theme Mode</label>
+                  <span className="field-hint">Switch between Dark, Light, or follow System OS preference</span>
                 </div>
                 <ThemeToggle theme={theme} setTheme={setTheme} />
               </div>
-            </div>
-          )}
-        </div>
 
-        {/* 4. Editor */}
-        <div className="settings-accordion-card">
-          <button
-            type="button"
-            className="settings-accordion-header"
-            onClick={() => toggleSection('editor')}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <FileCode size={16} className="accordion-icon" />
-              <span className="accordion-title">Editor</span>
-            </div>
-            {expandedSection === 'editor' ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          </button>
-
-          {expandedSection === 'editor' && (
-            <div className="settings-accordion-body">
-              <div className="setting-item-row">
-                <div>
-                  <div className="setting-label">Autosave Engine</div>
-                  <div className="setting-description">Continuous local file persistence</div>
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Brand Accent Color</label>
+                  <span className="field-hint">Primary interactive highlight color</span>
                 </div>
-                <span className="setting-value-tag success">Active (Instant)</span>
-              </div>
-
-              <div className="setting-item-row">
-                <div>
-                  <div className="setting-label">WikiLink Syntax</div>
-                  <div className="setting-description">Bi-directional linking e.g. [[Note Title]]</div>
+                <div className="accent-color-swatches">
+                  {accentOptions.map((opt) => (
+                    <button
+                      key={opt.color}
+                      type="button"
+                      className={`accent-swatch-circle ${accentColor === opt.color ? 'active' : ''}`}
+                      style={{ background: opt.color }}
+                      onClick={() => handleAccentChange(opt.color)}
+                      title={opt.name}
+                    />
+                  ))}
                 </div>
-                <span className="setting-value-tag">Enabled</span>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* 5. Notes */}
-        <div className="settings-accordion-card">
-          <button
-            type="button"
-            className="settings-accordion-header"
-            onClick={() => toggleSection('notes')}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <BookOpen size={16} className="accordion-icon" />
-              <span className="accordion-title">Notes</span>
+        {/* 4. SYNC SECTION */}
+        {activeTab === 'sync' && (
+          <div className="settings-section-container">
+            <div className="section-title-wrap">
+              <h3 className="section-heading">Synchronization Center</h3>
+              <p className="section-subtext">Multi-device sync: Google Drive Cloud Sync and Encrypted P2P LAN Sync</p>
             </div>
-            {expandedSection === 'notes' ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          </button>
 
-          {expandedSection === 'notes' && (
-            <div className="settings-accordion-body">
-              <div className="setting-item-row">
-                <div>
-                  <div className="setting-label">Default Storage</div>
-                  <div className="setting-description">Local disk Markdown storage</div>
-                </div>
-                <span className="setting-value-tag">SQLite + Markdown</span>
+            <div className="settings-card-group">
+              <div className="subcard-header">
+                <GoogleDriveIcon size={20} />
+                <h4 className="subcard-title">Google Drive Cloud Storage</h4>
               </div>
 
-              <div className="setting-item-row">
-                <div>
-                  <div className="setting-label">Offline-First Architecture</div>
-                  <div className="setting-description">Local Express backend + SQLite engine</div>
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Google Account</label>
+                  <span className="field-hint">Identity provider for central account credentials</span>
                 </div>
-                <span className="setting-value-tag success">Enabled</span>
+                {googleAccountStatus.connected ? (
+                  <span className="status-badge-emerald">Connected ({googleAccountStatus.email})</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="secondary-action-btn"
+                    onClick={() => { window.location.href = '/api/auth/google'; }}
+                  >
+                    Connect Google Account
+                  </button>
+                )}
               </div>
-            </div>
-          )}
-        </div>
 
-        {/* 6. Sync */}
-        <div className="settings-accordion-card">
-          <button
-            type="button"
-            className="settings-accordion-header"
-            onClick={() => toggleSection('sync')}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <RefreshCw size={16} className="accordion-icon" />
-              <span className="accordion-title">Sync</span>
-            </div>
-            {expandedSection === 'sync' ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          </button>
-
-          {expandedSection === 'sync' && (
-            <div className="settings-accordion-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              
-              {/* ONLINE SYNC */}
-              <div style={{ background: 'var(--bg-app)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', padding: '14px' }}>
-                <div style={{ fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
-                  Online
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Google Drive Vault Sync</label>
+                  <span className="field-hint">Cloud folder: "SyncNote" · Notes synced automatically</span>
                 </div>
-                <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                  Authentication and cloud storage synchronization are managed separately.
-                </div>
-
-                {/* Google Account Row */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', background: 'var(--bg-input)', borderRadius: 'var(--radius-sm)', marginBottom: '8px', fontSize: '0.78rem' }}>
-                  <div>
-                    <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Google Account: </span>
-                    {googleAccountStatus.connected ? (
-                      <span style={{ color: 'var(--accent-emerald)', fontWeight: 600 }}>
-                        ● Connected {googleAccountStatus.email ? `(${googleAccountStatus.email})` : ''}
-                      </span>
-                    ) : (
-                      <span style={{ color: 'var(--text-muted)' }}>○ Not Connected</span>
-                    )}
+                {(googleDriveStatus?.authRequired || googleDriveStatus?.syncState === 'AUTHENTICATION REQUIRED') ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
+                    <span className="status-badge-amber" style={{ color: '#d97706', background: 'rgba(217, 119, 6, 0.1)', border: '1px solid rgba(217, 119, 6, 0.3)', padding: '2px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 600 }}>
+                      Authentication required
+                    </span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted, #888)' }}>
+                      Reconnect Google Drive to continue cloud synchronization.
+                    </span>
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+                      <button
+                        type="button"
+                        className="primary-action-btn"
+                        onClick={() => { window.location.href = '/api/auth/google/drive'; }}
+                      >
+                        Reconnect Google Drive
+                      </button>
+                      <button
+                        type="button"
+                        className="danger-ghost-btn"
+                        onClick={() => sync?.disconnectDrive && sync.disconnectDrive()}
+                      >
+                        Disconnect
+                      </button>
+                    </div>
                   </div>
-                  {!googleAccountStatus.connected && (
+                ) : googleDriveStatus.connected ? (
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <button
                       type="button"
-                      className="btn-secondary"
-                      onClick={() => { window.location.href = '/api/auth/google'; }}
-                      style={{ padding: '3px 10px', fontSize: '0.72rem' }}
+                      className="primary-action-btn"
+                      disabled={sync?.isSyncing || syncingNow}
+                      onClick={async () => {
+                        setSyncingNow(true);
+                        try {
+                          if (sync?.triggerSync) await sync.triggerSync();
+                          else await apiClient.post('/api/sync/gdrive/sync-now');
+                        } catch (e) {}
+                        setSyncingNow(false);
+                      }}
                     >
-                      Connect Google
+                      <RefreshCw size={12} className={(sync?.isSyncing || syncingNow) ? 'spin' : ''} />
+                      <span>{(sync?.isSyncing || syncingNow) ? 'Syncing...' : 'Sync Now'}</span>
                     </button>
-                  )}
-                </div>
-
-                {/* Google Drive Sync Row */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '12px', background: 'var(--bg-input)', borderRadius: 'var(--radius-sm)', fontSize: '0.78rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <GoogleDriveIcon size={22} />
-                      <div>
-                        <div style={{ fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span>Google Drive Sync</span>
-                          <span style={{ fontSize: '0.68rem', padding: '1px 6px', borderRadius: '3px', background: 'rgba(99, 102, 241, 0.12)', color: 'var(--accent-primary)', fontWeight: 600 }}>
-                            Folder: SyncNote
-                          </span>
-                        </div>
-                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                          {googleDriveStatus.connected ? (
-                            <span style={{ color: 'var(--accent-emerald)', fontWeight: 600 }}>
-                              ● Connected {googleDriveStatus.email ? `(${googleDriveStatus.email})` : ''}
-                            </span>
-                          ) : (
-                            <span style={{ color: 'var(--text-muted)' }}>○ Not Connected</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      {googleDriveStatus.connected && (
-                        <button
-                          type="button"
-                          className="btn-primary"
-                          disabled={sync?.isSyncing || syncingNow}
-                          onClick={async () => {
-                            setSyncingNow(true);
-                            try {
-                              if (sync?.triggerSync) {
-                                await sync.triggerSync();
-                              } else {
-                                await apiClient.post('/api/sync/gdrive/sync-now');
-                              }
-                            } catch (e) {}
-                            setSyncingNow(false);
-                          }}
-                          style={{ padding: '4px 12px', fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: '4px' }}
-                        >
-                          <RefreshCw size={12} className={(sync?.isSyncing || syncingNow) ? 'spin' : ''} />
-                          <span>{(sync?.isSyncing || syncingNow) ? 'Syncing...' : 'Sync Now'}</span>
-                        </button>
-                      )}
-
-                      {googleDriveStatus.connected ? (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          onClick={async () => {
-                            if (sync?.disconnectDrive) {
-                              await sync.disconnectDrive();
-                            } else {
-                              await apiClient.post('/api/auth/google/drive/disconnect');
-                            }
-                          }}
-                          style={{ padding: '4px 10px', fontSize: '0.72rem', color: 'var(--accent-danger)' }}
-                        >
-                          Disconnect
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn-primary"
-                          onClick={() => { window.location.href = '/api/auth/google/drive'; }}
-                          style={{ padding: '4px 10px', fontSize: '0.72rem' }}
-                        >
-                          Connect Google Drive
-                        </button>
-                      )}
-                    </div>
+                    <button
+                      type="button"
+                      className="danger-ghost-btn"
+                      onClick={() => sync?.disconnectDrive && sync.disconnectDrive()}
+                    >
+                      Disconnect
+                    </button>
                   </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid var(--border-subtle)', paddingTop: '8px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                    <div>
-                      Pending Google Sync: <strong style={{ color: (sync?.pendingGoogleCount || 0) > 0 ? 'var(--accent-warning)' : 'var(--text-primary)' }}>{sync?.pendingGoogleCount || 0}</strong> note{(sync?.pendingGoogleCount || 0) === 1 ? '' : 's'}
-                    </div>
-                    <div>
-                      Last Sync: <strong style={{ color: 'var(--text-primary)' }}>{sync?.lastSyncedAt ? formatRelativeTime(sync.lastSyncedAt) : 'Never'}</strong>
-                    </div>
-                  </div>
-                </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="primary-action-btn"
+                    onClick={() => { window.location.href = '/api/auth/google/drive'; }}
+                  >
+                    Connect Google Drive
+                  </button>
+                )}
               </div>
 
-              {/* LAN DEVICES CARD */}
-              <div style={{ background: 'var(--bg-app)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', padding: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div>
-                  <div style={{ fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>
-                    LAN Devices
-                  </div>
-                  <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
-                    {sync.pairedDevices && sync.pairedDevices.length > 0
-                      ? `${sync.pairedDevices.length} device${sync.pairedDevices.length === 1 ? '' : 's'} on local network`
-                      : 'Peer-to-peer sync over local Wi-Fi'}
-                  </div>
-                </div>
+              <div className="sync-stats-summary-row">
+                <span>Pending Cloud Uploads: <strong>{sync?.pendingGoogleCount || 0}</strong></span>
+                <span>Last Cloud Sync: <strong>{sync?.lastSyncedAt ? formatRelativeTime(sync.lastSyncedAt) : 'Never'}</strong></span>
+              </div>
+            </div>
+
+            {/* LAN Sync Card */}
+            <div className="settings-card-group" style={{ marginTop: '20px' }}>
+              <div className="subcard-header">
+                <Wifi size={18} />
+                <h4 className="subcard-title">Local Network (LAN) Peer Sync</h4>
+              </div>
+
+              <p className="settings-card-desc">
+                Sync notes peer-to-peer over local Wi-Fi with cryptographic device signatures without sending unencrypted data to the public internet.
+              </p>
+
+              <div className="settings-card-actions" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                <span className="lan-paired-counter">
+                  {sync?.pairedDevices?.length || 0} paired device{(sync?.pairedDevices?.length || 0) === 1 ? '' : 's'} on local network
+                </span>
                 <button
                   type="button"
-                  className="btn-primary"
+                  className="primary-action-btn"
                   onClick={() => navigate('/settings/sync/lan')}
-                  style={{ padding: '6px 14px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
                 >
-                  <span>View LAN Devices</span>
+                  <span>Open LAN Sync Manager</span>
                   <ArrowRight size={13} />
                 </button>
               </div>
-
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
-      </div>
+        {/* 5. AI / OLLAMA SECTION */}
+        {activeTab === 'ai' && (
+          <div className="settings-section-container">
+            <div className="section-title-wrap">
+              <h3 className="section-heading">Local AI & Ollama Integration</h3>
+              <p className="section-subtext">Zero-cloud private local LLM inference for semantic conflict resolution</p>
+            </div>
+
+            <div className="settings-card-group">
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Ollama Daemon Status</label>
+                  <span className="field-hint">
+                    {ollamaStatus?.available 
+                      ? `Local HTTP daemon at ${ollamaStatus?.host || 'http://127.0.0.1:11434'}`
+                      : 'Start Ollama to use local AI features.'}
+                  </span>
+                </div>
+                {ollamaStatus?.available ? (
+                  <span className="status-badge-emerald">● Online ({ollamaStatus.configuredModel || 'llama3.2:1b'})</span>
+                ) : (
+                  <span className="status-badge-amber">○ Ollama Offline</span>
+                )}
+              </div>
+
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Configured Model</label>
+                  <span className="field-hint">Quantized local model used for structured JSON merge reconciliation</span>
+                </div>
+                <span className="monospace-tag">{ollamaStatus?.configuredModel || 'llama3.2:1b'}</span>
+              </div>
+
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Privacy Guarantee</label>
+                  <span className="field-hint">Notes are never transmitted to external cloud AI APIs</span>
+                </div>
+                <span className="status-badge-emerald">100% Offline-First</span>
+              </div>
+            </div>
+
+            {/* Conflict Metrics Card */}
+            <div className="settings-card-group" style={{ marginTop: '20px' }}>
+              <div className="subcard-header">
+                <Sparkles size={16} />
+                <h4 className="subcard-title">Semantic Resolution Performance Metrics</h4>
+              </div>
+
+              {conflictMetrics && conflictMetrics.totalConflicts > 0 ? (
+                <div className="metrics-triad-grid">
+                  <div className="metric-box">
+                    <span className="m-val">{conflictMetrics.totalConflicts}</span>
+                    <span className="m-lbl">Total Conflicts Detected</span>
+                  </div>
+                  <div className="metric-box">
+                    <span className="m-val text-success">{conflictMetrics.aiAcceptanceRate}%</span>
+                    <span className="m-lbl">AI Acceptance Rate</span>
+                  </div>
+                  <div className="metric-box">
+                    <span className="m-val text-primary">{conflictMetrics.avgAiLatencyMs}ms</span>
+                    <span className="m-lbl">Average AI Inference Latency</span>
+                  </div>
+                </div>
+              ) : (
+                <p className="empty-subtext">
+                  No concurrent conflicts resolved yet. Metrics will appear here as multi-device edits are reconciled.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* 6. STORAGE SECTION */}
+        {activeTab === 'storage' && (
+          <div className="settings-section-container">
+            <div className="section-title-wrap">
+              <h3 className="section-heading">Local Storage & Database</h3>
+              <p className="section-subtext">Direct physical file system storage and SQLite metadata indexing</p>
+            </div>
+
+            <div className="settings-card-group">
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Notes Physical Directory</label>
+                  <span className="field-hint">Physical .md files on your machine</span>
+                </div>
+                <div className="copyable-path-card" onClick={copyPath} title="Click to copy full path">
+                  <span className="path-text">{storagePath || 'data/notes'}</span>
+                  <button type="button" className="copy-icon-btn">
+                    {copiedStorage ? <Check size={13} className="text-success" /> : <Copy size={13} />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Database Storage</label>
+                  <span className="field-hint">SQLite WAL mode database storing diff hunks & version history</span>
+                </div>
+                <span className="monospace-tag">better-sqlite3 / syncnote.db</span>
+              </div>
+
+              <div className="settings-form-row">
+                <div className="field-meta">
+                  <label className="field-title">Automatic Backup</label>
+                  <span className="field-hint">Safety database snapshot created before startup</span>
+                </div>
+                <span className="status-badge-emerald">syncnote.db.bak Verified</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 7. KEYBOARD SHORTCUTS SECTION */}
+        {activeTab === 'shortcuts' && (
+          <div className="settings-section-container">
+            <div className="section-title-wrap">
+              <h3 className="section-heading">Keyboard Shortcuts</h3>
+              <p className="section-subtext">Quick navigation and productivity commands for SyncNote</p>
+            </div>
+
+            <div className="settings-card-group">
+              <div className="shortcut-table-grid">
+                <div className="shortcut-row-item">
+                  <span className="action-desc">Open Command Palette / Search</span>
+                  <div className="kbd-cluster"><kbd>Ctrl</kbd> + <kbd>K</kbd></div>
+                </div>
+                <div className="shortcut-row-item">
+                  <span className="action-desc">Create New Note</span>
+                  <div className="kbd-cluster"><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>N</kbd></div>
+                </div>
+                <div className="shortcut-row-item">
+                  <span className="action-desc">Open Knowledge Graph</span>
+                  <div className="kbd-cluster"><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>G</kbd></div>
+                </div>
+                <div className="shortcut-row-item">
+                  <span className="action-desc">Close Modal / Dismiss Dialog</span>
+                  <div className="kbd-cluster"><kbd>Esc</kbd></div>
+                </div>
+                <div className="shortcut-row-item">
+                  <span className="action-desc">Insert WikiLink Connection</span>
+                  <div className="kbd-cluster"><kbd>[[</kbd></div>
+                </div>
+                <div className="shortcut-row-item">
+                  <span className="action-desc">Format Bold Text</span>
+                  <div className="kbd-cluster"><kbd>**</kbd></div>
+                </div>
+                <div className="shortcut-row-item">
+                  <span className="action-desc">Format Italic Text</span>
+                  <div className="kbd-cluster"><kbd>*</kbd></div>
+                </div>
+                <div className="shortcut-row-item">
+                  <span className="action-desc">Code Block</span>
+                  <div className="kbd-cluster"><kbd>```</kbd></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+ 
+        {/* 8. ABOUT SYNCNOTE SECTION */}
+        {activeTab === 'about' && (
+          <div className="settings-section-container">
+            <div className="section-title-wrap">
+              <h3 className="section-heading">About SyncNote</h3>
+              <p className="section-subtext">Application details, storage architecture, and connectivity matrix</p>
+            </div>
+
+            <div className="settings-card-group about-minimal-card">
+              <div className="about-identity-block">
+                <div className="about-title-row">
+                  <h4 className="about-app-name">SyncNote</h4>
+                  <span className="app-version-pill">Version 1.0.0</span>
+                </div>
+                <p className="about-summary-text">
+                  Offline-first intelligent knowledge management with AI-assisted semantic synchronization.
+                </p>
+              </div>
+
+              <div className="about-spec-grid">
+                <div className="about-spec-row">
+                  <span className="spec-label">Storage</span>
+                  <span className="spec-value">SQLite + Markdown (.md)</span>
+                </div>
+                <div className="about-spec-row">
+                  <span className="spec-label">AI</span>
+                  <span className="spec-value">Ollama • Local</span>
+                </div>
+                <div className="about-spec-row">
+                  <span className="spec-label">Sync</span>
+                  <span className="spec-value">LAN • Local &nbsp;|&nbsp; Cloud • Online/Optional</span>
+                </div>
+              </div>
+
+              <div className="about-connectivity-matrix">
+                <div className="matrix-column">
+                  <div className="matrix-header offline-tag">OFFLINE / LOCAL</div>
+                  <ul className="matrix-list">
+                    <li>Markdown notes</li>
+                    <li>SQLite metadata</li>
+                    <li>Version history</li>
+                    <li>Local editing</li>
+                    <li>Ollama AI</li>
+                    <li>LAN Sync</li>
+                  </ul>
+                </div>
+
+                <div className="matrix-column">
+                  <div className="matrix-header online-tag">ONLINE / OPTIONAL</div>
+                  <ul className="matrix-list">
+                    <li>Cloud synchronization (Optional)</li>
+                    <li>Google Drive (Optional)</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+      </main>
     </div>
   );
 }
