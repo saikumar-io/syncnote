@@ -1140,8 +1140,8 @@ const SyncQueueModel = {
             if (!item.user_id && note.user_id) {
               db.prepare("UPDATE sync_queue SET user_id = ? WHERE id = ?").run(note.user_id, item.id);
             }
-            if (note.sync_mode === 'local') {
-              // Note is explicitly LOCAL: stale sync queue operation is no longer applicable
+            if (note.sync_mode === 'local' || note.sync_mode === 'lan') {
+              // Note is explicitly LOCAL or LAN-only: stale sync queue operation is no longer applicable
               db.prepare("DELETE FROM sync_queue WHERE id = ?").run(item.id);
             } else if ((note.sync_mode === 'cloud' || note.sync_mode === 'google') && note.sync_state === 'SYNCED') {
               // Note is already synced to Google Drive with no other sync destination
@@ -1185,8 +1185,10 @@ const SyncQueueModel = {
         const n = db.prepare('SELECT user_id, sync_mode FROM notes WHERE id = ?').get(entityId);
         if (n) {
           targetUserId = n.user_id;
-          // Never enqueue sync operations for LOCAL notes
-          if (n.sync_mode === 'local' && operation !== 'DELETE_NOTE') {
+          const payloadMode = (typeof payload === 'object' && payload !== null) ? payload.sync_mode : null;
+          const effectiveMode = payloadMode || n.sync_mode;
+          // Never enqueue sync operations for LOCAL or LAN-only notes
+          if ((effectiveMode === 'local' || effectiveMode === 'lan') && operation !== 'DELETE_NOTE') {
             return null;
           }
         }
@@ -1197,8 +1199,8 @@ const SyncQueueModel = {
     }
     targetUserId = targetUserId || 'usr_local_default';
 
-    // If payload contains sync_mode === 'local', never enqueue unless it's a remote deletion
-    if (typeof payload === 'object' && payload !== null && payload.sync_mode === 'local' && operation !== 'DELETE_NOTE') {
+    // If payload contains sync_mode === 'local' or 'lan', never enqueue unless it's a remote deletion
+    if (typeof payload === 'object' && payload !== null && (payload.sync_mode === 'local' || payload.sync_mode === 'lan') && operation !== 'DELETE_NOTE') {
       return null;
     }
 

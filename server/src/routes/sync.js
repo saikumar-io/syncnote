@@ -165,19 +165,12 @@ router.get('/status', optionalAuth, async (req, res) => {
     const isAllLocal = allNotes.length > 0 && allNotes.every(n => n.sync_mode === 'local');
     const hasSyncEnabledNotes = allNotes.some(n => n.sync_mode !== 'local');
 
-    // Calculate distinct pending sync items (avoid double-counting between sync_queue and pendingGoogleItems)
-    const pendingEntityIds = new Set();
+    // Pending Count Rule:
+    // Pending must represent ONLY actual synchronization operations that are currently waiting to complete.
+    // It must NOT count total notes, total notebooks, local note edits, offline peers, or failed attempts.
     const queuePending = SyncQueueModel.getPending(userId);
-    queuePending.forEach(item => {
-      if (item.status === 'PENDING') {
-        pendingEntityIds.add(`${item.entity_type}:${item.entity_id}`);
-      }
-    });
-    pendingGoogleItems.forEach(item => {
-      pendingEntityIds.add(`NOTE:${item.id}`);
-    });
-
-    const activePendingCount = pendingEntityIds.size;
+    const activePendingOperations = queuePending.filter(item => item.status === 'PENDING');
+    const activePendingCount = activePendingOperations.length;
 
     return res.json({
       status: 'ok',

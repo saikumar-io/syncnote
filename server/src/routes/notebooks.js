@@ -35,8 +35,8 @@ router.post('/', (req, res) => {
     const id = `nb_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const newNotebook = NotebookModel.create(id, name.trim(), req.user.id, parent_id || null);
 
-    const hasSyncEnabledNotes = NoteModel.getAll(req.user.id).some(n => n.sync_mode !== 'local');
-    if (hasSyncEnabledNotes) {
+    const hasCloudNotes = NoteModel.getAll(req.user.id).some(n => n.sync_mode === 'cloud' || n.sync_mode === 'google' || n.sync_mode === 'both');
+    if (hasCloudNotes) {
       SyncQueueModel.enqueue({
         entityType: 'FOLDER',
         entityId: id,
@@ -88,8 +88,8 @@ router.put('/:id', (req, res) => {
       }
     });
 
-    const hasSyncEnabledNotes = NoteModel.getAll(req.user.id).some(n => n.sync_mode !== 'local');
-    if (hasSyncEnabledNotes) {
+    const hasCloudNotes = NoteModel.getAll(req.user.id).some(n => n.sync_mode === 'cloud' || n.sync_mode === 'google' || n.sync_mode === 'both');
+    if (hasCloudNotes) {
       SyncQueueModel.enqueue({
         entityType: 'FOLDER',
         entityId: id,
@@ -135,8 +135,8 @@ router.delete('/:id', (req, res) => {
     NotebookModel.delete(id, req.user.id);
 
     SyncQueueModel.invalidateForEntity('FOLDER', id, req.user.id);
-    const hasSyncEnabledNotes = NoteModel.getAll(req.user.id).some(n => n.sync_mode !== 'local');
-    if (hasSyncEnabledNotes) {
+    const hasCloudNotes = NoteModel.getAll(req.user.id).some(n => n.sync_mode === 'cloud' || n.sync_mode === 'google' || n.sync_mode === 'both');
+    if (hasCloudNotes) {
       SyncQueueModel.enqueue({
         entityType: 'FOLDER',
         entityId: id,

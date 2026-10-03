@@ -174,6 +174,9 @@ export default function LanSyncPage() {
       }, 5000);
     } finally {
       setSyncingDeviceId(null);
+      if (sync.refreshSyncStatus) {
+        sync.refreshSyncStatus(false).catch(() => {});
+      }
     }
   };
 

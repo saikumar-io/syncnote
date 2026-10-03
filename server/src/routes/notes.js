@@ -212,14 +212,16 @@ router.post('/', async (req, res) => {
           userId: req.user.id
         });
       }
-    } else if (finalSyncMode !== 'local') {
-      SyncQueueModel.enqueue({
-        entityType: 'NOTE',
-        entityId: id,
-        operation: 'CREATE_NOTE',
-        payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode },
-        userId: req.user.id
-      });
+    } else if (finalSyncMode === 'both') {
+      if (!gdriveSyncSuccess) {
+        SyncQueueModel.enqueue({
+          entityType: 'NOTE',
+          entityId: id,
+          operation: 'CREATE_NOTE',
+          payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode },
+          userId: req.user.id
+        });
+      }
     }
 
     res.status(201).json({ 
@@ -362,15 +364,16 @@ router.put('/:id', async (req, res) => {
             userId: req.user.id
           });
         }
-      } else {
-        // Mode is 'lan' or 'both'
-        SyncQueueModel.enqueue({
-          entityType: 'NOTE',
-          entityId: id,
-          operation: 'UPDATE_NOTE',
-          payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode },
-          userId: req.user.id
-        });
+      } else if (finalSyncMode === 'both') {
+        if (!gdriveSyncSuccess) {
+          SyncQueueModel.enqueue({
+            entityType: 'NOTE',
+            entityId: id,
+            operation: 'UPDATE_NOTE',
+            payload: { id, title: finalTitle, content: finalContent, notebook_id: finalNotebookId, sync_mode: finalSyncMode },
+            userId: req.user.id
+          });
+        }
       }
     }
 
@@ -433,8 +436,8 @@ router.delete('/:id', (req, res) => {
     // Invalidate any existing sync operations for this note
     SyncQueueModel.invalidateForEntity('NOTE', id, req.user.id);
 
-    // Only enqueue DELETE_NOTE for sync engine if the deleted note was sync-enabled (not local)
-    if (existing.sync_mode !== 'local') {
+    // Only enqueue DELETE_NOTE for sync engine if the deleted note was cloud-enabled
+    if (existing.sync_mode === 'cloud' || existing.sync_mode === 'google' || existing.sync_mode === 'both') {
       SyncQueueModel.enqueue({
         entityType: 'NOTE',
         entityId: id,

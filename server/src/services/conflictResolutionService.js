@@ -1,4 +1,4 @@
-const { ConflictModel, NoteModel, VersionModel, SessionModel } = require('../db/database');
+const { ConflictModel, NoteModel, VersionModel, SessionModel, SyncQueueModel } = require('../db/database');
 const { writeNoteFile, readNoteFile, calculateHash } = require('../utils/fileStorage');
 const { computeLineDiffHunks, reconstructVersionContent } = require('../utils/versionControl');
 const { generateSemanticConflictResolution } = require('./ollamaService');
@@ -357,6 +357,9 @@ async function resolveConflict({
 
   // Update session clean state
   SessionModel.upsert(note.id, newVerId, newHash, 'clean', currentUserId);
+
+  // Clear any pending sync queue operations for this note upon resolution
+  SyncQueueModel.markSyncedForEntity('NOTE', note.id, currentUserId);
 
   // Mark conflict as RESOLVED in database
   const resolvedConflict = ConflictModel.resolve(conflict.id, {

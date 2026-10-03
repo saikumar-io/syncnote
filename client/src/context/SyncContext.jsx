@@ -623,10 +623,13 @@ export function SyncProvider({ children }) {
       }
       return res;
     } catch (err) {
-      setSyncStatus('FAILED');
+      setSyncStatus('ERROR');
       throw err;
     } finally {
       setIsSyncing(false);
+      try {
+        await refreshSyncStatus(false);
+      } catch (e) {}
     }
   };
 
