@@ -44,7 +44,8 @@ export default function ConflictResolverModal({
 
       if (propConflict && propConflict.id) {
         setConflict(propConflict);
-        setEditedContent(propConflict.ai_suggested_merge || propConflict.aiSuggestedMerge || propConflict.local_content || '');
+        const isAiValid = propConflict.ai_status === 'AVAILABLE' && Boolean(propConflict.ai_suggested_merge || propConflict.aiSuggestedMerge) && (propConflict.ai_suggested_merge || propConflict.aiSuggestedMerge) !== 'AI suggestion unavailable';
+        setEditedContent(isAiValid ? (propConflict.ai_suggested_merge || propConflict.aiSuggestedMerge) : (propConflict.local_content || ''));
         return;
       }
 
@@ -56,7 +57,8 @@ export default function ConflictResolverModal({
           if (isMounted && res && res.conflicts && res.conflicts.length > 0) {
             const found = res.conflicts[0];
             setConflict(found);
-            setEditedContent(found.ai_suggested_merge || found.aiSuggestedMerge || found.local_content || '');
+            const isAiValid = found.ai_status === 'AVAILABLE' && Boolean(found.ai_suggested_merge || found.aiSuggestedMerge) && (found.ai_suggested_merge || found.aiSuggestedMerge) !== 'AI suggestion unavailable';
+            setEditedContent(isAiValid ? (found.ai_suggested_merge || found.aiSuggestedMerge) : (found.local_content || ''));
           } else {
             setConflict({
               id: `virtual_${Date.now()}`,
@@ -72,7 +74,7 @@ export default function ConflictResolverModal({
               ai_semantic_analysis: 'Sync conflict detected between local and remote versions.',
               ai_common_info: [],
               ai_contradictions: [],
-              ai_suggested_merge: propNote?.content || '',
+              ai_suggested_merge: 'AI suggestion unavailable',
               ai_reasoning: 'Review both versions and select which content to preserve.'
             });
             setEditedContent(propNote?.content || '');
@@ -93,7 +95,7 @@ export default function ConflictResolverModal({
 
   const noteTitle = conflict?.note_title || conflict?.title || propNote?.title || 'Untitled Note';
   const remoteDeviceName = conflict?.remote_device_name || conflict?.deviceName || conflict?.remoteDeviceName || 'Remote Peer';
-  const aiReady = conflict?.ai_status === 'AVAILABLE' && Boolean(conflict?.ai_suggested_merge || conflict?.aiSuggestedMerge);
+  const aiReady = conflict?.ai_status === 'AVAILABLE' && Boolean(conflict?.ai_suggested_merge || conflict?.aiSuggestedMerge) && (conflict?.ai_suggested_merge || conflict?.aiSuggestedMerge) !== 'AI suggestion unavailable';
   const aiGenerating = isLoading || conflict?.ai_status === 'GENERATING';
 
   // Extract structured semantic reconciliation data
@@ -113,7 +115,7 @@ export default function ConflictResolverModal({
     ? conflict.ai_contradictions
     : (Array.isArray(conflict?.aiContradictions) ? conflict.aiContradictions : []);
   const hasContradictions = contradictions.length > 0;
-  const suggestedMerge = conflict?.ai_suggested_merge || conflict?.aiSuggestedMerge || '';
+  const suggestedMerge = aiReady ? (conflict?.ai_suggested_merge || conflict?.aiSuggestedMerge || '') : 'AI suggestion unavailable';
 
   const copyToClipboard = (text, sectionKey) => {
     navigator.clipboard.writeText(text);
@@ -179,7 +181,8 @@ export default function ConflictResolverModal({
       const res = await apiClient.post(`/api/conflicts/${conflict.id}/retry-ai`);
       if (res && res.conflict) {
         setConflict(res.conflict);
-        setEditedContent(res.conflict.ai_suggested_merge || res.conflict.aiSuggestedMerge || res.conflict.local_content || '');
+        const isAiValid = res.conflict.ai_status === 'AVAILABLE' && Boolean(res.conflict.ai_suggested_merge || res.conflict.aiSuggestedMerge) && (res.conflict.ai_suggested_merge || res.conflict.aiSuggestedMerge) !== 'AI suggestion unavailable';
+        setEditedContent(isAiValid ? (res.conflict.ai_suggested_merge || res.conflict.aiSuggestedMerge) : (res.conflict.local_content || ''));
       }
     } catch (err) {
       setErrorMessage(err.message || 'AI assistant is still unavailable. Verify Ollama is running.');
@@ -408,7 +411,7 @@ export default function ConflictResolverModal({
                   className="studio-text-action-btn reset"
                   onClick={() => {
                     setIsEditing(false);
-                    setEditedContent(suggestedMerge || localContent);
+                    setEditedContent(aiReady ? (suggestedMerge || localContent) : localContent);
                   }}
                 >
                   Reset to AI Suggestion
@@ -425,7 +428,7 @@ export default function ConflictResolverModal({
               />
             ) : (
               <pre className="merge-preview-canvas">
-                {suggestedMerge || localContent || '(Empty Merge Result)'}
+                {aiReady ? (suggestedMerge || '(Empty Merge Result)') : 'AI suggestion unavailable'}
               </pre>
             )}
           </div>

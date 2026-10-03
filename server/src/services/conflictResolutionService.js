@@ -96,7 +96,7 @@ async function createOrRecordConflict({
         aiStatus: aiResult.available ? 'AVAILABLE' : 'UNAVAILABLE',
         aiSummary: aiResult.data.summary || aiResult.data.semantic_analysis,
         aiChanges: aiResult.data.changesFromAncestor,
-        aiSuggestedMerge: aiResult.data.suggested_merge || aiResult.data.suggestedMerge,
+        aiSuggestedMerge: aiResult.available ? (aiResult.data.suggested_merge || aiResult.data.suggestedMerge) : 'AI suggestion unavailable',
         aiReasoning: aiResult.data.reasoning || aiResult.data.semantic_analysis,
         aiSemanticAnalysis: aiResult.data.semantic_analysis || aiResult.data.reasoning || aiResult.data.summary,
         aiCommonInfo: aiResult.data.common_information || [],
@@ -149,7 +149,7 @@ async function retryAiAnalysis(conflictId, userId) {
         aiStatus: aiResult.available ? 'AVAILABLE' : 'UNAVAILABLE',
         aiSummary: aiResult.data.summary || aiResult.data.semantic_analysis,
         aiChanges: aiResult.data.changesFromAncestor,
-        aiSuggestedMerge: aiResult.data.suggested_merge || aiResult.data.suggestedMerge,
+        aiSuggestedMerge: aiResult.available ? (aiResult.data.suggested_merge || aiResult.data.suggestedMerge) : 'AI suggestion unavailable',
         aiReasoning: aiResult.data.reasoning || aiResult.data.semantic_analysis,
         aiSemanticAnalysis: aiResult.data.semantic_analysis || aiResult.data.reasoning || aiResult.data.summary,
         aiCommonInfo: aiResult.data.common_information || [],
@@ -237,7 +237,7 @@ async function resolveConflict({
   switch (resolutionMethod) {
     case 'ACCEPT_AI':
       finalContent = conflict.ai_suggested_merge;
-      if (!finalContent && finalContent !== '') {
+      if (!finalContent || conflict.ai_status !== 'AVAILABLE' || finalContent === 'AI suggestion unavailable') {
         throw new Error('No AI suggestion available to accept.');
       }
       versionMessage = message && message.trim() ? message.trim() : `AI Semantic Merge: resolved conflict between local and ${conflict.remote_device_name || 'remote'}`;
@@ -245,7 +245,10 @@ async function resolveConflict({
       break;
 
     case 'EDIT_MERGE':
-      finalContent = typeof customContent === 'string' ? customContent : (conflict.ai_suggested_merge || conflict.local_content);
+      finalContent = typeof customContent === 'string' ? customContent : ((conflict.ai_status === 'AVAILABLE' && conflict.ai_suggested_merge && conflict.ai_suggested_merge !== 'AI suggestion unavailable') ? conflict.ai_suggested_merge : conflict.local_content);
+      if (finalContent === 'AI suggestion unavailable') {
+        finalContent = conflict.local_content;
+      }
       versionMessage = message && message.trim() ? message.trim() : `Manual Edit Merge: resolved conflict between local and ${conflict.remote_device_name || 'remote'}`;
       isAiEdited = 1;
       break;

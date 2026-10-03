@@ -11,7 +11,7 @@ const http = require('http');
 function getOllamaConfig() {
   const host = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
   const model = process.env.OLLAMA_MODEL || 'llama3.2:1b';
-  const timeoutMs = parseInt(process.env.OLLAMA_TIMEOUT_MS || '45000', 10);
+  const timeoutMs = parseInt(process.env.OLLAMA_TIMEOUT_MS || '120000', 10);
 
   return { host, model, timeoutMs };
 }
@@ -20,7 +20,7 @@ function getOllamaConfig() {
  * Helper to make HTTP requests to local Ollama daemon
  * Uses AbortController and strict socket timeouts to prevent hanging or background orphan processes.
  */
-function makeOllamaRequest(endpoint, method = 'GET', data = null, timeoutMs = 45000) {
+function makeOllamaRequest(endpoint, method = 'GET', data = null, timeoutMs = 120000) {
   return new Promise((resolve, reject) => {
     const config = getOllamaConfig();
     const parsedUrl = new URL(endpoint, config.host);
@@ -703,8 +703,8 @@ async function generateSemanticConflictResolution({
           `${localDeviceName} created independent changes.`,
           `${remoteDeviceName} created independent changes.`
         ],
-        suggested_merge: localContent,
-        suggestedMerge: localContent // Safe fallback suggestion to local content for manual review
+        suggested_merge: 'AI suggestion unavailable',
+        suggestedMerge: 'AI suggestion unavailable'
       }
     };
   }
